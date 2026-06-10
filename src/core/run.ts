@@ -10,7 +10,7 @@ import { canDelegate, visibleToRows } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
-import { nextRunId, writeTrace } from "../store/trace";
+import { reserveRunId, writeTrace } from "../store/trace";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -61,7 +61,9 @@ export async function executeRun(
   deps: RunDeps,
   opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; fromRun: string }; triggeredBy: string },
 ): Promise<RunResult> {
-  const runId = nextRunId(deps.ws, opts.agent.id);
+  // reserveRunId atomically claims a unique id (exclusive-create placeholder), so concurrent
+  // same-target delegations in one model turn can't collide; writeTrace overwrites it at the end.
+  const runId = reserveRunId(deps.ws, opts.agent.id);
   const started = new Date().toISOString();
   const t0 = performance.now();
 
