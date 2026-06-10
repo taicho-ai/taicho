@@ -1,9 +1,13 @@
 /** agent.md is canon: YAML frontmatter (the AgentDef minus identity) + markdown body (the SOUL).
  *  Parsed with Bun.YAML (native). The registry table is a derived index of this. */
 import { YAML } from "bun";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, readdir, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import type { Database } from "bun:sqlite";
 import { AgentDef } from "../schemas/agent";
 import { paths } from "./files";
+import { syncRegistry } from "../core/registry";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
@@ -40,4 +44,48 @@ export async function seedRoot(ws: string): Promise<void> {
   });
   await mkdir(paths.agentDir(ws, "root"), { recursive: true });
   await writeFile(file, serializeAgent(root));
+}
+
+export interface RegistryRow { id: string; role: string; is_root: number; }
+
+export interface NewAgentDraft {
+  id: string; role: string; identity: string; tools?: string[];
+}
+
+export function loadIndex(db: Database): RegistryRow[] {
+  return db.query<RegistryRow, []>("SELECT id, role, is_root FROM registry").all();
+}
+
+export async function loadAgent(ws: string, id: string): Promise<AgentDef> {
+  return parseAgent(await readFile(paths.agentFile(ws, id), "utf8"));
+}
+
+/** Full scan agents/<id>/agent.md -> registry. Async; call on boot only when the index is empty. */
+export async function reindex(ws: string, db: Database): Promise<void> {
+  const dir = join(ws, "agents");
+  if (!existsSync(dir)) return;
+  const ids = await readdir(dir);
+  const agents: AgentDef[] = [];
+  for (const id of ids) {
+    const file = paths.agentFile(ws, id);
+    if (!existsSync(file)) continue;
+    try { agents.push(parseAgent(await readFile(file, "utf8"))); }
+    catch (e) { console.error(`skipping ${id}: ${String(e)}`); }
+  }
+  if (agents.length) syncRegistry(db, agents);
+}
+
+export async function createAgent(ws: string, db: Database, draft: NewAgentDraft, _taughtBy: string): Promise<AgentDef> {
+  const file = paths.agentFile(ws, draft.id);
+  if (existsSync(file)) throw new Error(`agent "${draft.id}" already exists`);
+  const agent = AgentDef.parse({
+    id: draft.id, role: draft.role, identity: draft.identity,
+    tools: draft.tools ?? ["write_artifact"],
+    canSee: ["*"], canDelegateTo: [], isRoot: false,
+    created: new Date().toISOString(),
+  });
+  await mkdir(paths.agentDir(ws, agent.id), { recursive: true });
+  await writeFile(file, serializeAgent(agent));
+  syncRegistry(db, [agent]);
+  return agent;
 }
