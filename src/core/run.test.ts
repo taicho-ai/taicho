@@ -8,6 +8,7 @@ import { ensureWorkspace } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadIndex, loadAgent, createAgent } from "../store/roster";
 import { makeDeps, executeRun } from "./run";
+import { readTrace } from "../store/trace";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -49,6 +50,20 @@ test("root create_agent tool persists a worker when approval resolves approve", 
   const root = await loadAgent(ws, "root");
   await executeRun(deps, { agent: root, messages: [{ role: "user", content: "I need an X agent" }], triggeredBy: "user" });
   expect(loadIndex(db).some((r) => r.id === "newbie")).toBe(true);
+  expect(await Bun.file(join(ws, "agents", "newbie", "agent.md")).exists()).toBe(true);
+  const loaded = await loadAgent(ws, "newbie");
+  expect(loaded.identity).toBe("You do X.");
+});
+
+test("root create_agent does NOT mutate the registry when approval rejects", async () => {
+  const { ws, db } = await boot();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("create_agent", { id: "newbie", role: "does X", identity: "You do X." }), text("ok")) as any,
+  });
+  const deps = makeDeps({ ws, db, model, requestApproval: async () => ({ type: "reject" }) });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "I need an X agent" }], triggeredBy: "user" });
+  expect(loadIndex(db).some((r) => r.id === "newbie")).toBe(false);
 });
 
 test("root delegate_task spawns a child run that produces its own trace", async () => {
@@ -67,6 +82,25 @@ test("root delegate_task spawns a child run that produces its own trace", async 
   const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "make a hello doc" }], triggeredBy: "user" });
   expect(res.text).toBe("root done");
   expect(res.trace.delegatedOut.length).toBe(1);
+  const childId = res.trace.delegatedOut[0];
+  const child = readTrace(ws, childId);
+  expect(child.agent).toBe("writer");
+  expect(child.triggeredBy).toBe(res.runId);
+  expect(child.artifacts.length).toBe(1);
+  expect(existsSync(child.artifacts[0])).toBe(true);
+});
+
+test("an agent whose iteration budget is exhausted yields a blocked-outcome trace", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const loopy = await loadAgent(ws, "writer");
+  loopy.budgets.maxIterationsPerRun = 2;
+  const model = new MockLanguageModelV3({
+    doGenerate: (async () => call("write_artifact", { topicSlug: "x", markdown: "y" })) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const res = await executeRun(deps, { agent: loopy, messages: [{ role: "user", content: "loop forever" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("blocked");
 });
 
 test("a thrown model error yields a failed-outcome trace", async () => {
