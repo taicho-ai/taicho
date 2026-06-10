@@ -48,9 +48,10 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext): ToolSet {
       description: "Delegate a goal to another agent by id and receive its result.",
       inputSchema: z.object({ to: z.string(), goal: z.string(), context: z.string().optional() }),
       execute: async ({ to, goal, context }) => {
+        if (!ctx.canDelegate(to)) return { error: `not permitted to delegate to "${to}"` };
         const child = await ctx.runChild({ to, goal, context });
         ctx.delegatedOut.push(child.runId);
-        return { from: to, runId: child.runId, result: child.text };
+        return { to, runId: child.runId, result: child.text };
       },
     });
 

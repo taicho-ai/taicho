@@ -6,7 +6,7 @@ import type { AgentDef } from "../schemas/agent";
 import type { RunTrace } from "../schemas/trace";
 import { assemble } from "./prompt";
 import { runLoop } from "./loop";
-import { visibleTo } from "./registry";
+import { canDelegate, visibleToRows } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
@@ -28,6 +28,7 @@ export interface RunContext {
   delegatedOut: string[];
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   createAgent: (draft: NewAgentDraft) => Promise<AgentDef>;
+  canDelegate: (toId: string) => boolean;
   runChild: (brief: { to: string; goal: string; context?: string }) => Promise<RunResult>;
   findAgents: (query: string, k: number) => AgentHit[];
 }
@@ -68,6 +69,9 @@ export async function executeRun(
     artifacts: [], delegatedOut: [],
     requestApproval: deps.requestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id),
+    canDelegate: (toId) => canDelegate(opts.agent, toId),
+    // TODO(depth-guard): delegate_task -> runChild -> executeRun recursion has no depth/cycle
+    // bound yet; a pathological agent could delegate indefinitely. Tracked for a follow-up slice.
     runChild: async ({ to, goal, context }) => {
       const child = await loadAgent(deps.ws, to);
       return executeRun(deps, {
@@ -77,11 +81,17 @@ export async function executeRun(
         triggeredBy: runId,
       });
     },
-    findAgents: (query, k) => rankAgents(loadIndex(deps.db), query, k),
+    // Discovery respects the caller's visibility ACL, consistent with the inline-roster path.
+    findAgents: (query, k) =>
+      rankAgents(
+        loadIndex(deps.db).filter((r) => opts.agent.canSee.includes("*") || opts.agent.canSee.includes(r.id)),
+        query,
+        k,
+      ),
   };
 
-  const allAgents = await Promise.all(loadIndex(deps.db).map((r) => loadAgent(deps.ws, r.id)));
-  const visible = visibleTo(opts.agent, allAgents);
+  // Visibility from the registry index only — never load every agent's identity (unbounded roster).
+  const visible = visibleToRows(opts.agent, loadIndex(deps.db));
   const { system } = assemble(opts.agent, {
     visibleAgents: visible,
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
@@ -100,7 +110,8 @@ export async function executeRun(
     if (result.text === "[budget exhausted]") outcome = "blocked";
   } catch (e) {
     outcome = "failed";
-    result = { text: `error: ${String(e)}`, toolCalls: {}, tokens: 0, iterations: 0 };
+    console.error(`run ${runId} failed:`, e);
+    result = { text: `error: ${e instanceof Error ? e.message : String(e)}`, toolCalls: {}, tokens: 0, iterations: 0 };
   }
 
   const trace: RunTrace = {

@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { visibleTo, canDelegate } from "./registry";
+import { visibleTo, visibleToRows, canDelegate } from "./registry";
 import type { AgentDef } from "../schemas/agent";
 
 const mk = (id: string, over: Partial<AgentDef> = {}): AgentDef => ({
@@ -22,4 +22,14 @@ test("visibleTo respects an explicit allow-list", () => {
 test("canDelegate honors '*' and explicit ids", () => {
   expect(canDelegate(mk("r", { canDelegateTo: ["*"] }), "x")).toBe(true);
   expect(canDelegate(mk("r", { canDelegateTo: ["a"] }), "x")).toBe(false);
+});
+
+test("visibleToRows filters registry rows by ACL without loading identities", () => {
+  const rows = [
+    { id: "root", role: "orchestrator", is_root: 1 },
+    { id: "a", role: "ra", is_root: 0 },
+    { id: "b", role: "rb", is_root: 0 },
+  ];
+  expect(visibleToRows(mk("root", { canSee: ["*"] }), rows).map((x) => x.id).sort()).toEqual(["a", "b"]);
+  expect(visibleToRows(mk("x", { canSee: ["a"] }), rows).map((x) => x.id)).toEqual(["a"]);
 });

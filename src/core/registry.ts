@@ -15,6 +15,18 @@ export function visibleTo(caller: AgentDef, all: AgentDef[]): { id: string; role
     .map((a) => ({ id: a.id, role: a.role }));
 }
 
+/** Visibility from the registry INDEX (id/role only) — never loads agent identities, so the
+ *  per-run cost stays O(1) file reads regardless of roster size. The caller is already loaded. */
+export function visibleToRows(
+  caller: AgentDef,
+  rows: { id: string; role: string }[],
+): { id: string; role: string }[] {
+  return rows
+    .filter((r) => r.id !== caller.id)
+    .filter((r) => caller.canSee.includes("*") || caller.canSee.includes(r.id))
+    .map((r) => ({ id: r.id, role: r.role }));
+}
+
 export function canDelegate(from: AgentDef, toId: string): boolean {
   return from.canDelegateTo.includes("*") || from.canDelegateTo.includes(toId);
 }

@@ -68,3 +68,28 @@ test("root delegate_task spawns a child run that produces its own trace", async 
   expect(res.text).toBe("root done");
   expect(res.trace.delegatedOut.length).toBe(1);
 });
+
+test("a thrown model error yields a failed-outcome trace", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const model = new MockLanguageModelV3({ doGenerate: (() => { throw new Error("boom"); }) as any });
+  const deps = makeDeps({ ws, db, model });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("failed");
+  expect(res.text).toContain("boom");
+});
+
+test("delegate_task is denied when the caller's ACL forbids the target", async () => {
+  const { ws, db } = await boot();
+  // worker seeded with canDelegateTo:[] (default) but given the delegate_task tool
+  await createAgent(ws, db, { id: "limited", role: "limited", identity: "You delegate.", tools: ["delegate_task"] }, "root");
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "root", goal: "x" }), text("ok")) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const limited = await loadAgent(ws, "limited");
+  const res = await executeRun(deps, { agent: limited, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut.length).toBe(0); // ACL blocked the delegation
+  expect(res.text).toBe("ok");
+});
