@@ -9,7 +9,8 @@ const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
 export function serializeAgent(a: AgentDef): string {
   const { identity, ...meta } = a;
-  return `---\n${YAML.stringify(meta)}\n---\n${identity}\n`;
+  // Block-style YAML (indent 2) keeps agent.md frontmatter human-readable/editable.
+  return `---\n${YAML.stringify(meta, null, 2)}\n---\n${identity}\n`;
 }
 
 export function parseAgent(text: string): AgentDef {
