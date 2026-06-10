@@ -2,6 +2,7 @@
  *  budgets come from AgentDef/config — model-supplied budget params are ignored by design. */
 import { generateText, type ModelMessage, type ToolSet } from "ai";
 import type { AgentDef } from "../schemas/agent";
+import { steerMarker } from "./prompt";
 
 export interface LoopResult {
   text: string;
@@ -17,6 +18,7 @@ export async function runLoop(opts: {
   messages: ModelMessage[];
   tools: ToolSet;
   onStep?: (info: { text?: string; tool?: string }) => void;
+  pollSteer?: () => string | null;
 }): Promise<LoopResult> {
   const counts: Record<string, number> = {};
   let tokens = 0;
@@ -24,6 +26,9 @@ export async function runLoop(opts: {
   const messages = [...opts.messages];
 
   for (; iterations < opts.agent.budgets.maxIterationsPerRun; iterations++) {
+    const steer = opts.pollSteer?.();
+    if (steer) messages.push({ role: "user", content: steerMarker(steer) });
+
     const res = await generateText({
       model: opts.model,
       system: opts.system,
