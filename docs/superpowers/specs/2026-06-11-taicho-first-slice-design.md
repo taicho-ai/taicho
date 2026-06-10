@@ -25,10 +25,16 @@ Turn the existing skeleton (~476 LOC of well-designed but unwired modules) into 
 - Per-agent provider mixing, exemplar promotion, budget-spend accounting beyond token counts.
 - `@`-autocomplete / fuzzy picker UX — exact `@id` is enough for the slice.
 
-**Deferred, tracked after Task-9 review (follow-up slice):**
-- **Delegation depth/cycle guard.** `delegate_task → runChild → executeRun` is recursive with no depth or cycle bound (TODO in `run.ts`). A pathological agent could delegate indefinitely. Real models + approval-gating make this non-exploitable today; harden before autonomous fan-out.
-- **`nextRunId` concurrency.** Read-then-write `max+1`; safe while delegates are serial/awaited, but two overlapping runs for the same agent/day could collide. Needs reservation (or a unique suffix) before concurrent runs land.
-- **Approval `edit` path.** `ProposalCard` offers `[e]dit`, but the slice treats edit as reject (no edit-then-resubmit loop yet).
+**Resolved during review (now in the slice):**
+- **Run-id collision under concurrent delegation** — `executeRun` now uses `reserveRunId` (atomic exclusive-create placeholder), so two same-target delegations in one model turn get distinct ids; a reserved-but-unfinished run leaves an `interrupted` trace.
+- **Visibility/discovery at scale** — `visibleToRows` over the registry index (no per-run identity loads); `find_agents` respects `canSee` and excludes self.
+- **ACL + error contracts** — `delegate_task` enforces `canDelegate` and rejects unknown targets with a recoverable `{error}` (no longer fails the parent run); `create_agent` duplicates return `{error}`.
+
+**Deferred, tracked (follow-up slice):**
+- **Delegation depth/cycle guard.** `delegate_task → runChild → executeRun` has no depth/cycle bound (TODO in `run.ts`). Approval-gating + real models make it non-exploitable today; harden before autonomous fan-out.
+- **Failed-run token accounting.** On a thrown error the trace records `tokens: 0`, discarding tokens spent before the throw (`runLoop` doesn't surface partial usage on the error path).
+- **`runSlash` extraction.** Slash-command glue (`/runs`, `/trace`, `/agents`) lives inline in `App.tsx` and is unit-tested only at the store boundary; extract to a pure module like `parseInput`.
+- **Append-only log keys / approval `edit` path.** Lines key on array index (fine until scrollback/trim lands); `ProposalCard` offers `[e]dit` but the slice treats edit as reject.
 
 ## 3. Core principles (carried from the skeleton's design comments)
 
