@@ -335,7 +335,9 @@ const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
 export function serializeAgent(a: AgentDef): string {
   const { identity, ...meta } = a;
-  return `---\n${YAML.stringify(meta)}---\n${identity}\n`;
+  // Block-style YAML (indent 2) keeps agent.md frontmatter human-readable; the `\n` before the
+  // closing fence is required because Bun.YAML.stringify emits no trailing newline.
+  return `---\n${YAML.stringify(meta, null, 2)}\n---\n${identity}\n`;
 }
 
 export function parseAgent(text: string): AgentDef {
@@ -461,7 +463,7 @@ export async function loadAgent(ws: string, id: string): Promise<AgentDef> {
   return parseAgent(await readFile(paths.agentFile(ws, id), "utf8"));
 }
 
-/** Full scan agents/*/agent.md -> registry. Async; call on boot only when the index is empty. */
+/** Full scan agents/<id>/agent.md -> registry (NOTE: avoid `*` `/` in this comment — it closes the JSDoc). Async; call on boot only when the index is empty. */
 export async function reindex(ws: string, db: Database): Promise<void> {
   const dir = join(ws, "agents");
   if (!existsSync(dir)) return;

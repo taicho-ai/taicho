@@ -25,6 +25,11 @@ Turn the existing skeleton (~476 LOC of well-designed but unwired modules) into 
 - Per-agent provider mixing, exemplar promotion, budget-spend accounting beyond token counts.
 - `@`-autocomplete / fuzzy picker UX — exact `@id` is enough for the slice.
 
+**Deferred, tracked after Task-9 review (follow-up slice):**
+- **Delegation depth/cycle guard.** `delegate_task → runChild → executeRun` is recursive with no depth or cycle bound (TODO in `run.ts`). A pathological agent could delegate indefinitely. Real models + approval-gating make this non-exploitable today; harden before autonomous fan-out.
+- **`nextRunId` concurrency.** Read-then-write `max+1`; safe while delegates are serial/awaited, but two overlapping runs for the same agent/day could collide. Needs reservation (or a unique suffix) before concurrent runs land.
+- **Approval `edit` path.** `ProposalCard` offers `[e]dit`, but the slice treats edit as reject (no edit-then-resubmit loop yet).
+
 ## 3. Core principles (carried from the skeleton's design comments)
 
 - **Files are canon; the DB is a cache.** Deleting `taicho.db` and re-indexing must always reproduce state. (`store/db.ts`, `store/files.ts`)
