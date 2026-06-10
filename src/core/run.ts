@@ -31,6 +31,7 @@ export interface RunContext {
   canDelegate: (toId: string) => boolean;
   runChild: (brief: { to: string; goal: string; context?: string }) => Promise<RunResult>;
   findAgents: (query: string, k: number) => AgentHit[];
+  agentExists: (id: string) => boolean;
 }
 
 export interface RunDeps {
@@ -84,10 +85,13 @@ export async function executeRun(
     // Discovery respects the caller's visibility ACL, consistent with the inline-roster path.
     findAgents: (query, k) =>
       rankAgents(
-        loadIndex(deps.db).filter((r) => opts.agent.canSee.includes("*") || opts.agent.canSee.includes(r.id)),
+        loadIndex(deps.db)
+          .filter((r) => opts.agent.canSee.includes("*") || opts.agent.canSee.includes(r.id))
+          .filter((r) => r.id !== opts.agent.id),
         query,
         k,
       ),
+    agentExists: (id) => loadIndex(deps.db).some((r) => r.id === id),
   };
 
   // Visibility from the registry index only — never load every agent's identity (unbounded roster).
@@ -107,11 +111,11 @@ export async function executeRun(
       onStep: deps.onStep ? (i) => deps.onStep!({ ...i, agent: opts.agent.id }) : undefined,
       pollSteer: deps.pollSteer,
     });
-    if (result.text === "[budget exhausted]") outcome = "blocked";
+    if (result.exhausted) outcome = "blocked";
   } catch (e) {
     outcome = "failed";
     console.error(`run ${runId} failed:`, e);
-    result = { text: `error: ${e instanceof Error ? e.message : String(e)}`, toolCalls: {}, tokens: 0, iterations: 0 };
+    result = { text: `error: ${e instanceof Error ? e.message : String(e)}`, toolCalls: {}, tokens: 0, iterations: 0, exhausted: false };
   }
 
   const trace: RunTrace = {

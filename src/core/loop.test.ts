@@ -33,6 +33,16 @@ test("loop returns final text after a tool-call round", async () => {
   expect(res.toolCalls.noop).toBe(1);
 });
 
+test("loop falls through to budget-exhausted when the model always tool-calls", async () => {
+  const budgetAgent: AgentDef = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 2 } };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: (async () => toolCallResp) as any });
+  const res = await runLoop({ model, agent: budgetAgent, system: "S", messages: [{ role: "user", content: "go" }], tools });
+  expect(res.text).toBe("[budget exhausted]");
+  expect(res.exhausted).toBe(true);
+  expect(res.iterations).toBe(2);
+});
+
 test("a queued steer is injected as a marked user message before the next call", async () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const model = new MockLanguageModelV3({ doGenerate: mockValues(toolCallResp, finalResp) as any });

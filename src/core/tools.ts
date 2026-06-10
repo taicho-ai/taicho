@@ -38,8 +38,12 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext): ToolSet {
       execute: async (draft) => {
         const decision = await ctx.requestApproval({ kind: "create_agent", draft });
         if (decision.type !== "approve") return { rejected: true, reason: decision.type };
-        const created = await ctx.createAgent(draft);
-        return { created: created.id, role: created.role };
+        try {
+          const created = await ctx.createAgent(draft);
+          return { created: created.id, role: created.role };
+        } catch {
+          return { error: `agent "${draft.id}" already exists or could not be created` };
+        }
       },
     });
 
@@ -49,6 +53,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext): ToolSet {
       inputSchema: z.object({ to: z.string(), goal: z.string(), context: z.string().optional() }),
       execute: async ({ to, goal, context }) => {
         if (!ctx.canDelegate(to)) return { error: `not permitted to delegate to "${to}"` };
+        if (!ctx.agentExists(to)) return { error: `no agent "${to}"` };
         const child = await ctx.runChild({ to, goal, context });
         ctx.delegatedOut.push(child.runId);
         return { to, runId: child.runId, result: child.text };

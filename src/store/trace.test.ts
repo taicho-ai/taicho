@@ -1,9 +1,9 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nextRunId, writeTrace, listTraces, readTrace } from "./trace";
-import { ensureWorkspace } from "./files";
+import { nextRunId, reserveRunId, writeTrace, listTraces, readTrace } from "./trace";
+import { ensureWorkspace, paths } from "./files";
 import { RunTrace } from "../schemas/trace";
 
 function trace(id: string, agent: string): RunTrace {
@@ -24,6 +24,19 @@ test("nextRunId increments per agent per day", async () => {
   writeTrace(ws, trace(id1, "researcher"));
   const id2 = nextRunId(ws, "researcher");
   expect(id2.endsWith("-run2")).toBe(true);
+});
+
+test("reserveRunId returns distinct ids and creates placeholder files", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-"));
+  await ensureWorkspace(ws);
+  const id1 = reserveRunId(ws, "a");
+  const id2 = reserveRunId(ws, "a");
+  expect(id1).not.toBe(id2);
+  expect(id1.endsWith("-run1")).toBe(true);
+  expect(id2.endsWith("-run2")).toBe(true);
+  const dir = paths.runDir(ws, "a");
+  expect(existsSync(join(dir, `${id1.slice(id1.indexOf("/") + 1)}.json`))).toBe(true);
+  expect(existsSync(join(dir, `${id2.slice(id2.indexOf("/") + 1)}.json`))).toBe(true);
 });
 
 test("write -> read round-trips, list filters by agent", async () => {

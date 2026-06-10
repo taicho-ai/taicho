@@ -11,7 +11,7 @@ export function topK(db: Database, kind: string, query: Float32Array, k: number)
   const rows = db.query<{ ref: string; vec: Uint8Array }, [string]>(
     "SELECT ref, vec FROM embeddings WHERE kind = ?").all(kind);
   const scored = rows.map((r) => {
-    const v = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4);
+    const v = new Float32Array(r.vec.slice().buffer);
     return { ref: r.ref, score: cosine(query, v) };
   });
   scored.sort((a, b) => b.score - a.score);

@@ -9,6 +9,7 @@ export interface LoopResult {
   toolCalls: Record<string, number>;
   tokens: number;
   iterations: number;
+  exhausted: boolean;
 }
 
 export async function runLoop(opts: {
@@ -39,7 +40,7 @@ export async function runLoop(opts: {
 
     if (res.toolCalls.length === 0) {
       opts.onStep?.({ text: res.text });
-      return { text: res.text, toolCalls: counts, tokens, iterations: iterations + 1 };
+      return { text: res.text, toolCalls: counts, tokens, iterations: iterations + 1, exhausted: false };
     }
     for (const tc of res.toolCalls) {
       counts[tc.toolName] = (counts[tc.toolName] ?? 0) + 1;
@@ -47,5 +48,5 @@ export async function runLoop(opts: {
     }
     messages.push(...res.response.messages);
   }
-  return { text: "[budget exhausted]", toolCalls: counts, tokens, iterations };
+  return { text: "[budget exhausted]", toolCalls: counts, tokens, iterations, exhausted: true };
 }
