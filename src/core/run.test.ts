@@ -305,3 +305,18 @@ test("aggregate sums the whole run-tree exactly (root + mid + leaf)", async () =
   const leaf = readTrace(ws, leafId);
   expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + mid.tokens + leaf.tokens); // exact tree sum, no double-count
 });
+
+test("a per-agent resolveModel makes an agent run its own model", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const writerModel = new MockLanguageModelV3({ doGenerate: (async () => text("writer ran")) as any });
+  const otherModel = new MockLanguageModelV3({ doGenerate: (async () => text("other ran")) as any });
+  const deps = makeDeps({ ws, db, model: otherModel,
+    resolveModel: (id: string) => id === "writer" ? { model: writerModel, modelId: "writer-model" } : { model: otherModel, modelId: "other-model" },
+  });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(res.text).toBe("writer ran");
+  expect((writerModel as any).doGenerateCalls.length).toBe(1);
+  expect((otherModel as any).doGenerateCalls.length).toBe(0);
+});

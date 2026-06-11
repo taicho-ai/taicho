@@ -11,6 +11,8 @@ import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
 import { reserveRunId, writeTrace } from "../store/trace";
+import { pricerFor } from "./pricing";
+import type { TaichoConfig } from "../store/config";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -51,6 +53,8 @@ export interface RunDeps {
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
   runCounter?: { n: number };
+  resolveModel?: (agentId: string) => { model: Model; modelId: string };
+  configDefaults?: TaichoConfig["defaults"];
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -62,6 +66,8 @@ export function makeDeps(opts: {
   signal?: AbortSignal;
   priceUsd?: RunDeps["priceUsd"];
   runCounter?: { n: number };
+  resolveModel?: RunDeps["resolveModel"];
+  configDefaults?: RunDeps["configDefaults"];
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
@@ -69,6 +75,7 @@ export function makeDeps(opts: {
     onStep: opts.onStep, pollSteer: opts.pollSteer,
     signal: opts.signal, priceUsd: opts.priceUsd,
     runCounter: opts.runCounter ?? { n: 0 },
+    resolveModel: opts.resolveModel, configDefaults: opts.configDefaults,
   };
 }
 
@@ -90,7 +97,7 @@ export async function executeRun(
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id,
     artifacts: [], delegatedOut: [],
     requestApproval: deps.requestApproval,
-    createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id),
+    createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
     canDelegate: (toId) => canDelegate(opts.agent, toId),
     runChild: async ({ to, goal, context }) => {
       const child = await loadAgent(deps.ws, to);
@@ -136,12 +143,16 @@ export async function executeRun(
   });
   const tools = toolsForAgent(opts.agent, ctx);
 
+  const picked = deps.resolveModel?.(opts.agent.id);
+  const model = picked?.model ?? deps.model;
+  const priceUsd = picked ? pricerFor(picked.modelId) : deps.priceUsd;
+
   const result = await runLoop({
-    model: deps.model, agent: opts.agent, system, messages: opts.messages, tools,
+    model, agent: opts.agent, system, messages: opts.messages, tools,
     onStep: deps.onStep ? (i) => deps.onStep!({ ...i, agent: opts.agent.id }) : undefined,
     pollSteer: deps.pollSteer,
     signal: deps.signal,
-    priceUsd: deps.priceUsd,
+    priceUsd,
   });
   const outcome: RunTrace["outcome"] =
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";
