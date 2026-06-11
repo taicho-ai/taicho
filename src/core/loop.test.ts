@@ -68,11 +68,20 @@ test("meters input/output/total tokens and cost via the injected pricer", async 
 });
 
 test("stops with exhausted when the token cap is reached", async () => {
-  const capped = { ...agent, budgets: { ...agent.budgets, maxTokensPerRun: 1 } };
+  const capped = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 30, maxTokensPerRun: 1 } };
   const model = new MockLanguageModelV3({ doGenerate: (async () => toolCallResp) as any });
   const res = await runLoop({ model, agent: capped, system: "S", messages: [{ role: "user", content: "go" }], tools });
   expect(res.exhausted).toBe(true);
-  expect(res.tokens).toBeGreaterThan(0);
+  // proves the TOKEN cap (not the 30-iteration cap) stopped it: exactly one model call happened
+  expect((model as any).doGenerateCalls.length).toBe(1);
+});
+
+test("stops with exhausted when the cost cap is reached (not the iteration cap)", async () => {
+  const capped = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 30, maxCostPerRunUsd: 0.001 } };
+  const model = new MockLanguageModelV3({ doGenerate: (async () => toolCallResp) as any });
+  const res = await runLoop({ model, agent: capped, system: "S", messages: [{ role: "user", content: "go" }], tools, priceUsd: () => 1 });
+  expect(res.exhausted).toBe(true);
+  expect((model as any).doGenerateCalls.length).toBe(1); // one $1 call exceeds the $0.001 cap
 });
 
 test("aborts when the signal is already aborted", async () => {

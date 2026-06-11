@@ -152,6 +152,7 @@ test("a token-capped run ends blocked with non-zero tokens", async () => {
   const res = await executeRun(deps, { agent: loopy, messages: [{ role: "user", content: "loop" }], triggeredBy: "user" });
   expect(res.trace.outcome).toBe("blocked");
   expect(res.trace.tokens).toBeGreaterThan(0);
+  expect((model as any).doGenerateCalls.length).toBe(1); // token cap stopped it after 1 call, not the 30-iteration cap
 });
 
 test("an aborted run is interrupted with partial tokens recorded", async () => {
@@ -227,6 +228,7 @@ test("work-item budget caps delegate fan-out within one run", async () => {
   const boss = await loadAgent(ws, "boss");
   const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
   expect(res.trace.notes.some((n) => /work item/i.test(n))).toBe(true);
+  expect(res.trace.delegatedOut.length).toBe(1); // only the first (allowed) delegation spawned a child
 });
 
 test("a delegating run's aggregate includes child spend", async () => {
@@ -244,5 +246,62 @@ test("a delegating run's aggregate includes child spend", async () => {
   const childId = res.trace.delegatedOut[0];
   const child = readTrace(ws, childId);
   expect(res.trace.aggregate).toBeTruthy();
-  expect(res.trace.aggregate!.tokens).toBeGreaterThanOrEqual(res.trace.tokens + child.tokens);
+  expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + child.tokens); // exact: locks out double-counting
+});
+
+test("delegation is refused once the per-request run ceiling is hit", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "a", role: "a", identity: "x", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "b", role: "b", identity: "leaf", tools: [], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  // a tries to delegate to b, but the run counter is already at the 50 ceiling
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(call("delegate_task", { to: "b", goal: "x" }), text("ok")) as any });
+  const deps = makeDeps({ ws, db, model, runCounter: { n: 50 } });
+  const a = await loadAgent(ws, "a");
+  const res = await executeRun(deps, { agent: a, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut.length).toBe(0);
+  expect(res.trace.notes.some((n) => /max runs per request/i.test(n))).toBe(true);
+});
+
+test("aborting cancels an in-flight child run too (cascade), both interrupted", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "p", role: "parent", identity: "delegate", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "c", role: "child", identity: "work", tools: ["write_artifact"], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  const controller = new AbortController();
+  let n = 0;
+  const model = new MockLanguageModelV3({ doGenerate: (async () => {
+    n++;
+    if (n === 1) return call("delegate_task", { to: "c", goal: "x" }); // parent delegates
+    if (n === 2) { controller.abort(); return call("write_artifact", { topicSlug: "x", markdown: "y" }); } // child's 1st call; abort now
+    return text("unreached");
+  }) as any });
+  const deps = makeDeps({ ws, db, model, signal: controller.signal });
+  const p = await loadAgent(ws, "p");
+  const res = await executeRun(deps, { agent: p, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("interrupted");          // parent interrupted
+  expect(res.trace.delegatedOut.length).toBe(1);
+  const child = readTrace(ws, res.trace.delegatedOut[0]);
+  expect(child.outcome).toBe("interrupted");              // child interrupted via the shared signal
+});
+
+test("aggregate sums the whole run-tree exactly (root + mid + leaf)", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "r2", role: "root2", identity: "delegate", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "mid", role: "mid", identity: "delegate", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "leaf", role: "leaf", identity: "work", tools: ["write_artifact"], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "mid", goal: "x" }),  // r2 step1
+    call("delegate_task", { to: "leaf", goal: "y" }), // mid step1
+    call("write_artifact", { topicSlug: "z", markdown: "w" }), // leaf step1
+    text("leaf done"),  // leaf step2
+    text("mid done"),   // mid step2
+    text("root done"),  // r2 step2
+  ) as any });
+  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens });
+  const r2 = await loadAgent(ws, "r2");
+  const res = await executeRun(deps, { agent: r2, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  const midId = res.trace.delegatedOut[0];
+  const mid = readTrace(ws, midId);
+  const leafId = mid.delegatedOut[0];
+  const leaf = readTrace(ws, leafId);
+  expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + mid.tokens + leaf.tokens); // exact tree sum, no double-count
 });
