@@ -79,7 +79,7 @@ export function App(props: {
           thread.current.push({ role: "assistant", content: res.text });
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
-          say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, $${res.trace.costUsd.toFixed(4)})` });
+          say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)})` });
         }
         setRoster(loadIndex(props.db)); // create_agent may have grown the squad
       } else {
@@ -87,7 +87,7 @@ export function App(props: {
         if (!target) { say({ kind: "system", text: `No agent "${parsed.to}". Try /agents, or describe one to root.` }); return; }
         const res = await executeRun(deps(model), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
         say({ kind: "agent", from: target.id, text: res.text });
-        say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, $${res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
+        say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
       }
     } finally { setBusy(false); }
   };

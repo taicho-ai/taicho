@@ -18,8 +18,9 @@ export const RunTrace = z.object({
   delegatedOut: z.array(z.string()),       // run ids
   outcome: z.enum(["completed", "blocked", "failed", "interrupted"]),
   tokens: z.number().default(0),
-  costUsd: z.number().default(0),
-  aggregate: z.object({ tokens: z.number(), costUsd: z.number() }).optional(),
+  costUsd: z.number().nullable().default(0),
+  costNote: z.string().optional(),
+  aggregate: z.object({ tokens: z.number(), costUsd: z.number().nullable() }).optional(),
   notes: z.array(z.string()).default([]),
   durationMs: z.number().default(0),
   started: z.string().datetime(),

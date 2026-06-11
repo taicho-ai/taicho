@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { resolveConfig, isMissing, loadConfig } from "./config";
+import { resolveConfig, isMissing, loadConfig, resolveAuth, TaichoConfig } from "./config";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,4 +46,23 @@ test("loadConfig warns and falls back to empty on invalid config", async () => {
   writeFileSync(join(ws, "taicho.yaml"), "defaults:\n  provider: not-a-provider\n");
   const c = await loadConfig(ws); // invalid enum -> safeParse fails -> {}
   expect(c.defaults).toBeUndefined();
+});
+
+const prof = { account_id: "acct", expires_at: 123 };
+
+test("resolveAuth: env API key beats a stored OAuth profile", () => {
+  const c = TaichoConfig.parse({});
+  expect(resolveAuth({ env: { ANTHROPIC_API_KEY: "k" }, config: c, loadProfile: () => prof }).kind).toBe("env");
+});
+test("resolveAuth: no env key + profile + flag on -> oauth", () => {
+  expect(resolveAuth({ env: {}, config: TaichoConfig.parse({}), loadProfile: () => prof }).kind).toBe("oauth-openai-codex");
+});
+test("resolveAuth: chatgpt_signin:false ignores the profile", () => {
+  expect(resolveAuth({ env: {}, config: TaichoConfig.parse({ auth: { chatgpt_signin: false } }), loadProfile: () => prof }).kind).toBe("none");
+});
+test("resolveAuth: TAICHO_PROVIDER=openai-codex forces oauth even with an anthropic key", () => {
+  expect(resolveAuth({ env: { TAICHO_PROVIDER: "openai-codex", ANTHROPIC_API_KEY: "k" }, config: TaichoConfig.parse({}), loadProfile: () => prof }).kind).toBe("oauth-openai-codex");
+});
+test("resolveAuth: nothing -> none", () => {
+  expect(resolveAuth({ env: {}, config: TaichoConfig.parse({}), loadProfile: () => null }).kind).toBe("none");
 });

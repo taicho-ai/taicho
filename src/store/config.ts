@@ -50,8 +50,32 @@ export const TaichoConfig = z.object({
     budgets: PartialBudgets,
   }).optional(),
   agents: z.record(z.string(), AgentOverride).optional(),
+  auth: z.object({ chatgpt_signin: z.boolean().optional() }).optional(),
 }).default({});
 export type TaichoConfig = z.infer<typeof TaichoConfig>;
+
+export type AuthSource =
+  | { kind: "env"; provider: Provider; model: string }
+  | { kind: "oauth-openai-codex"; accountId: string; expiresAt: number }
+  | { kind: "none" };
+
+/** Precedence: TAICHO_PROVIDER=openai-codex forces OAuth → env API keys → stored OAuth profile
+ *  (if auth.chatgpt_signin !== false) → none. */
+export function resolveAuth(opts: {
+  env?: Record<string, string | undefined>;
+  config: TaichoConfig;
+  loadProfile: () => { account_id: string; expires_at: number } | null;
+}): AuthSource {
+  const env = opts.env ?? process.env;
+  const flagOn = opts.config.auth?.chatgpt_signin !== false;
+  const profile = flagOn ? opts.loadProfile() : null;
+  const oauth = (): AuthSource =>
+    profile ? { kind: "oauth-openai-codex", accountId: profile.account_id, expiresAt: profile.expires_at } : { kind: "none" };
+  if (env.TAICHO_PROVIDER === "openai-codex") return oauth();
+  const envCfg = resolveConfig(env);
+  if (!isMissing(envCfg)) return { kind: "env", provider: envCfg.provider, model: envCfg.model };
+  return oauth();
+}
 
 export async function loadConfig(ws: string): Promise<TaichoConfig> {
   const file = join(ws, "taicho.yaml");

@@ -53,7 +53,7 @@ export interface RunDeps {
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
   runCounter?: { n: number };
-  resolveModel?: (agentId: string) => { model: Model; modelId: string };
+  resolveModel?: (agentId: string) => { model: Model; modelId: string; subscription?: boolean };
   configDefaults?: TaichoConfig["defaults"];
 }
 
@@ -144,6 +144,7 @@ export async function executeRun(
   const tools = toolsForAgent(opts.agent, ctx);
 
   const picked = deps.resolveModel?.(opts.agent.id);
+  const subscription = picked?.subscription === true;
   const model = picked?.model ?? deps.model;
   const priceUsd = picked ? pricerFor(picked.modelId) : deps.priceUsd;
 
@@ -163,8 +164,9 @@ export async function executeRun(
     ledger: { retrieved: [], applied: [], skipped: [] },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, outcome,
-    tokens: result.tokens, costUsd: result.costUsd,
-    aggregate: { tokens: result.tokens + ctx.childSpend.tokens, costUsd: result.costUsd + ctx.childSpend.costUsd },
+    tokens: result.tokens, costUsd: subscription ? null : result.costUsd,
+    costNote: subscription ? "subscription" : undefined,
+    aggregate: { tokens: result.tokens + ctx.childSpend.tokens, costUsd: subscription ? null : result.costUsd + ctx.childSpend.costUsd },
     notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };

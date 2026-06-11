@@ -334,5 +334,17 @@ test("per-agent pricer reflects each agent's resolved model price", async () => 
   const cheapRes = await executeRun(makeDeps({ ws, db, model: mk(), resolveModel }), { agent: cheap, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
   const priceyRes = await executeRun(makeDeps({ ws, db, model: mk(), resolveModel }), { agent: pricey, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
   expect(cheapRes.trace.costUsd).toBeGreaterThan(0);
-  expect(priceyRes.trace.costUsd).toBeGreaterThan(cheapRes.trace.costUsd); // opus prices higher than sonnet for identical usage
+  expect(priceyRes.trace.costUsd!).toBeGreaterThan(cheapRes.trace.costUsd!); // opus prices higher than sonnet for identical usage
+});
+
+test("a subscription-backed run records costUsd null + costNote, tokens still counted", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "sub", role: "x", identity: "x" }, "root");
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("done")) as any });
+  const deps = makeDeps({ ws, db, model, resolveModel: () => ({ model, modelId: "gpt-5.x-codex", subscription: true }) });
+  const sub = await loadAgent(ws, "sub");
+  const res = await executeRun(deps, { agent: sub, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(res.trace.costUsd).toBeNull();
+  expect(res.trace.costNote).toBe("subscription");
+  expect(res.trace.tokens).toBeGreaterThan(0);
 });
