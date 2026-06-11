@@ -228,3 +228,21 @@ test("work-item budget caps delegate fan-out within one run", async () => {
   const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
   expect(res.trace.notes.some((n) => /work item/i.test(n))).toBe(true);
 });
+
+test("a delegating run's aggregate includes child spend", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "writer", goal: "write hello" }), // root
+    call("write_artifact", { topicSlug: "hello", markdown: "# Hi" }), // child
+    text("child done"), // child
+    text("root done"),  // root
+  ) as any });
+  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "make a hello doc" }], triggeredBy: "user" });
+  const childId = res.trace.delegatedOut[0];
+  const child = readTrace(ws, childId);
+  expect(res.trace.aggregate).toBeTruthy();
+  expect(res.trace.aggregate!.tokens).toBeGreaterThanOrEqual(res.trace.tokens + child.tokens);
+});

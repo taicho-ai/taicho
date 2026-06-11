@@ -37,6 +37,7 @@ export interface RunContext {
   agentExists: (id: string) => boolean;
   notes: string[];
   workItems: { n: number };
+  childSpend: { tokens: number; costUsd: number };
   delegationGuard: (to: string) => { ok: true } | { ok: false; error: string };
 }
 
@@ -114,6 +115,7 @@ export async function executeRun(
     agentExists: (id) => loadIndex(deps.db).some((r) => r.id === id),
     notes: [],
     workItems: { n: 0 },
+    childSpend: { tokens: 0, costUsd: 0 },
     delegationGuard: (to) => {
       if (!canDelegate(opts.agent, to)) return { ok: false, error: `not permitted to delegate to "${to}"` };
       if (!loadIndex(deps.db).some((r) => r.id === to)) return { ok: false, error: `no agent "${to}"` };
@@ -149,7 +151,9 @@ export async function executeRun(
     ledger: { retrieved: [], applied: [], skipped: [] },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, outcome,
-    tokens: result.tokens, costUsd: result.costUsd, notes: ctx.notes,
+    tokens: result.tokens, costUsd: result.costUsd,
+    aggregate: { tokens: result.tokens + ctx.childSpend.tokens, costUsd: result.costUsd + ctx.childSpend.costUsd },
+    notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };
   writeTrace(deps.ws, trace);

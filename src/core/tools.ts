@@ -63,6 +63,9 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext): ToolSet {
         try {
           const child = await ctx.runChild({ to, goal, context });
           ctx.delegatedOut.push(child.runId);
+          const childAgg = child.trace.aggregate ?? { tokens: child.trace.tokens, costUsd: child.trace.costUsd };
+          ctx.childSpend.tokens += childAgg.tokens;
+          ctx.childSpend.costUsd += childAgg.costUsd;
           return { to, runId: child.runId, result: child.text };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
