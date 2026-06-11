@@ -27,7 +27,8 @@ Requires [Bun](https://bun.sh).
 
 ```
 bun install
-bun run src/index.tsx     # dev REPL
+bun run dev               # REPL with hot reload (restarts on file change)
+bun run start             # REPL, no watch
 bun run build             # compile single binary → dist/taicho
 ```
 
