@@ -23,6 +23,7 @@ export function assemble(
     brief?: Brief;
     policies: PolicyNote[];
     exemplarBlock?: string;
+    memoryBlock?: string;
   },
 ): { system: string; sections: PromptSection[] } {
   const s: PromptSection[] = [];
@@ -48,6 +49,8 @@ export function assemble(
       text: `## Delegated task (from ${opts.brief.from})\nGOAL: ${opts.brief.goal}` +
         (opts.brief.context ? `\nCONTEXT: ${opts.brief.context}` : ""),
     });
+  if (opts.memoryBlock)
+    s.push({ name: "memory", tier: "context", text: opts.memoryBlock });
   // volatile
   if (opts.policies.length)
     s.push({

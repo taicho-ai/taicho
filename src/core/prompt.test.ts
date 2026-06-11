@@ -21,3 +21,8 @@ test("large roster switches to a find_agents instruction, not a dump", () => {
   expect(system).toContain("find_agents");
   expect(system).toContain(String(INLINE_ROSTER_MAX + 1));
 });
+
+test("assemble renders a memoryBlock in the context tier when provided", () => {
+  const { system } = assemble(agent, { visibleAgents: [], policies: [], memoryBlock: "## Your recent runs\n- did x" });
+  expect(system).toContain("Your recent runs");
+});
