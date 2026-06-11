@@ -11,6 +11,7 @@ import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
 import { reserveRunId, writeTrace } from "../store/trace";
+import type { ProposalDraft } from "../coaching/proposal";
 import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
 import { recentRunsDigest } from "./memory";
@@ -22,7 +23,9 @@ export type Model = Parameters<typeof generateText>[0]["model"];
 const MAX_DELEGATION_DEPTH = 5;
 const MAX_RUNS_PER_REQUEST = 50;
 
-export interface ApprovalRequest { kind: "create_agent"; draft: NewAgentDraft; }
+export type ApprovalRequest =
+  | { kind: "create_agent"; draft: NewAgentDraft }
+  | { kind: "propose_coaching"; draft: ProposalDraft };
 export type ApprovalDecision =
   | { type: "approve" }
   | { type: "reject" }

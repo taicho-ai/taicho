@@ -7,11 +7,14 @@ import { parseInput } from "./input";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
+import { listPolicies, deletePolicy } from "../store/policy";
 import { appendTurn, shouldPersistTurn } from "../store/thread";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line } from "./slash";
+import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
+import { mergeDraft } from "../core/draft";
 
 type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
 
@@ -153,10 +156,34 @@ export function App(props: {
       say({ kind: "system", text: "  logged out of openai." });
       return;
     }
+    if (cmd === "teach") {
+      const spaceIdx = arg.indexOf(" ");
+      const agentId = spaceIdx === -1 ? arg : arg.slice(0, spaceIdx);
+      const correction = spaceIdx === -1 ? "" : arg.slice(spaceIdx + 1).trim();
+      if (!agentId || !correction) { say({ kind: "system", text: "  usage: /teach <agentId> <correction>" }); return; }
+      if (!model) { say({ kind: "system", text: "  no model — set credentials first" }); return; }
+      const activeModel = model;
+      setBusy(true);
+      try {
+        const draft = await draftPolicy(activeModel, agentId, correction);
+        const decision = await requestApproval({ kind: "propose_coaching", draft });
+        if (decision.type === "reject") { say({ kind: "system", text: "  discarded" }); }
+        else {
+          const finalDraft = decision.type === "edit" ? mergeDraft(draft, decision.draft) : draft;
+          persistApprovedPolicy(props.ws, finalDraft, agentId);
+          say({ kind: "system", text: `  taught ${agentId}: ${finalDraft.do}` });
+        }
+      } catch (e) {
+        say({ kind: "system", text: `  teach error: ${e instanceof Error ? e.message : String(e)}` });
+      } finally { setBusy(false); }
+      return;
+    }
     runSlashPure(cmd, arg, {
       roster,
       listTraces: (a?: string) => listTraces(props.ws, a),
       readTrace: (id: string) => readTrace(props.ws, id),
+      listPolicies: (a: string) => listPolicies(props.ws, a),
+      deletePolicy: (a: string, p: string) => deletePolicy(props.ws, a, p),
     }).forEach(say);
   };
 
@@ -169,12 +196,20 @@ export function App(props: {
       ))}
       {pending ? (
         <ProposalCard
-          title="New agent — approve?"
-          fields={[
-            { label: "id", value: pending.req.draft.id },
-            { label: "role", value: pending.req.draft.role },
-            { label: "soul", value: pending.req.draft.identity.slice(0, 120) },
-          ]}
+          title={pending.req.kind === "propose_coaching" ? "New coaching note — approve?" : "New agent — approve?"}
+          fields={
+            pending.req.kind === "propose_coaching"
+              ? [
+                  { label: "when", value: pending.req.draft.when },
+                  { label: "do", value: pending.req.draft.do },
+                  { label: "scope", value: pending.req.draft.scope },
+                ]
+              : [
+                  { label: "id", value: pending.req.draft.id },
+                  { label: "role", value: pending.req.draft.role },
+                  { label: "soul", value: pending.req.draft.identity.slice(0, 120) },
+                ]
+          }
           onDecision={(d) => { const r = pending.resolve; setPending(null); r(d); }}
         />
       ) : (
