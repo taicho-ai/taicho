@@ -13,6 +13,7 @@ import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/
 import { reserveRunId, writeTrace } from "../store/trace";
 import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
+import { recentRunsDigest } from "./memory";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -90,6 +91,8 @@ export async function executeRun(
   const ancestry = opts.ancestry ?? [];
   deps.runCounter!.n += 1;
 
+  const memoryBlock = recentRunsDigest(deps.ws, opts.agent.id);
+
   // reserveRunId atomically claims a unique id (exclusive-create placeholder), so concurrent
   // same-target delegations in one model turn can't collide; writeTrace overwrites it at the end.
   const runId = reserveRunId(deps.ws, opts.agent.id);
@@ -143,6 +146,7 @@ export async function executeRun(
     visibleAgents: visible,
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
     policies: [],
+    memoryBlock,
   });
   const tools = toolsForAgent(opts.agent, ctx);
 

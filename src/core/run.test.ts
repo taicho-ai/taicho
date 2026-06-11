@@ -360,3 +360,14 @@ test("create_agent applies an edited draft when approval returns edit", async ()
   const created = await loadAgent(ws, "newbie");
   expect(created.role).toBe("edited role");
 });
+
+test("a worker's later run sees a recent-runs digest of its earlier runs", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const writer = await loadAgent(ws, "writer");
+  const m1 = new MockLanguageModelV3({ doGenerate: mockValues(call("write_artifact", { topicSlug: "rep", markdown: "# r" }), text("done1")) as any });
+  await executeRun(makeDeps({ ws, db, model: m1 }), { agent: writer, messages: [{ role: "user", content: "do x" }], triggeredBy: "user" });
+  const m2 = new MockLanguageModelV3({ doGenerate: (async () => text("done2")) as any });
+  await executeRun(makeDeps({ ws, db, model: m2 }), { agent: writer, messages: [{ role: "user", content: "do y" }], triggeredBy: "user" });
+  expect(JSON.stringify((m2 as { doGenerateCalls: unknown[] }).doGenerateCalls[0])).toContain("Your recent runs");
+});

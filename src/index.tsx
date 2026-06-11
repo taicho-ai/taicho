@@ -8,6 +8,7 @@ import { loadConfig, resolveAuth, type AuthSource } from "./store/config";
 import { buildModel, createModelResolver, type Model } from "./core/model";
 import { pricerFor } from "./core/pricing";
 import { readProfile, writeProfile, deleteProfile } from "./core/auth/profile";
+import { loadThread } from "./store/thread";
 import { createRefresher } from "./core/auth/refresh";
 import { runLoginFlow } from "./core/auth/login";
 import { createCodexProvider } from "./core/providers/openai-codex";
@@ -65,6 +66,8 @@ async function onLogin(): Promise<AuthSource> {
   return { kind: "oauth-openai-codex", accountId: profile.account_id, expiresAt: profile.expires_at };
 }
 
+const rootThread = loadThread(ws, "root");
+
 render(
   <App
     ws={ws} db={db} roster={roster}
@@ -73,6 +76,7 @@ render(
     buildFromAuth={buildFromAuth}
     onLogin={onLogin}
     onLogout={() => deleteProfile()}
+    rootThread={rootThread}
     {...initial}
     cfg={authSource.kind === "env" ? { provider: authSource.provider, model: authSource.model } : null}
   />,

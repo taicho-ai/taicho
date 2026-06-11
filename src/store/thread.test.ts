@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendTurn, loadThread, clearThread } from "./thread";
+import { appendTurn, loadThread, clearThread, shouldPersistTurn } from "./thread";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-thread-"));
 
@@ -35,4 +35,9 @@ test("clear empties the thread", () => {
   appendTurn(w, "root", { role: "user", content: "x" });
   clearThread(w, "root");
   expect(loadThread(w, "root")).toEqual([]);
+});
+
+test("shouldPersistTurn only persists completed turns", () => {
+  expect(shouldPersistTurn("completed")).toBe(true);
+  for (const o of ["failed", "blocked", "interrupted"]) expect(shouldPersistTurn(o)).toBe(false);
 });

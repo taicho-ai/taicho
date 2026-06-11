@@ -29,3 +29,5 @@ export function clearThread(ws: string, agentId: string): void {
   const f = threadFile(ws, agentId);
   if (existsSync(f)) writeFileSync(f, "");
 }
+
+export const shouldPersistTurn = (outcome: string): boolean => outcome === "completed";

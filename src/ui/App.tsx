@@ -7,6 +7,7 @@ import { parseInput } from "./input";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
+import { appendTurn, shouldPersistTurn } from "../store/thread";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
@@ -28,6 +29,7 @@ export function App(props: {
   buildFromAuth: (s: AuthSource) => BuiltAuth;
   onLogin: () => Promise<AuthSource>;
   onLogout: () => boolean;
+  rootThread?: ModelMessage[];
 }) {
   const { exit } = useApp();
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
@@ -42,7 +44,7 @@ export function App(props: {
   const [resolveModel, setResolveModel] = useState<ResolveModelFn | undefined>(() => props.resolveModel);
   const [priceUsd, setPriceUsd] = useState<PriceFn | undefined>(() => props.priceUsd);
   const steerQueue = useRef<string[]>([]);
-  const thread = useRef<ModelMessage[]>([]);
+  const thread = useRef<ModelMessage[]>(props.rootThread ?? []);
   const aborter = useRef<AbortController | null>(null);
 
   useInput((_i, key) => {
@@ -98,6 +100,10 @@ export function App(props: {
         say({ kind: "agent", from: "root", text: res.text });
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
+          if (shouldPersistTurn(res.trace.outcome)) {
+            appendTurn(props.ws, "root", { role: "user", content: parsed.text });
+            appendTurn(props.ws, "root", { role: "assistant", content: res.text });
+          }
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
           maybeSayAuthExpired(res.text);
