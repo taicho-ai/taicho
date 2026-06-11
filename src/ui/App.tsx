@@ -8,17 +8,26 @@ import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDe
 import { loadAgent, loadIndex, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
 import type { ModelMessage } from "ai";
-import type { TaichoConfig } from "../store/config";
+import type { AuthSource, TaichoConfig } from "../store/config";
+import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 
 type Line = { kind: "user" | "agent" | "system"; from?: string; text: string };
 type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
 
+type ResolveModelFn = (agentId: string) => { model: Model; modelId: string; subscription?: boolean };
+type PriceFn = (u: { inputTokens: number; outputTokens: number }) => number;
+interface BuiltAuth { model: Model | null; resolveModel?: ResolveModelFn; priceUsd?: PriceFn }
+
 export function App(props: {
   ws: string; db: Database; model: Model | null; roster: RegistryRow[];
   cfg: { provider: string; model: string } | null;
-  priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
-  resolveModel?: (agentId: string) => { model: Model; modelId: string };
+  priceUsd?: PriceFn;
+  resolveModel?: ResolveModelFn;
   configDefaults?: TaichoConfig["defaults"];
+  authSource: AuthSource;
+  buildFromAuth: (s: AuthSource) => BuiltAuth;
+  onLogin: () => Promise<AuthSource>;
+  onLogout: () => boolean;
 }) {
   const { exit } = useApp();
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
@@ -26,6 +35,12 @@ export function App(props: {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<Pending>(null);
   const [roster, setRoster] = useState(props.roster);
+  // Live auth: model/resolver/pricer are STATE (seeded from props) so /login can re-arm the REPL
+  // without a restart. deps() reads these, so the next submit picks up the new credentials.
+  const [authSource, setAuthSource] = useState<AuthSource>(props.authSource);
+  const [model, setModel] = useState<Model | null>(props.model);
+  const [resolveModel, setResolveModel] = useState<ResolveModelFn | undefined>(() => props.resolveModel);
+  const [priceUsd, setPriceUsd] = useState<PriceFn | undefined>(() => props.priceUsd);
   const steerQueue = useRef<string[]>([]);
   const thread = useRef<ModelMessage[]>([]);
   const aborter = useRef<AbortController | null>(null);
@@ -37,6 +52,11 @@ export function App(props: {
   }, { isActive: !pending });
 
   const say = (l: Line) => setLines((prev) => [...prev, l]);
+  // Best-effort: a failed run whose surfaced text reflects an AuthExpiredError ("session expired")
+  // gets an explicit nudge to re-run /login openai (the run already returned a failed outcome).
+  const maybeSayAuthExpired = (text: string) => {
+    if (/session expired/i.test(text)) say({ kind: "system", text: `  ${authExpiredMessage()}` });
+  };
 
   const requestApproval = (req: ApprovalRequest) =>
     new Promise<ApprovalDecision>((resolve) => setPending({ req, resolve }));
@@ -47,8 +67,8 @@ export function App(props: {
     onStep: ({ tool, agent }) => { if (tool) say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); },
     pollSteer: () => steerQueue.current.shift() ?? null,
     signal: aborter.current?.signal,
-    priceUsd: props.priceUsd,
-    resolveModel: props.resolveModel,
+    priceUsd,
+    resolveModel,
     configDefaults: props.configDefaults,
   });
 
@@ -61,10 +81,11 @@ export function App(props: {
     const parsed = parseInput(value);
     say({ kind: "user", text: value });
 
-    if (!props.model) { say({ kind: "system", text: "Set ANTHROPIC_API_KEY or OPENAI_API_KEY, then relaunch — I won't burn tokens until then." }); return; }
-    const model = props.model;
-
+    // Slash commands work even without a model (e.g. /login to acquire one).
     if (parsed.kind === "slash") return runSlash(parsed.cmd, parsed.arg);
+
+    if (!model) { say({ kind: "system", text: "No credentials — set ANTHROPIC_API_KEY / OPENAI_API_KEY and relaunch, or run /login openai. I won't burn tokens until then." }); return; }
+    const activeModel = model;
 
     setBusy(true);
     steerQueue.current = [];
@@ -73,26 +94,59 @@ export function App(props: {
       if (parsed.kind === "chat") {
         thread.current.push({ role: "user", content: parsed.text });
         const root = await loadAgent(props.ws, "root");
-        const res = await executeRun(deps(model), { agent: root, messages: [...thread.current], triggeredBy: "user" });
+        const res = await executeRun(deps(activeModel), { agent: root, messages: [...thread.current], triggeredBy: "user" });
         say({ kind: "agent", from: "root", text: res.text });
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
+          maybeSayAuthExpired(res.text);
           say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)})` });
         }
         setRoster(loadIndex(props.db)); // create_agent may have grown the squad
       } else {
         const target = await loadAgent(props.ws, parsed.to).catch(() => null);
         if (!target) { say({ kind: "system", text: `No agent "${parsed.to}". Try /agents, or describe one to root.` }); return; }
-        const res = await executeRun(deps(model), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
+        const res = await executeRun(deps(activeModel), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
         say({ kind: "agent", from: target.id, text: res.text });
+        if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
       }
     } finally { setBusy(false); }
   };
 
-  const runSlash = (cmd: string, arg: string) => {
+  const runSlash = async (cmd: string, arg: string) => {
+    if (cmd === "status") { say({ kind: "system", text: `  ${formatAuthStatus(authSource)}` }); return; }
+    if (cmd === "login") {
+      if (arg && arg !== "openai") { say({ kind: "system", text: `  unknown login target: ${arg} (try /login openai)` }); return; }
+      setBusy(true);
+      say({ kind: "system", text: "  opening browser…" });
+      try {
+        const src = await props.onLogin();
+        const built = props.buildFromAuth(src);
+        // Re-arm the live model/resolver/pricer state, then flip authSource. The NEXT submit reads
+        // these via deps(), so the REPL is usable without restart.
+        setModel(built.model);
+        setResolveModel(() => built.resolveModel);
+        setPriceUsd(() => built.priceUsd);
+        setAuthSource(src);
+        say({ kind: "system", text: "  signed in with ChatGPT — ready." });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        say({ kind: "system", text: `  login failed: ${msg}` });
+      } finally { setBusy(false); }
+      return;
+    }
+    if (cmd === "logout") {
+      if (arg && arg !== "openai") { say({ kind: "system", text: `  unknown logout target: ${arg} (try /logout openai)` }); return; }
+      props.onLogout();
+      setModel(null);
+      setResolveModel(() => undefined);
+      setPriceUsd(() => undefined);
+      setAuthSource({ kind: "none" });
+      say({ kind: "system", text: "  logged out of openai." });
+      return;
+    }
     if (cmd === "agents") { for (const r of roster) say({ kind: "system", text: `  ${r.is_root ? "*" : "-"} ${r.id}: ${r.role}` }); return; }
     if (cmd === "runs") {
       const traces = listTraces(props.ws, arg || undefined);
@@ -137,7 +191,9 @@ export function App(props: {
   );
 }
 
-function initialLines(p: { model: Model | null; roster: RegistryRow[] }): Line[] {
+function initialLines(p: { model: Model | null; roster: RegistryRow[]; authSource: AuthSource }): Line[] {
+  if (p.authSource.kind === "none")
+    return noCredentialLines().map((text) => ({ kind: "system", text }));
   if (!p.model)
     return [
       { kind: "system", text: "taicho — no API key configured." },

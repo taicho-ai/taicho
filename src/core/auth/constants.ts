@@ -27,6 +27,7 @@ export const OPENAI_CODEX_AUTH = {
   /** Codex subscription backend (verified): model calls go to baseURL + responsesPath. */
   codexBaseUrl: "https://chatgpt.com/backend-api/codex",
   responsesPath: "/v1/responses",
+  defaultModelId: "gpt-5-codex", // UNVERIFIED: confirm the exact Codex-served model id
 
   /** account_id is extracted from the `id_token` JWT. UNVERIFIED: confirm the exact claim path
    *  (Codex reads a ChatGPT account id from a namespaced auth claim in the id_token). */
