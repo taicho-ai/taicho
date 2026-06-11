@@ -67,3 +67,11 @@ test("createAgent rejects a duplicate id", async () => {
   await createAgent(ws, db, { id: "dup", role: "x", identity: "y" }, "root");
   await expect(createAgent(ws, db, { id: "dup", role: "x", identity: "y" }, "root")).rejects.toThrow();
 });
+
+test("createAgent applies config default budgets, schema fills the rest", async () => {
+  const { ws, db } = await freshWs();
+  await reindex(ws, db);
+  const a = await createAgent(ws, db, { id: "w", role: "writes", identity: "x" }, "root", { budgets: { maxTokensPerRun: 500 } });
+  expect(a.budgets.maxTokensPerRun).toBe(500);
+  expect(a.budgets.maxIterationsPerRun).toBe(30); // schema default still applies
+});

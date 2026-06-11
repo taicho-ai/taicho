@@ -8,6 +8,7 @@ import type { Database } from "bun:sqlite";
 import { AgentDef } from "../schemas/agent";
 import { paths } from "./files";
 import { syncRegistry } from "../core/registry";
+import type { TaichoConfig } from "./config";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
@@ -31,7 +32,7 @@ Your job is to TURN THE CAPTAIN'S INTENT INTO ACTION, never to do the domain wor
 - When a fitting agent exists, use find_agents to locate it and delegate_task to hand off the goal.
 - Keep your own replies short. You coordinate; the squad produces artifacts.`;
 
-export async function seedRoot(ws: string): Promise<void> {
+export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]): Promise<void> {
   const file = paths.agentFile(ws, "root");
   if (await Bun.file(file).exists()) return;
   const root = AgentDef.parse({
@@ -41,6 +42,7 @@ export async function seedRoot(ws: string): Promise<void> {
     tools: ["create_agent", "delegate_task", "find_agents"],
     canSee: ["*"], canDelegateTo: ["*"], isRoot: true,
     created: new Date().toISOString(),
+    budgets: defaults?.budgets,
   });
   await mkdir(paths.agentDir(ws, "root"), { recursive: true });
   await writeFile(file, serializeAgent(root));
@@ -75,7 +77,7 @@ export async function reindex(ws: string, db: Database): Promise<void> {
   if (agents.length) syncRegistry(db, agents);
 }
 
-export async function createAgent(ws: string, db: Database, draft: NewAgentDraft, _taughtBy: string): Promise<AgentDef> {
+export async function createAgent(ws: string, db: Database, draft: NewAgentDraft, _taughtBy: string, defaults?: TaichoConfig["defaults"]): Promise<AgentDef> {
   const file = paths.agentFile(ws, draft.id);
   if (existsSync(file)) throw new Error(`agent "${draft.id}" already exists`);
   const agent = AgentDef.parse({
@@ -83,6 +85,7 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
     tools: draft.tools ?? ["write_artifact"],
     canSee: ["*"], canDelegateTo: [], isRoot: false,
     created: new Date().toISOString(),
+    budgets: defaults?.budgets,
   });
   await mkdir(paths.agentDir(ws, agent.id), { recursive: true });
   await writeFile(file, serializeAgent(agent));
