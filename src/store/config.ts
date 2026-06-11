@@ -1,5 +1,9 @@
 /** Resolve which provider/model to use and whether a key is present.
  *  Env-first; config.yaml is deferred. Keys are read by the AI SDK from env directly. */
+import { z } from "zod";
+import { YAML } from "bun";
+import { join } from "node:path";
+
 export type Provider = "anthropic" | "openai";
 export interface ResolvedConfig { provider: Provider; model: string; }
 export interface MissingConfig { missing: true; }
@@ -24,4 +28,45 @@ export function resolveConfig(env: Record<string, string | undefined> = process.
 
 export function isMissing(c: ResolvedConfig | MissingConfig): c is MissingConfig {
   return "missing" in c;
+}
+
+const PartialBudgets = z.object({
+  maxIterationsPerRun: z.number().int().positive().optional(),
+  maxWorkItemsPerRequest: z.number().int().positive().optional(),
+  maxTokensPerRun: z.number().int().positive().optional(),
+  maxCostPerRunUsd: z.number().positive().optional(),
+}).optional();
+
+const AgentOverride = z.object({
+  provider: z.enum(["anthropic", "openai"]).optional(),
+  model: z.string().optional(),
+  budgets: PartialBudgets,
+});
+
+export const TaichoConfig = z.object({
+  defaults: z.object({
+    provider: z.enum(["anthropic", "openai"]).optional(),
+    model: z.string().optional(),
+    budgets: PartialBudgets,
+  }).optional(),
+  agents: z.record(z.string(), AgentOverride).optional(),
+}).default({});
+export type TaichoConfig = z.infer<typeof TaichoConfig>;
+
+export async function loadConfig(ws: string): Promise<TaichoConfig> {
+  const file = join(ws, "taicho.yaml");
+  if (!(await Bun.file(file).exists())) return TaichoConfig.parse({});
+  let raw: unknown;
+  try {
+    raw = YAML.parse(await Bun.file(file).text());
+  } catch (e) {
+    console.warn(`taicho: failed to parse taicho.yaml — using defaults (${e instanceof Error ? e.message : String(e)})`);
+    return TaichoConfig.parse({});
+  }
+  const result = TaichoConfig.safeParse(raw);
+  if (!result.success) {
+    console.warn("taicho: invalid taicho.yaml — using defaults");
+    return TaichoConfig.parse({});
+  }
+  return result.data;
 }
