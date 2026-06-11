@@ -15,6 +15,7 @@ type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } 
 export function App(props: {
   ws: string; db: Database; model: Model | null; roster: RegistryRow[];
   cfg: { provider: string; model: string } | null;
+  priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
 }) {
   const { exit } = useApp();
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
@@ -24,8 +25,13 @@ export function App(props: {
   const [roster, setRoster] = useState(props.roster);
   const steerQueue = useRef<string[]>([]);
   const thread = useRef<ModelMessage[]>([]);
+  const aborter = useRef<AbortController | null>(null);
 
-  useInput((_i, key) => { if (key.escape && !busy) exit(); }, { isActive: !pending });
+  useInput((_i, key) => {
+    if (!key.escape) return;
+    if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); }
+    else exit();
+  }, { isActive: !pending });
 
   const say = (l: Line) => setLines((prev) => [...prev, l]);
 
@@ -37,6 +43,8 @@ export function App(props: {
     requestApproval,
     onStep: ({ tool, agent }) => { if (tool) say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); },
     pollSteer: () => steerQueue.current.shift() ?? null,
+    signal: aborter.current?.signal,
+    priceUsd: props.priceUsd,
   });
 
   const submit = async (value: string) => {
@@ -55,6 +63,7 @@ export function App(props: {
 
     setBusy(true);
     steerQueue.current = [];
+    aborter.current = new AbortController();
     try {
       if (parsed.kind === "chat") {
         thread.current.push({ role: "user", content: parsed.text });
@@ -65,7 +74,7 @@ export function App(props: {
           thread.current.push({ role: "assistant", content: res.text });
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
-          say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome})` });
+          say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, $${res.trace.costUsd.toFixed(4)})` });
         }
         setRoster(loadIndex(props.db)); // create_agent may have grown the squad
       } else {
@@ -73,7 +82,7 @@ export function App(props: {
         if (!target) { say({ kind: "system", text: `No agent "${parsed.to}". Try /agents, or describe one to root.` }); return; }
         const res = await executeRun(deps(model), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
         say({ kind: "agent", from: target.id, text: res.text });
-        say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.artifacts.length} artifact(s))` });
+        say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, $${res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
       }
     } finally { setBusy(false); }
   };

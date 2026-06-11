@@ -6,6 +6,7 @@ import { openDb } from "./store/db";
 import { seedRoot, reindex, loadIndex } from "./store/roster";
 import { resolveConfig, isMissing } from "./store/config";
 import { buildModel } from "./core/model";
+import { pricerFor } from "./core/pricing";
 
 const ws = process.cwd();
 await ensureWorkspace(ws);
@@ -17,4 +18,4 @@ const cfg = resolveConfig();
 const model = isMissing(cfg) ? null : buildModel(cfg);
 const roster = loadIndex(db);
 
-render(<App ws={ws} db={db} model={model} roster={roster} cfg={isMissing(cfg) ? null : cfg} />);
+render(<App ws={ws} db={db} model={model} roster={roster} cfg={isMissing(cfg) ? null : cfg} priceUsd={isMissing(cfg) ? undefined : pricerFor(cfg.model)} />);
