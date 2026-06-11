@@ -11,6 +11,8 @@ export const AgentDef = z.object({
   budgets: z.object({
     maxIterationsPerRun: z.number().int().positive().default(30),
     maxWorkItemsPerRequest: z.number().int().positive().default(20),
+    maxTokensPerRun: z.number().int().positive().optional(),
+    maxCostPerRunUsd: z.number().positive().optional(),
   }).prefault({}),
   isRoot: z.boolean().default(false),
   created: z.string().datetime(),

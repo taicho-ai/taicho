@@ -54,3 +54,39 @@ test("a queued steer is injected as a marked user message before the next call",
   expect(secondPrompt).toContain("OUT-OF-BAND USER MESSAGE");
   expect(secondPrompt).toContain("actually, stop after this");
 });
+
+test("meters input/output/total tokens and cost via the injected pricer", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(finalResp) as any });
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
+    priceUsd: ({ inputTokens, outputTokens }) => inputTokens * 2 + outputTokens * 3,
+  });
+  // usage fixture is inputTokens.total=1, outputTokens.total=1 -> cost = 1*2 + 1*3 = 5
+  expect(res.inputTokens).toBe(1);
+  expect(res.outputTokens).toBe(1);
+  expect(res.costUsd).toBe(5);
+});
+
+test("stops with exhausted when the token cap is reached", async () => {
+  const capped = { ...agent, budgets: { ...agent.budgets, maxTokensPerRun: 1 } };
+  const model = new MockLanguageModelV3({ doGenerate: (async () => toolCallResp) as any });
+  const res = await runLoop({ model, agent: capped, system: "S", messages: [{ role: "user", content: "go" }], tools });
+  expect(res.exhausted).toBe(true);
+  expect(res.tokens).toBeGreaterThan(0);
+});
+
+test("aborts when the signal is already aborted", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const model = new MockLanguageModelV3({ doGenerate: (async () => finalResp) as any });
+  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, signal: controller.signal });
+  expect(res.aborted).toBe(true);
+});
+
+test("returns a structured error (does not throw) when the model call fails", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: (() => { throw new Error("boom"); }) as any });
+  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools });
+  expect(res.error).toContain("boom");
+  expect(res.aborted).toBe(false);
+  expect(res.exhausted).toBe(false);
+});
