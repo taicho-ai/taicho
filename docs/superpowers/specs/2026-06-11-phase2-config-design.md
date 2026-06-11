@@ -68,7 +68,7 @@ const TaichoConfig = z.object({
   - **instance cache** keyed `\`${provider}:${model}\`` so repeated agents reuse one model object.
 
 ### 4.3 Budget defaults (`store/roster.ts`)
-- `createAgent(ws, db, draft, taughtBy, defaults?)` — when building the `AgentDef`, merge `defaults.budgets` under any draft-provided budget, over the schema defaults (precedence: draft > config defaults > schema default). Tools default stays `["write_artifact"]` unless a future field overrides.
+- `createAgent(ws, db, draft, taughtBy, defaults?)` — when building the `AgentDef`, pass `defaults.budgets` so the zod schema fills any unset field with its default (precedence: config defaults > schema default; `NewAgentDraft` carries no budgets today). Tools default stays `["write_artifact"]` unless a future field overrides.
 - `seedRoot(ws, defaults?)` — same: root's budgets come from `defaults.budgets` when present.
 - These are **fallbacks at creation**; existing `agent.md` files are never rewritten.
 
