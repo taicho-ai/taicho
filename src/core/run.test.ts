@@ -10,6 +10,8 @@ import { seedRoot, reindex, loadIndex, loadAgent, createAgent, serializeAgent } 
 import { AgentDef } from "../schemas/agent";
 import { makeDeps, executeRun } from "./run";
 import { readTrace } from "../store/trace";
+import { writePolicy } from "../store/policy";
+import { PolicyNote } from "../schemas/policy";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -370,4 +372,40 @@ test("a worker's later run sees a recent-runs digest of its earlier runs", async
   const m2 = new MockLanguageModelV3({ doGenerate: (async () => text("done2")) as any });
   await executeRun(makeDeps({ ws, db, model: m2 }), { agent: writer, messages: [{ role: "user", content: "do y" }], triggeredBy: "user" });
   expect(JSON.stringify((m2 as { doGenerateCalls: unknown[] }).doGenerateCalls[0])).toContain("Your recent runs");
+});
+
+const policy = (over: Record<string, unknown>) => PolicyNote.parse({ id: "pol_x", agent: "writer", when: "always", do: "cite your sources", scope: "agent", status: "approved", taughtBy: "user", created: "2026-06-11T00:00:00.000Z", ...over });
+
+test("approved policies are injected into the run prompt and recorded in the ledger", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  writePolicy(ws, policy({ id: "pol_a", do: "cite your sources" }));
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("done")) as any });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: writer, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(JSON.stringify((model as { doGenerateCalls: unknown[] }).doGenerateCalls[0])).toContain("cite your sources");
+  expect(res.trace.ledger.applied).toContain("pol_a");
+});
+
+test("proposed (non-approved) notes are NOT injected", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  writePolicy(ws, policy({ id: "pol_p", do: "DRAFT NOT APPROVED", status: "proposed" }));
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("done")) as any });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: writer, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(JSON.stringify((model as { doGenerateCalls: unknown[] }).doGenerateCalls[0])).not.toContain("DRAFT NOT APPROVED");
+  expect(res.trace.ledger.applied).not.toContain("pol_p");
+});
+
+test("a global-scope note authored on one agent reaches another agent's run", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "a", role: "x", identity: "x" }, "root");
+  await createAgent(ws, db, { id: "b", role: "y", identity: "y" }, "root");
+  writePolicy(ws, policy({ id: "pol_g", agent: "a", do: "be concise globally", scope: "global" }));
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("done")) as any });
+  const b = await loadAgent(ws, "b");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: b, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(JSON.stringify((model as { doGenerateCalls: unknown[] }).doGenerateCalls[0])).toContain("be concise globally");
+  expect(res.trace.ledger.applied).toContain("pol_g");
 });

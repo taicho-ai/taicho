@@ -14,6 +14,8 @@ import { reserveRunId, writeTrace } from "../store/trace";
 import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
 import { recentRunsDigest } from "./memory";
+import { listPolicies } from "../store/policy";
+import type { PolicyNote } from "../schemas/policy";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -142,10 +144,23 @@ export async function executeRun(
 
   // Visibility from the registry index only — never load every agent's identity (unbounded roster).
   const visible = visibleToRows(opts.agent, loadIndex(deps.db));
+
+  let applied: PolicyNote[] = [];
+  try {
+    const own = listPolicies(deps.ws, opts.agent.id).filter((n) => n.status === "approved");
+    const globals = loadIndex(deps.db)
+      .filter((r) => r.id !== opts.agent.id)
+      .flatMap((r) => listPolicies(deps.ws, r.id))
+      .filter((n) => n.status === "approved" && n.scope === "global");
+    applied = [...own, ...globals];
+  } catch (e) {
+    console.error(`policy load failed for ${opts.agent.id}:`, e);
+  }
+
   const { system } = assemble(opts.agent, {
     visibleAgents: visible,
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
-    policies: [],
+    policies: applied,
     memoryBlock,
   });
   const tools = toolsForAgent(opts.agent, ctx);
@@ -168,7 +183,7 @@ export async function executeRun(
 
   const trace: RunTrace = {
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,
-    ledger: { retrieved: [], applied: [], skipped: [] },
+    ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [] },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, outcome,
     tokens: result.tokens, costUsd: subscription ? null : result.costUsd,
