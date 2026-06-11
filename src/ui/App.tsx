@@ -161,6 +161,7 @@ export function App(props: {
       const agentId = spaceIdx === -1 ? arg : arg.slice(0, spaceIdx);
       const correction = spaceIdx === -1 ? "" : arg.slice(spaceIdx + 1).trim();
       if (!agentId || !correction) { say({ kind: "system", text: "  usage: /teach <agentId> <correction>" }); return; }
+      if (!roster.some((r) => r.id === agentId)) { say({ kind: "system", text: `No agent "${agentId}". Try /agents.` }); return; }
       if (!model) { say({ kind: "system", text: "  no model — set credentials first" }); return; }
       const activeModel = model;
       setBusy(true);
@@ -207,7 +208,7 @@ export function App(props: {
               : [
                   { label: "id", value: pending.req.draft.id },
                   { label: "role", value: pending.req.draft.role },
-                  { label: "soul", value: pending.req.draft.identity.slice(0, 120) },
+                  { label: "identity", value: pending.req.draft.identity },
                 ]
           }
           onDecision={(d) => { const r = pending.resolve; setPending(null); r(d); }}

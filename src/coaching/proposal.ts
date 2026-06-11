@@ -6,7 +6,7 @@ import type { PolicyNote } from "../schemas/policy";
 export const ProposalDraft = z.object({
   when: z.string().describe("condition under which this instruction applies"),
   do: z.string().describe("the instruction itself, imperative"),
-  scope: z.enum(["agent", "team", "global"]).default("agent"),
+  scope: z.enum(["agent", "global"]).default("agent"),
 });
 export type ProposalDraft = z.infer<typeof ProposalDraft>;
 

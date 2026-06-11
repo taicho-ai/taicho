@@ -24,3 +24,8 @@ test("persistApprovedPolicy writes an approved note to disk", () => {
   expect(note.agent).toBe("writer");
   expect(readPolicy(ws, "writer", note.id)?.do).toBe("d");
 });
+
+test("persistApprovedPolicy rejects an invalid scope (fails loud, not silently dropped)", () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-teach-"));
+  expect(() => persistApprovedPolicy(ws, { when: "w", do: "d", scope: "agnt" } as never, "writer")).toThrow();
+});

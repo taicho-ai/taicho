@@ -64,6 +64,7 @@ export interface RunDeps {
   runCounter?: { n: number };
   resolveModel?: (agentId: string) => { model: Model; modelId: string; subscription?: boolean };
   configDefaults?: TaichoConfig["defaults"];
+  globalPolicyCache?: { notes?: PolicyNote[] };
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -77,6 +78,7 @@ export function makeDeps(opts: {
   runCounter?: { n: number };
   resolveModel?: RunDeps["resolveModel"];
   configDefaults?: RunDeps["configDefaults"];
+  globalPolicyCache?: { notes?: PolicyNote[] };
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
@@ -85,6 +87,7 @@ export function makeDeps(opts: {
     signal: opts.signal, priceUsd: opts.priceUsd,
     runCounter: opts.runCounter ?? { n: 0 },
     resolveModel: opts.resolveModel, configDefaults: opts.configDefaults,
+    globalPolicyCache: opts.globalPolicyCache ?? {},
   };
 }
 
@@ -151,10 +154,13 @@ export async function executeRun(
   let applied: PolicyNote[] = [];
   try {
     const own = listPolicies(deps.ws, opts.agent.id).filter((n) => n.status === "approved");
-    const globals = loadIndex(deps.db)
-      .filter((r) => r.id !== opts.agent.id)
-      .flatMap((r) => listPolicies(deps.ws, r.id))
-      .filter((n) => n.status === "approved" && n.scope === "global");
+    const cache = deps.globalPolicyCache!;
+    if (!cache.notes) {
+      cache.notes = loadIndex(deps.db)
+        .flatMap((r) => listPolicies(deps.ws, r.id))
+        .filter((n) => n.status === "approved" && n.scope === "global");
+    }
+    const globals = cache.notes.filter((n) => n.agent !== opts.agent.id);
     applied = [...own, ...globals];
   } catch (e) {
     console.error(`policy load failed for ${opts.agent.id}:`, e);

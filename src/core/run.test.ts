@@ -409,3 +409,12 @@ test("a global-scope note authored on one agent reaches another agent's run", as
   expect(JSON.stringify((model as { doGenerateCalls: unknown[] }).doGenerateCalls[0])).toContain("be concise globally");
   expect(res.trace.ledger.applied).toContain("pol_g");
 });
+
+test("create_agent honors an edited identity, not just role", async () => {
+  const { ws, db } = await boot();
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(call("create_agent", { id: "newbie", role: "r", identity: "original soul" }), text("done")) as any });
+  const deps = makeDeps({ ws, db, model, requestApproval: async () => ({ type: "edit", draft: { identity: "EDITED SOUL" } }) });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect((await loadAgent(ws, "newbie")).identity).toBe("EDITED SOUL");
+});

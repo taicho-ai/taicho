@@ -20,7 +20,8 @@ export async function draftPolicy(model: Model, agentId: string, correction: str
 
 /** Persist an APPROVED policy note (coaching is approval-gated, so status is forced approved). */
 export function persistApprovedPolicy(ws: string, draft: ProposalDraft, agentId: string, fromRun?: string): PolicyNote {
-  const note: PolicyNote = { ...toPolicy(draft, { agent: agentId, taughtBy: "user", fromRun }), status: "approved" };
+  const valid = ProposalDraft.parse(draft);
+  const note: PolicyNote = { ...toPolicy(valid, { agent: agentId, taughtBy: "user", fromRun }), status: "approved" };
   writePolicy(ws, note);
   return note;
 }

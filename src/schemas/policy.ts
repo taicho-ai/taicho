@@ -6,7 +6,7 @@ export const PolicyNote = z.object({
   agent: z.string(),
   when: z.string(),                        // condition, enforced at retrieval
   do: z.string(),                          // instruction
-  scope: z.enum(["agent", "team", "global"]).default("agent"),
+  scope: z.enum(["agent", "global"]).default("agent"),
   status: z.enum(["proposed", "approved", "rejected", "superseded"]),
   supersedes: z.string().optional(),       // id of the note this replaces
   taughtBy: z.string(),
