@@ -8,6 +8,7 @@ import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDe
 import { loadAgent, loadIndex, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
 import type { ModelMessage } from "ai";
+import type { TaichoConfig } from "../store/config";
 
 type Line = { kind: "user" | "agent" | "system"; from?: string; text: string };
 type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
@@ -16,6 +17,8 @@ export function App(props: {
   ws: string; db: Database; model: Model | null; roster: RegistryRow[];
   cfg: { provider: string; model: string } | null;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
+  resolveModel?: (agentId: string) => { model: Model; modelId: string };
+  configDefaults?: TaichoConfig["defaults"];
 }) {
   const { exit } = useApp();
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
@@ -45,6 +48,8 @@ export function App(props: {
     pollSteer: () => steerQueue.current.shift() ?? null,
     signal: aborter.current?.signal,
     priceUsd: props.priceUsd,
+    resolveModel: props.resolveModel,
+    configDefaults: props.configDefaults,
   });
 
   const submit = async (value: string) => {
