@@ -320,3 +320,19 @@ test("a per-agent resolveModel makes an agent run its own model", async () => {
   expect((writerModel as any).doGenerateCalls.length).toBe(1);
   expect((otherModel as any).doGenerateCalls.length).toBe(0);
 });
+
+test("per-agent pricer reflects each agent's resolved model price", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "cheap", role: "x", identity: "x" }, "root");
+  await createAgent(ws, db, { id: "pricey", role: "x", identity: "x" }, "root");
+  const mk = () => new MockLanguageModelV3({ doGenerate: (async () => text("done")) as any });
+  const resolveModel = (id: string) => id === "pricey"
+    ? { model: mk(), modelId: "claude-opus-4-8" }
+    : { model: mk(), modelId: "claude-sonnet-4-6" };
+  const cheap = await loadAgent(ws, "cheap");
+  const pricey = await loadAgent(ws, "pricey");
+  const cheapRes = await executeRun(makeDeps({ ws, db, model: mk(), resolveModel }), { agent: cheap, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  const priceyRes = await executeRun(makeDeps({ ws, db, model: mk(), resolveModel }), { agent: pricey, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(cheapRes.trace.costUsd).toBeGreaterThan(0);
+  expect(priceyRes.trace.costUsd).toBeGreaterThan(cheapRes.trace.costUsd); // opus prices higher than sonnet for identical usage
+});

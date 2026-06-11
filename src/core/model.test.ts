@@ -35,3 +35,11 @@ test("resolveModel caches one instance per provider:model", () => {
   const { resolveModel } = createModelResolver({ config: TaichoConfig.parse({}), fallback: { provider: "anthropic", model: "claude-sonnet-4-6" } });
   expect(resolveModel("a").model).toBe(resolveModel("b").model); // same provider:model -> same cached instance
 });
+
+test("resolveModel resolves provider and model independently (partial override keeps the inherited axis)", () => {
+  const config = TaichoConfig.parse({ defaults: { provider: "anthropic", model: "claude-sonnet-4-6" }, agents: { writer: { model: "gpt-5.5" } } });
+  const { resolveModel } = createModelResolver({ config, fallback: { provider: "anthropic", model: "claude-sonnet-4-6" } });
+  const r = resolveModel("writer");
+  expect(r.modelId).toBe("gpt-5.5");      // per-agent model
+  expect(r.provider).toBe("anthropic");   // provider inherited from defaults (independent axes); warning fires
+});
