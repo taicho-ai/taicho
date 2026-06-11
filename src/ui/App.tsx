@@ -10,8 +10,8 @@ import { listTraces, readTrace } from "../store/trace";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
+import { runSlash as runSlashPure, type Line } from "./slash";
 
-type Line = { kind: "user" | "agent" | "system"; from?: string; text: string };
 type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
 
 type ResolveModelFn = (agentId: string) => { model: Model; modelId: string; subscription?: boolean };
@@ -147,21 +147,11 @@ export function App(props: {
       say({ kind: "system", text: "  logged out of openai." });
       return;
     }
-    if (cmd === "agents") { for (const r of roster) say({ kind: "system", text: `  ${r.is_root ? "*" : "-"} ${r.id}: ${r.role}` }); return; }
-    if (cmd === "runs") {
-      const traces = listTraces(props.ws, arg || undefined);
-      if (!traces.length) say({ kind: "system", text: "  (no runs yet)" });
-      for (const t of traces) say({ kind: "system", text: `  ${t.id}  ${t.outcome}  ${t.tokens}tok` });
-      return;
-    }
-    if (cmd === "trace") {
-      try {
-        const t = readTrace(props.ws, arg);
-        say({ kind: "system", text: `  ${t.id} — ${t.task}\n  outcome=${t.outcome} tokens=${t.tokens} tools=${t.toolCalls.map((c) => `${c.tool}×${c.count}`).join(",")}\n  artifacts: ${t.artifacts.join(", ") || "none"}` });
-      } catch { say({ kind: "system", text: `  no such trace: ${arg}` }); }
-      return;
-    }
-    say({ kind: "system", text: `  unknown command: /${cmd}` });
+    runSlashPure(cmd, arg, {
+      roster,
+      listTraces: (a?: string) => listTraces(props.ws, a),
+      readTrace: (id: string) => readTrace(props.ws, id),
+    }).forEach(say);
   };
 
   return (
