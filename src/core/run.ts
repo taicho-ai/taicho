@@ -14,6 +14,9 @@ import { reserveRunId, writeTrace } from "../store/trace";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
+const MAX_DELEGATION_DEPTH = 5;
+const MAX_RUNS_PER_REQUEST = 50;
+
 export interface ApprovalRequest { kind: "create_agent"; draft: NewAgentDraft; }
 export interface ApprovalDecision { type: "approve" | "reject" | "edit"; }
 export interface RunResult { runId: string; text: string; trace: RunTrace; }
@@ -32,6 +35,9 @@ export interface RunContext {
   runChild: (brief: { to: string; goal: string; context?: string }) => Promise<RunResult>;
   findAgents: (query: string, k: number) => AgentHit[];
   agentExists: (id: string) => boolean;
+  notes: string[];
+  workItems: { n: number };
+  delegationGuard: (to: string) => { ok: true } | { ok: false; error: string };
 }
 
 export interface RunDeps {
@@ -43,6 +49,7 @@ export interface RunDeps {
   pollSteer?: () => string | null;
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
+  runCounter?: { n: number };
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -53,19 +60,25 @@ export function makeDeps(opts: {
   pollSteer?: () => string | null;
   signal?: AbortSignal;
   priceUsd?: RunDeps["priceUsd"];
+  runCounter?: { n: number };
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
     requestApproval: opts.requestApproval ?? (async () => ({ type: "reject" })),
     onStep: opts.onStep, pollSteer: opts.pollSteer,
     signal: opts.signal, priceUsd: opts.priceUsd,
+    runCounter: opts.runCounter ?? { n: 0 },
   };
 }
 
 export async function executeRun(
   deps: RunDeps,
-  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; fromRun: string }; triggeredBy: string },
+  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; fromRun: string }; triggeredBy: string; depth?: number; ancestry?: string[] },
 ): Promise<RunResult> {
+  const depth = opts.depth ?? 0;
+  const ancestry = opts.ancestry ?? [];
+  deps.runCounter!.n += 1;
+
   // reserveRunId atomically claims a unique id (exclusive-create placeholder), so concurrent
   // same-target delegations in one model turn can't collide; writeTrace overwrites it at the end.
   const runId = reserveRunId(deps.ws, opts.agent.id);
@@ -78,8 +91,6 @@ export async function executeRun(
     requestApproval: deps.requestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id),
     canDelegate: (toId) => canDelegate(opts.agent, toId),
-    // TODO(depth-guard): delegate_task -> runChild -> executeRun recursion has no depth/cycle
-    // bound yet; a pathological agent could delegate indefinitely. Tracked for a follow-up slice.
     runChild: async ({ to, goal, context }) => {
       const child = await loadAgent(deps.ws, to);
       return executeRun(deps, {
@@ -87,6 +98,8 @@ export async function executeRun(
         messages: [{ role: "user", content: context ? `${goal}\n\nContext: ${context}` : goal }],
         brief: { from: opts.agent.id, goal, context, fromRun: runId },
         triggeredBy: runId,
+        depth: depth + 1,
+        ancestry: [...ancestry, opts.agent.id],
       });
     },
     // Discovery respects the caller's visibility ACL, consistent with the inline-roster path.
@@ -99,6 +112,16 @@ export async function executeRun(
         k,
       ),
     agentExists: (id) => loadIndex(deps.db).some((r) => r.id === id),
+    notes: [],
+    workItems: { n: 0 },
+    delegationGuard: (to) => {
+      if (!canDelegate(opts.agent, to)) return { ok: false, error: `not permitted to delegate to "${to}"` };
+      if (!loadIndex(deps.db).some((r) => r.id === to)) return { ok: false, error: `no agent "${to}"` };
+      if (to === opts.agent.id || ancestry.includes(to)) return { ok: false, error: `delegation cycle: "${to}" is already an ancestor` };
+      if (depth + 1 > MAX_DELEGATION_DEPTH) return { ok: false, error: `max delegation depth (${MAX_DELEGATION_DEPTH}) reached` };
+      if (deps.runCounter!.n >= MAX_RUNS_PER_REQUEST) return { ok: false, error: `max runs per request (${MAX_RUNS_PER_REQUEST}) reached` };
+      return { ok: true };
+    },
   };
 
   // Visibility from the registry index only — never load every agent's identity (unbounded roster).
@@ -126,7 +149,7 @@ export async function executeRun(
     ledger: { retrieved: [], applied: [], skipped: [] },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, outcome,
-    tokens: result.tokens, costUsd: result.costUsd, notes: [],
+    tokens: result.tokens, costUsd: result.costUsd, notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };
   writeTrace(deps.ws, trace);

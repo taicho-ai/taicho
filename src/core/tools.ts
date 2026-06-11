@@ -52,11 +52,23 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext): ToolSet {
       description: "Delegate a goal to another agent by id and receive its result.",
       inputSchema: z.object({ to: z.string(), goal: z.string(), context: z.string().optional() }),
       execute: async ({ to, goal, context }) => {
-        if (!ctx.canDelegate(to)) return { error: `not permitted to delegate to "${to}"` };
-        if (!ctx.agentExists(to)) return { error: `no agent "${to}"` };
-        const child = await ctx.runChild({ to, goal, context });
-        ctx.delegatedOut.push(child.runId);
-        return { to, runId: child.runId, result: child.text };
+        ctx.workItems.n += 1;
+        if (ctx.workItems.n > agent.budgets.maxWorkItemsPerRequest) {
+          const msg = `work item budget (${agent.budgets.maxWorkItemsPerRequest}) exhausted`;
+          ctx.notes.push(`delegate refused: ${msg}`);
+          return { error: msg };
+        }
+        const guard = ctx.delegationGuard(to);
+        if (!guard.ok) { ctx.notes.push(`delegate refused: ${guard.error}`); return { error: guard.error }; }
+        try {
+          const child = await ctx.runChild({ to, goal, context });
+          ctx.delegatedOut.push(child.runId);
+          return { to, runId: child.runId, result: child.text };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          ctx.notes.push(`delegate failed: ${msg}`);
+          return { error: msg };
+        }
       },
     });
 

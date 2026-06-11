@@ -1,12 +1,13 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockLanguageModelV3, mockValues } from "ai/test";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
-import { ensureWorkspace } from "../store/files";
+import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
-import { seedRoot, reindex, loadIndex, loadAgent, createAgent } from "../store/roster";
+import { seedRoot, reindex, loadIndex, loadAgent, createAgent, serializeAgent } from "../store/roster";
+import { AgentDef } from "../schemas/agent";
 import { makeDeps, executeRun } from "./run";
 import { readTrace } from "../store/trace";
 
@@ -176,4 +177,54 @@ test("a model error is failed with partial tokens, not tokens:0", async () => {
   expect(res.trace.outcome).toBe("failed");
   expect(res.text).toContain("boom");
   expect(res.trace.tokens).toBeGreaterThan(0);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1 Task 4: delegation safety guards
+// ---------------------------------------------------------------------------
+
+function putAgent(ws: string, db: import("bun:sqlite").Database, def: Record<string, unknown>) {
+  const agent = AgentDef.parse({ created: new Date().toISOString(), ...def });
+  mkdirSync(paths.agentDir(ws, agent.id), { recursive: true });
+  writeFileSync(paths.agentFile(ws, agent.id), serializeAgent(agent));
+  db.query("INSERT OR REPLACE INTO registry (id, role, is_root) VALUES (?, ?, ?)").run(agent.id, agent.role, agent.isRoot ? 1 : 0);
+  return agent;
+}
+
+test("self-delegation terminates at the depth cap (no stack blowup) and the run completes", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "loopy", role: "loops", identity: "Delegate to loopy.", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 1, maxWorkItemsPerRequest: 20 } });
+  const model = new MockLanguageModelV3({ doGenerate: (async () => call("delegate_task", { to: "loopy", goal: "again" })) as any });
+  const deps = makeDeps({ ws, db, model });
+  const loopy = await loadAgent(ws, "loopy");
+  const res = await executeRun(deps, { agent: loopy, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.runId).toBeTruthy(); // terminates
+});
+
+test("a direct cycle (a already in ancestry) is refused with a note", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "a", role: "a", identity: "x", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(call("delegate_task", { to: "a", goal: "self" }), text("ok")) as any });
+  const deps = makeDeps({ ws, db, model });
+  const a = await loadAgent(ws, "a");
+  const res = await executeRun(deps, { agent: a, messages: [{ role: "user", content: "go" }], triggeredBy: "user", ancestry: ["a"] });
+  expect(res.trace.delegatedOut.length).toBe(0);
+  expect(res.trace.notes.some((n) => /cycle|depth|delegat/i.test(n))).toBe(true);
+});
+
+test("work-item budget caps delegate fan-out within one run", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "leaf", role: "leaf", identity: "done", tools: [], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "delegate a lot", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 10, maxWorkItemsPerRequest: 1 } });
+  // boss delegates twice; the 2nd exceeds maxWorkItemsPerRequest=1. leaf just returns text.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "leaf", goal: "one" }),
+    text("leaf one done"),
+    call("delegate_task", { to: "leaf", goal: "two" }),
+    text("boss done"),
+  ) as any });
+  const deps = makeDeps({ ws, db, model });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.notes.some((n) => /work item/i.test(n))).toBe(true);
 });
