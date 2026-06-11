@@ -54,12 +54,9 @@ export async function exchangeCode(
   });
   if (!res.ok) throw new Error(`token exchange failed: HTTP ${res.status}`);
   const t = (await res.json()) as TokenResponse;
-  return {
-    access_token: t.access_token,
-    refresh_token: t.refresh_token,
-    expires_at: now() + t.expires_in * 1000,
-    account_id: accountIdFrom(t.id_token),
-  };
+  const account_id = accountIdFrom(t.id_token);
+  if (!account_id) throw new Error("taicho: could not read account_id from the ChatGPT id_token — the accountIdClaim path in constants.ts may need verification");
+  return { access_token: t.access_token, refresh_token: t.refresh_token, expires_at: now() + t.expires_in * 1000, account_id };
 }
 
 export interface LoginDeps {
@@ -86,6 +83,8 @@ export async function runLoginFlow(deps: LoginDeps = {}): Promise<AuthProfile> {
       const u = new URL(req.url);
       if (u.pathname === OPENAI_CODEX_AUTH.callbackPath) {
         if (u.searchParams.get("state") !== state) { rejectFlow(new Error("OAuth state mismatch")); return new Response("state mismatch", { status: 400 }); }
+        const err = u.searchParams.get("error");
+        if (err) { rejectFlow(new Error(u.searchParams.get("error_description") ?? err)); return new Response("sign-in failed", { status: 400 }); }
         const code = u.searchParams.get("code");
         if (code) { resolveCode(code); return new Response("taicho: signed in — you can close this tab."); }
       }

@@ -37,3 +37,9 @@ test("exchangeCode throws on a non-OK token response", async () => {
 test("decodeJwtPayload parses the base64url payload segment", () => {
   expect(decodeJwtPayload(`${b64({})}.${b64({ a: 1 })}.x`)).toEqual({ a: 1 });
 });
+
+test("exchangeCode throws when the id_token lacks the account_id claim", async () => {
+  const idTokenNoAcct = `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify({ sub: "x" })).toString("base64url")}.sig`;
+  const mockFetch = (async () => new Response(JSON.stringify({ access_token: "AT", refresh_token: "RT", id_token: idTokenNoAcct, expires_in: 3600 }), { status: 200 })) as unknown as typeof fetch;
+  await expect(exchangeCode({ code: "c", verifier: "v" }, mockFetch)).rejects.toThrow(/account_id/);
+});

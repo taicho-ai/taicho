@@ -34,7 +34,7 @@ export const OPENAI_CODEX_AUTH = {
   accountIdClaim: { namespace: "https://api.openai.com/auth", field: "chatgpt_account_id" },
 
   /** Refresh the access token when it is within this many ms of expiry (verified ~5 min). */
-  refreshSkewMs: 5 * 60_000,
+  refreshSkewMs: 5 * 60_000, // currently informational only — refresh is 401-driven; proactive refresh is deferred
 } as const;
 
 /** Headers attached to every Codex-backend model request.
