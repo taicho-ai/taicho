@@ -20,7 +20,10 @@ const MAX_DELEGATION_DEPTH = 5;
 const MAX_RUNS_PER_REQUEST = 50;
 
 export interface ApprovalRequest { kind: "create_agent"; draft: NewAgentDraft; }
-export interface ApprovalDecision { type: "approve" | "reject" | "edit"; }
+export type ApprovalDecision =
+  | { type: "approve" }
+  | { type: "reject" }
+  | { type: "edit"; draft: Record<string, string> };
 export interface RunResult { runId: string; text: string; trace: RunTrace; }
 
 /** Mutable per-run context handed to tools' execute fns. */

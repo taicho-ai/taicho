@@ -7,6 +7,7 @@ import { writeFile } from "node:fs/promises";
 import type { AgentDef } from "../schemas/agent";
 import type { RunContext } from "./run";
 import { artifactPath } from "../store/files";
+import { mergeDraft } from "./draft";
 
 export function toolsForAgent(agent: AgentDef, ctx: RunContext): ToolSet {
   const set: ToolSet = {};
@@ -37,12 +38,13 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext): ToolSet {
       }),
       execute: async (draft) => {
         const decision = await ctx.requestApproval({ kind: "create_agent", draft });
-        if (decision.type !== "approve") return { rejected: true, reason: decision.type };
+        if (decision.type === "reject") return { rejected: true, reason: "reject" };
+        const finalDraft = decision.type === "edit" ? mergeDraft(draft, decision.draft) : draft;
         try {
-          const created = await ctx.createAgent(draft);
+          const created = await ctx.createAgent(finalDraft);
           return { created: created.id, role: created.role };
         } catch {
-          return { error: `agent "${draft.id}" already exists or could not be created` };
+          return { error: `agent "${finalDraft.id}" already exists or could not be created` };
         }
       },
     });

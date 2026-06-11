@@ -169,7 +169,7 @@ export function App(props: {
             { label: "role", value: pending.req.draft.role },
             { label: "soul", value: pending.req.draft.identity.slice(0, 120) },
           ]}
-          onDecision={(d) => { const r = pending.resolve; setPending(null); r({ type: d }); }}
+          onDecision={(d) => { const r = pending.resolve; setPending(null); r(d); }}
         />
       ) : (
         <Box>

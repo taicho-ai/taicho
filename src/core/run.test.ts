@@ -348,3 +348,15 @@ test("a subscription-backed run records costUsd null + costNote, tokens still co
   expect(res.trace.costNote).toBe("subscription");
   expect(res.trace.tokens).toBeGreaterThan(0);
 });
+
+test("create_agent applies an edited draft when approval returns edit", async () => {
+  const { ws, db } = await boot();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("create_agent", { id: "newbie", role: "orig role", identity: "orig" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model, requestApproval: async () => ({ type: "edit", draft: { role: "edited role" } }) });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  const created = await loadAgent(ws, "newbie");
+  expect(created.role).toBe("edited role");
+});
