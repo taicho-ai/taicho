@@ -41,6 +41,8 @@ export interface RunDeps {
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   onStep?: (info: { text?: string; tool?: string; agent: string }) => void;
   pollSteer?: () => string | null;
+  signal?: AbortSignal;
+  priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -49,11 +51,14 @@ export function makeDeps(opts: {
   requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   onStep?: RunDeps["onStep"];
   pollSteer?: () => string | null;
+  signal?: AbortSignal;
+  priceUsd?: RunDeps["priceUsd"];
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
     requestApproval: opts.requestApproval ?? (async () => ({ type: "reject" })),
     onStep: opts.onStep, pollSteer: opts.pollSteer,
+    signal: opts.signal, priceUsd: opts.priceUsd,
   };
 }
 
@@ -105,28 +110,25 @@ export async function executeRun(
   });
   const tools = toolsForAgent(opts.agent, ctx);
 
-  let result: Awaited<ReturnType<typeof runLoop>>;
-  let outcome: RunTrace["outcome"] = "completed";
-  try {
-    result = await runLoop({
-      model: deps.model, agent: opts.agent, system, messages: opts.messages, tools,
-      onStep: deps.onStep ? (i) => deps.onStep!({ ...i, agent: opts.agent.id }) : undefined,
-      pollSteer: deps.pollSteer,
-    });
-    if (result.exhausted) outcome = "blocked";
-  } catch (e) {
-    outcome = "failed";
-    console.error(`run ${runId} failed:`, e);
-    result = { text: `error: ${e instanceof Error ? e.message : String(e)}`, toolCalls: {}, tokens: 0, iterations: 0, exhausted: false };
-  }
+  const result = await runLoop({
+    model: deps.model, agent: opts.agent, system, messages: opts.messages, tools,
+    onStep: deps.onStep ? (i) => deps.onStep!({ ...i, agent: opts.agent.id }) : undefined,
+    pollSteer: deps.pollSteer,
+    signal: deps.signal,
+    priceUsd: deps.priceUsd,
+  });
+  const outcome: RunTrace["outcome"] =
+    result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";
+  if (result.error) console.error(`run ${runId} failed:`, result.error);
 
   const trace: RunTrace = {
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,
     ledger: { retrieved: [], applied: [], skipped: [] },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, outcome,
-    tokens: result.tokens, durationMs: Math.round(performance.now() - t0), started,
+    tokens: result.tokens, costUsd: result.costUsd, notes: [],
+    durationMs: Math.round(performance.now() - t0), started,
   };
   writeTrace(deps.ws, trace);
-  return { runId, text: result.text, trace };
+  return { runId, text: result.error ? `error: ${result.error}` : result.text, trace };
 }

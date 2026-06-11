@@ -127,3 +127,53 @@ test("delegate_task is denied when the caller's ACL forbids the target", async (
   expect(res.trace.delegatedOut.length).toBe(0); // ACL blocked the delegation
   expect(res.text).toBe("ok");
 });
+
+test("records real tokens + cost on a completed run", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("write_artifact", { topicSlug: "hello", markdown: "# Hi" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(res.trace.tokens).toBeGreaterThan(0);
+  expect(res.trace.costUsd).toBeGreaterThan(0);
+});
+
+test("a token-capped run ends blocked with non-zero tokens", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const loopy = await loadAgent(ws, "writer");
+  loopy.budgets.maxTokensPerRun = 1;
+  const model = new MockLanguageModelV3({ doGenerate: (async () => call("write_artifact", { topicSlug: "x", markdown: "y" })) as any });
+  const deps = makeDeps({ ws, db, model });
+  const res = await executeRun(deps, { agent: loopy, messages: [{ role: "user", content: "loop" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("blocked");
+  expect(res.trace.tokens).toBeGreaterThan(0);
+});
+
+test("an aborted run is interrupted with partial tokens recorded", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const controller = new AbortController();
+  controller.abort();
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("done")) as any });
+  const deps = makeDeps({ ws, db, model, signal: controller.signal });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("interrupted");
+});
+
+test("a model error is failed with partial tokens, not tokens:0", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  let n = 0;
+  const model = new MockLanguageModelV3({ doGenerate: (async () => { if (n++ === 0) return call("write_artifact", { topicSlug: "x", markdown: "y" }); throw new Error("boom"); }) as any });
+  const deps = makeDeps({ ws, db, model });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("failed");
+  expect(res.text).toContain("boom");
+  expect(res.trace.tokens).toBeGreaterThan(0);
+});
