@@ -1,0 +1,52 @@
+/** Coaching policy store: one file per note at agents/<id>/policies/<pol_id>.md
+ *  (YAML frontmatter = the note minus `do`, body = the instruction). Mirrors roster.ts. */
+import { YAML } from "bun";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { PolicyNote } from "../schemas/policy";
+import { paths } from "./files";
+
+const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
+
+export function serializePolicy(n: PolicyNote): string {
+  const { do: doText, ...meta } = n;
+  return `---\n${YAML.stringify(meta, null, 2)}\n---\n${doText}\n`;
+}
+
+export function parsePolicy(text: string): PolicyNote {
+  const m = FRONTMATTER.exec(text);
+  if (!m) throw new Error("policy file missing YAML frontmatter");
+  const meta = YAML.parse(m[1]) as Record<string, unknown>;
+  return PolicyNote.parse({ ...meta, do: m[2].trim() });
+}
+
+export function writePolicy(ws: string, note: PolicyNote): void {
+  const dir = paths.policyDir(ws, note.agent);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${note.id}.md`), serializePolicy(note));
+}
+
+export function listPolicies(ws: string, agentId: string): PolicyNote[] {
+  const dir = paths.policyDir(ws, agentId);
+  if (!existsSync(dir)) return [];
+  const out: PolicyNote[] = [];
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith(".md")) continue;
+    try { out.push(parsePolicy(readFileSync(join(dir, f), "utf8"))); }
+    catch (e) { console.error(`skipping policy ${f}: ${String(e)}`); }
+  }
+  return out;
+}
+
+export function readPolicy(ws: string, agentId: string, polId: string): PolicyNote | null {
+  const f = join(paths.policyDir(ws, agentId), `${polId}.md`);
+  if (!existsSync(f)) return null;
+  try { return parsePolicy(readFileSync(f, "utf8")); } catch { return null; }
+}
+
+export function deletePolicy(ws: string, agentId: string, polId: string): boolean {
+  const f = join(paths.policyDir(ws, agentId), `${polId}.md`);
+  if (!existsSync(f)) return false;
+  rmSync(f);
+  return true;
+}
