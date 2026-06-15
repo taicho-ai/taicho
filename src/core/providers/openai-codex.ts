@@ -28,10 +28,19 @@ export function makeAuthFetch(deps: AuthFetchDeps): typeof fetch {
   return (async (input, init) => {
     const profile = deps.load();
     if (!profile) throw new AuthExpiredError();
-    const res = await send(input, init, profile);
-    if (res.status !== 401) return res;
-    const refreshed = await deps.refresh(); // throws AuthExpiredError if refresh fails
-    return send(input, init, refreshed);
+    let res = await send(input, init, profile);
+    if (res.status === 401) {
+      const refreshed = await deps.refresh(); // throws AuthExpiredError if refresh fails
+      res = await send(input, init, refreshed);
+    }
+    // Diagnostic (opt-in via TAICHO_DEBUG): on a non-2xx, surface the request URL + status + body
+    // snippet so endpoint/model mismatches are debuggable. Never logs the Authorization header.
+    if (process.env.TAICHO_DEBUG && !res.ok) {
+      const url = input instanceof Request ? input.url : String(input);
+      const body = await res.clone().text().catch(() => "");
+      console.error(`taicho codex ${res.status} ${url} :: ${body.slice(0, 500)}`);
+    }
+    return res;
   }) as typeof fetch;
 }
 
@@ -39,7 +48,9 @@ export function makeAuthFetch(deps: AuthFetchDeps): typeof fetch {
  *  apiKey is a placeholder — real auth is the Authorization header set by makeAuthFetch. */
 export function createCodexProvider(deps: AuthFetchDeps) {
   return createOpenAI({
-    baseURL: `${OPENAI_CODEX_AUTH.codexBaseUrl}/v1`,
+    // The ChatGPT-subscription backend serves the Responses API at <codexBaseUrl>/responses
+    // (NO /v1 — that's the api.openai.com convention). The provider appends "/responses".
+    baseURL: OPENAI_CODEX_AUTH.codexBaseUrl,
     apiKey: "codex-oauth",
     fetch: makeAuthFetch(deps),
   });

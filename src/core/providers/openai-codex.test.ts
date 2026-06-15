@@ -45,3 +45,16 @@ test("createCodexProvider builds a callable provider", () => {
   const provider = createCodexProvider({ load: () => p1, refresh: async () => p1 });
   expect(typeof provider).toBe("function");
 });
+
+test("codex provider POSTs to the ChatGPT backend /codex/responses (NOT /v1/responses)", async () => {
+  let url = "";
+  const baseFetch = (async (input: unknown) => {
+    url = input instanceof Request ? input.url : String(input);
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as unknown as typeof fetch;
+  const provider = createCodexProvider({ load: () => p1, refresh: async () => { throw new Error("x"); }, baseFetch });
+  const { generateText } = await import("ai");
+  await generateText({ model: provider("gpt-5-codex"), prompt: "hi" }).catch(() => {});
+  expect(url).toContain("/backend-api/codex/responses"); // the real ChatGPT-subscription endpoint
+  expect(url).not.toContain("/v1/"); // the /v1 prefix was the 404 cause
+});
