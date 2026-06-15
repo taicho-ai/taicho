@@ -20,14 +20,17 @@ export const OPENAI_CODEX_AUTH = {
   /** Authorize params (verified). */
   scopes: "openid profile email offline_access",
   codeChallengeMethod: "S256" as const,
-  /** UNVERIFIED: Codex uses an `originator` authorize param (`codex_cli` / `codex_vscode`).
-   *  Confirm the exact value taicho should send before relying on live auth. */
-  originator: "codex_cli",
+  /** Originator string the Codex CLI sends (header `originator`). VERIFIED against codex-rs:
+   *  login/src/auth/default_client.rs → `DEFAULT_ORIGINATOR = "codex_cli_rs"`. The backend
+   *  allowlists first-party originators, so a wrong value can be rejected. */
+  originator: "codex_cli_rs",
 
-  /** Codex subscription backend (verified): model calls go to baseURL + responsesPath. */
+  /** Codex subscription backend (verified, codex-rs model-provider-info: CHATGPT_CODEX_BASE_URL).
+   *  The Responses API is served at baseURL + "/responses" (NO /v1 — that's the api.openai.com
+   *  convention; the @ai-sdk/openai provider appends "/responses" itself). */
   codexBaseUrl: "https://chatgpt.com/backend-api/codex",
-  responsesPath: "/v1/responses",
-  defaultModelId: "gpt-5-codex", // UNVERIFIED: confirm the exact Codex-served model id
+  responsesPath: "/responses",
+  defaultModelId: "gpt-5.5", // VERIFIED: current Codex default slug (codex-rs models-manager/models.json)
 
   /** account_id is extracted from the `id_token` JWT. UNVERIFIED: confirm the exact claim path
    *  (Codex reads a ChatGPT account id from a namespaced auth claim in the id_token). */
