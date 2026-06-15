@@ -50,9 +50,17 @@ test("loadConfig warns and falls back to empty on invalid config", async () => {
 
 const prof = { account_id: "acct", expires_at: 123 };
 
-test("resolveAuth: env API key beats a stored OAuth profile", () => {
+test("resolveAuth: a signed-in subscription is preferred over an env API key (no override)", () => {
   const c = TaichoConfig.parse({});
-  expect(resolveAuth({ env: { ANTHROPIC_API_KEY: "k" }, config: c, loadProfile: () => prof }).kind).toBe("env");
+  expect(resolveAuth({ env: { OPENAI_API_KEY: "k" }, config: c, loadProfile: () => prof }).kind).toBe("oauth-openai-codex");
+});
+test("resolveAuth: TAICHO_PROVIDER=openai forces the env API key even with a stored subscription", () => {
+  const c = TaichoConfig.parse({});
+  expect(resolveAuth({ env: { TAICHO_PROVIDER: "openai", OPENAI_API_KEY: "k" }, config: c, loadProfile: () => prof }).kind).toBe("env");
+});
+test("resolveAuth: env API key is used when there is no subscription profile", () => {
+  const c = TaichoConfig.parse({});
+  expect(resolveAuth({ env: { ANTHROPIC_API_KEY: "k" }, config: c, loadProfile: () => null }).kind).toBe("env");
 });
 test("resolveAuth: no env key + profile + flag on -> oauth", () => {
   expect(resolveAuth({ env: {}, config: TaichoConfig.parse({}), loadProfile: () => prof }).kind).toBe("oauth-openai-codex");

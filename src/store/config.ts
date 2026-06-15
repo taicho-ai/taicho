@@ -59,8 +59,10 @@ export type AuthSource =
   | { kind: "oauth-openai-codex"; accountId: string; expiresAt: number }
   | { kind: "none" };
 
-/** Precedence: TAICHO_PROVIDER=openai-codex forces OAuth → env API keys → stored OAuth profile
- *  (if auth.chatgpt_signin !== false) → none. */
+/** Precedence: an explicit `TAICHO_PROVIDER` always wins (`openai-codex` → subscription;
+ *  `openai`/`anthropic` → that env API key). Otherwise a signed-in ChatGPT subscription is
+ *  PREFERRED over env API keys (if you logged in, you meant it), then env keys, then none.
+ *  `auth.chatgpt_signin: false` disables the subscription path entirely. */
 export function resolveAuth(opts: {
   env?: Record<string, string | undefined>;
   config: TaichoConfig;
@@ -71,10 +73,14 @@ export function resolveAuth(opts: {
   const profile = flagOn ? opts.loadProfile() : null;
   const oauth = (): AuthSource =>
     profile ? { kind: "oauth-openai-codex", accountId: profile.account_id, expiresAt: profile.expires_at } : { kind: "none" };
+  const envAuth = (): AuthSource => {
+    const envCfg = resolveConfig(env);
+    return isMissing(envCfg) ? { kind: "none" } : { kind: "env", provider: envCfg.provider, model: envCfg.model };
+  };
+
   if (env.TAICHO_PROVIDER === "openai-codex") return oauth();
-  const envCfg = resolveConfig(env);
-  if (!isMissing(envCfg)) return { kind: "env", provider: envCfg.provider, model: envCfg.model };
-  return oauth();
+  if (env.TAICHO_PROVIDER === "openai" || env.TAICHO_PROVIDER === "anthropic") return envAuth();
+  return profile ? oauth() : envAuth(); // signed-in subscription preferred over env keys
 }
 
 export async function loadConfig(ws: string): Promise<TaichoConfig> {

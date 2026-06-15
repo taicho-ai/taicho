@@ -24,12 +24,9 @@ const roster = loadIndex(db);
 
 const authSource = resolveAuth({ config, loadProfile: () => readProfile() });
 
-// Don't let an env API key silently shadow a ChatGPT subscription the captain signed into.
-if (authSource.kind === "env" && readProfile()) {
-  console.error(
-    `taicho: using API key (env:${authSource.provider}) — but you have a signed-in ChatGPT subscription.\n` +
-      `        Env keys take precedence. To use your subscription: TAICHO_PROVIDER=openai-codex bun run dev  (or unset the API key).`,
-  );
+// Transparency: a signed-in subscription is preferred over env keys; say so when both are present.
+if (authSource.kind === "oauth-openai-codex" && (process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY)) {
+  console.error("taicho: using your ChatGPT subscription (an API key is also set — run with TAICHO_PROVIDER=openai to use the key instead).");
 }
 
 export interface BuiltAuth {
