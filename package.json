@@ -7,7 +7,7 @@
   "homepage": "https://taicho.ai",
   "type": "module",
   "scripts": {
-    "dev": "bun --watch src/index.tsx",
+    "dev": "TAICHO_DEBUG=1 bun --watch src/index.tsx",
     "start": "bun src/index.tsx",
     "build": "bun scripts/ensure-devtools-stub.ts && bun build --compile --minify src/index.tsx --outfile dist/taicho",
     "typecheck": "bunx tsc --noEmit"
