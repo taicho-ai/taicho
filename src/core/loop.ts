@@ -1,7 +1,7 @@
 /** The agent loop. Model proposes (what); config disposes (how much): budgets + caps come from
  *  AgentDef/config — model-supplied budget params are ignored. The loop is the single meter for
  *  spend (tokens + advisory USD) and the single place caps + cancellation are enforced. */
-import { generateText, type ModelMessage, type ToolSet } from "ai";
+import { generateText, streamText, type ModelMessage, type ToolSet } from "ai";
 import type { AgentDef } from "../schemas/agent";
 import { steerMarker } from "./prompt";
 
@@ -51,33 +51,53 @@ export async function runLoop(opts: {
     const steer = opts.pollSteer?.();
     if (steer) messages.push({ role: "user", content: steerMarker(steer) });
 
-    let res;
+    type GenResult = Awaited<ReturnType<typeof generateText>>;
+    let text: string;
+    let usage: GenResult["usage"];
+    let toolCalls: GenResult["toolCalls"];
+    let responseMessages: GenResult["response"]["messages"];
     try {
-      const call: Parameters<typeof generateText>[0] = { model: opts.model, messages, tools: opts.tools, abortSignal: opts.signal };
-      if (opts.codexBackend) call.providerOptions = { openai: { instructions: opts.system, store: false } };
-      else call.system = opts.system;
-      res = await generateText(call);
+      if (opts.codexBackend) {
+        // The ChatGPT/Codex backend requires SSE streaming ("Stream must be set to true") plus the
+        // system prompt in the top-level `instructions` field with store:false ("Instructions are
+        // required"). streamText sends stream:true; we drain it to completion and read the same
+        // aggregated fields generateText would return, so the rest of the loop is identical.
+        let streamErr: unknown;
+        const s = streamText({
+          model: opts.model, messages, tools: opts.tools, abortSignal: opts.signal,
+          providerOptions: { openai: { instructions: opts.system, store: false } },
+          onError: ({ error }) => { streamErr = error; },
+        });
+        await s.consumeStream();
+        if (streamErr) throw streamErr;
+        text = await s.text;
+        usage = await s.usage;
+        toolCalls = await s.toolCalls;
+        responseMessages = (await s.response).messages;
+      } else {
+        const r = await generateText({ model: opts.model, system: opts.system, messages, tools: opts.tools, abortSignal: opts.signal });
+        text = r.text; usage = r.usage; toolCalls = r.toolCalls; responseMessages = r.response.messages;
+      }
     } catch (e) {
       if (opts.signal?.aborted) return done({ text: "[cancelled]", aborted: true });
       return done({ text: "[error]", error: e instanceof Error ? e.message : String(e) });
     }
 
-    const u = res.usage;
-    const inTok = u?.inputTokens ?? 0, outTok = u?.outputTokens ?? 0;
+    const inTok = usage?.inputTokens ?? 0, outTok = usage?.outputTokens ?? 0;
     inputTokens += inTok;
     outputTokens += outTok;
-    tokens += u?.totalTokens ?? inTok + outTok;
+    tokens += usage?.totalTokens ?? inTok + outTok;
     costUsd += opts.priceUsd?.({ inputTokens: inTok, outputTokens: outTok }) ?? 0;
 
-    if (res.toolCalls.length === 0) {
-      opts.onStep?.({ text: res.text });
-      return done({ text: res.text, iterations: iterations + 1 });
+    if (toolCalls.length === 0) {
+      opts.onStep?.({ text });
+      return done({ text, iterations: iterations + 1 });
     }
-    for (const tc of res.toolCalls) {
+    for (const tc of toolCalls) {
       counts[tc.toolName] = (counts[tc.toolName] ?? 0) + 1;
       opts.onStep?.({ tool: tc.toolName });
     }
-    messages.push(...res.response.messages);
+    messages.push(...responseMessages);
   }
   return done({ text: "[budget exhausted]", exhausted: true });
 }

@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MockLanguageModelV3, mockValues } from "ai/test";
+import { MockLanguageModelV3, mockValues, simulateReadableStream } from "ai/test";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
@@ -18,6 +18,19 @@ const text = (t: string) =>
   ({ content: [{ type: "text", text: t }], finishReason: { unified: "stop", raw: "stop" }, usage }) as unknown as LanguageModelV3GenerateResult;
 const call = (name: string, input: object) =>
   ({ content: [{ type: "tool-call", toolCallId: "c1", toolName: name, input: JSON.stringify(input) }], finishReason: { unified: "tool-calls", raw: "tool_use" }, usage }) as unknown as LanguageModelV3GenerateResult;
+// doStream variant for the subscription (Codex) path, which streams instead of doGenerate.
+const textStream = (t: string) => (async () => ({
+  stream: simulateReadableStream({
+    initialDelayInMs: 0, chunkDelayInMs: 0,
+    chunks: [
+      { type: "stream-start", warnings: [] },
+      { type: "text-start", id: "1" },
+      { type: "text-delta", id: "1", delta: t },
+      { type: "text-end", id: "1" },
+      { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+    ],
+  }),
+})) as any;
 
 async function boot() {
   const ws = mkdtempSync(join(tmpdir(), "taicho-"));
@@ -342,8 +355,9 @@ test("per-agent pricer reflects each agent's resolved model price", async () => 
 test("a subscription-backed run records costUsd null + costNote, tokens still counted", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "sub", role: "x", identity: "x" }, "root");
-  const model = new MockLanguageModelV3({ doGenerate: (async () => text("done")) as any });
-  const deps = makeDeps({ ws, db, model, resolveModel: () => ({ model, modelId: "gpt-5.x-codex", subscription: true }) });
+  // subscription:true ⇒ Codex backend ⇒ streaming path, so the mock must serve doStream.
+  const model = new MockLanguageModelV3({ doStream: textStream("done") });
+  const deps = makeDeps({ ws, db, model, resolveModel: () => ({ model, modelId: "gpt-5.5", subscription: true }) });
   const sub = await loadAgent(ws, "sub");
   const res = await executeRun(deps, { agent: sub, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
   expect(res.trace.costUsd).toBeNull();

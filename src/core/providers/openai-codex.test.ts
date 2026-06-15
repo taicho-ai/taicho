@@ -54,7 +54,29 @@ test("codex provider POSTs to the ChatGPT backend /codex/responses (NOT /v1/resp
   }) as unknown as typeof fetch;
   const provider = createCodexProvider({ load: () => p1, refresh: async () => { throw new Error("x"); }, baseFetch });
   const { generateText } = await import("ai");
-  await generateText({ model: provider("gpt-5-codex"), prompt: "hi" }).catch(() => {});
+  await generateText({ model: provider("gpt-5.5"), prompt: "hi" }).catch(() => {});
   expect(url).toContain("/backend-api/codex/responses"); // the real ChatGPT-subscription endpoint
   expect(url).not.toContain("/v1/"); // the /v1 prefix was the 404 cause
+});
+
+test("a streamed codex request body carries stream:true + instructions (the two backend 400s)", async () => {
+  // The backend rejected us twice: {"detail":"Instructions are required"} then {"detail":"Stream
+  // must be set to true"}. This locks in that the streaming codex request satisfies both.
+  let body: Record<string, unknown> = {};
+  const baseFetch = (async (_input: unknown, init: { body?: unknown }) => {
+    body = JSON.parse(String(init?.body ?? "{}"));
+    return new Response("", { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as unknown as typeof fetch;
+  const provider = createCodexProvider({ load: () => p1, refresh: async () => { throw new Error("x"); }, baseFetch });
+  const { streamText } = await import("ai");
+  const r = streamText({
+    model: provider("gpt-5.5"),
+    messages: [{ role: "user", content: "hi" }],
+    providerOptions: { openai: { instructions: "SYS", store: false } },
+    onError: () => {},
+  });
+  await r.consumeStream();
+  expect(body.stream).toBe(true);       // streamText (doStream) sends stream:true
+  expect(body.instructions).toBe("SYS"); // system arrives in the top-level instructions field
+  expect(body.store).toBe(false);
 });
