@@ -12,7 +12,7 @@ import { appendTurn, shouldPersistTurn } from "../store/thread";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
-import { runSlash as runSlashPure, type Line } from "./slash";
+import { runSlash as runSlashPure, type Line, suggestCommands } from "./slash";
 import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 
@@ -51,9 +51,8 @@ export function App(props: {
   const aborter = useRef<AbortController | null>(null);
 
   useInput((_i, key) => {
-    if (!key.escape) return;
-    if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); }
-    else exit();
+    if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else exit(); return; }
+    if (key.tab) { const s = suggestCommands(input); if (s.length) setInput(`/${s[0].name} `); }
   }, { isActive: !pending });
 
   const say = (l: Line) => setLines((prev) => [...prev, l]);
@@ -214,10 +213,21 @@ export function App(props: {
           onDecision={(d) => { const r = pending.resolve; setPending(null); r(d); }}
         />
       ) : (
-        <Box>
-          <Text color="cyan">{busy ? "… " : "> "}</Text>
-          <TextInput value={input} onChange={setInput} onSubmit={submit} />
-        </Box>
+        <>
+          <Box>
+            <Text color="cyan">{busy ? "… " : "> "}</Text>
+            <TextInput value={input} onChange={setInput} onSubmit={submit} />
+          </Box>
+          {!pending && suggestCommands(input).length > 0 && (
+            <Box flexDirection="column">
+              {suggestCommands(input).map((c, i) => (
+                <Text key={c.name} color={i === 0 ? "cyan" : "gray"}>
+                  {`  /${c.name}${c.usage ? " " + c.usage : ""} — ${c.summary}`}
+                </Text>
+              ))}
+            </Box>
+          )}
+        </>
       )}
     </Box>
   );

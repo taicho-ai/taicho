@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { runSlash } from "./slash";
+import { runSlash, COMMANDS, suggestCommands } from "./slash";
 import type { RunTrace } from "../schemas/trace";
 
 const roster = [{ id: "root", role: "orch", is_root: 1 }, { id: "w", role: "writes", is_root: 0 }];
@@ -17,7 +17,7 @@ const deps = {
   deletePolicy: (_a: string, p: string) => p === "pol_1",
 };
 
-test("/help lists the grammar", () => { expect(runSlash("help", "", deps)[0].text).toMatch(/agents/); });
+test("/help lists the grammar", () => { expect(runSlash("help", "", deps).map(l => l.text).join("\n")).toContain("/agents"); });
 test("/agents lists roster with root marked", () => {
   const out = runSlash("agents", "", deps).map((l) => l.text);
   expect(out.some((t) => t.includes("* root"))).toBe(true);
@@ -44,4 +44,19 @@ test("/forget deletes by id; missing -> message; bad usage -> hint", () => {
   expect(runSlash("forget", "w pol_1", deps)[0].text).toContain("forgot");
   expect(runSlash("forget", "w nope", deps)[0].text).toContain("no such policy");
   expect(runSlash("forget", "w", deps)[0].text).toContain("usage");
+});
+
+test("suggestCommands: all on bare slash, prefix-filtered, none past the command or for non-slash", () => {
+  expect(suggestCommands("/").length).toBe(COMMANDS.length);
+  expect(suggestCommands("/te").map((c) => c.name)).toEqual(["teach"]);
+  expect(suggestCommands("/TR").map((c) => c.name)).toEqual(["trace"]); // case-insensitive
+  expect(suggestCommands("/zzz")).toEqual([]);
+  expect(suggestCommands("/runs ")).toEqual([]); // space -> into args, not completing the name
+  expect(suggestCommands("hello")).toEqual([]);
+  expect(suggestCommands("")).toEqual([]);
+});
+
+test("/help is derived from COMMANDS (lists every command)", () => {
+  const text = runSlash("help", "", { roster: [], listTraces: () => [], readTrace: () => { throw new Error(); }, listPolicies: () => [], deletePolicy: () => false }).map((l) => l.text).join("\n");
+  for (const c of COMMANDS) expect(text).toContain(`/${c.name}`);
 });

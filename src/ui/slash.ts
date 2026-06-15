@@ -5,6 +5,30 @@ import type { PolicyNote } from "../schemas/policy";
 
 export type Line = { kind: "user" | "agent" | "system"; from?: string; text: string };
 
+export interface SlashCommand { name: string; summary: string; usage?: string; }
+
+/** Single source of truth for slash commands — drives both /help and the live suggester. */
+export const COMMANDS: SlashCommand[] = [
+  { name: "help", summary: "list commands" },
+  { name: "agents", summary: "list the squad" },
+  { name: "runs", summary: "list runs", usage: "[agent]" },
+  { name: "trace", summary: "show a run", usage: "<id>" },
+  { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>" },
+  { name: "policies", summary: "list an agent's coaching notes", usage: "<agent>" },
+  { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>" },
+  { name: "status", summary: "show the auth source" },
+  { name: "login", summary: "sign in with a ChatGPT subscription", usage: "openai" },
+  { name: "logout", summary: "sign out", usage: "openai" },
+];
+
+/** Commands matching what the captain is typing, while still on the command NAME (before a space). */
+export function suggestCommands(buffer: string): SlashCommand[] {
+  if (!buffer.startsWith("/")) return [];
+  const rest = buffer.slice(1);
+  if (rest.includes(" ")) return [];
+  return COMMANDS.filter((c) => c.name.startsWith(rest.toLowerCase()));
+}
+
 export interface SlashDeps {
   roster: RegistryRow[];
   listTraces: (agentId?: string) => RunTrace[];
@@ -17,7 +41,11 @@ const sys = (text: string): Line => ({ kind: "system", text });
 
 export function runSlash(cmd: string, arg: string, deps: SlashDeps): Line[] {
   if (cmd === "help")
-    return [sys("commands: @<agent> <task> · /agents · /runs [agent] · /trace <id> · /teach <agent> <correction> · /policies <agent> · /forget <agent> <id> · /help · (ESC to quit)")];
+    return [
+      sys("commands (type / to see these; Tab completes):"),
+      ...COMMANDS.map((c) => sys(`  /${c.name}${c.usage ? " " + c.usage : ""} — ${c.summary}`)),
+      sys("  @<agent> <task> — address an agent · ESC to quit"),
+    ];
   if (cmd === "agents")
     return deps.roster.map((r) => sys(`  ${r.is_root ? "*" : "-"} ${r.id}: ${r.role}`));
   if (cmd === "runs") {
