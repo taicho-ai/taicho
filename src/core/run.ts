@@ -185,6 +185,7 @@ export async function executeRun(
     pollSteer: deps.pollSteer,
     signal: deps.signal,
     priceUsd,
+    codexBackend: subscription, // subscription:true ⇒ Codex backend ⇒ system goes in `instructions`
   });
   const outcome: RunTrace["outcome"] =
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";

@@ -92,6 +92,25 @@ test("aborts when the signal is already aborted", async () => {
   expect(res.aborted).toBe(true);
 });
 
+test("codexBackend routes the system prompt to providerOptions.openai.instructions (+ store:false), not as a system message", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(finalResp) as any });
+  await runLoop({ model, agent, system: "SYS", messages: [{ role: "user", content: "go" }], tools, codexBackend: true });
+  const call = (model as any).doGenerateCalls[0];
+  // The ChatGPT/Codex backend rejects ("Instructions are required") unless `system` arrives here:
+  expect(call.providerOptions?.openai?.instructions).toBe("SYS");
+  expect(call.providerOptions?.openai?.store).toBe(false);
+  // ...and NOT duplicated as a system message in the input prompt
+  expect(JSON.stringify(call.prompt)).not.toContain("SYS");
+});
+
+test("env path (no codexBackend) keeps system as a normal system prompt, no instructions override", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(finalResp) as any });
+  await runLoop({ model, agent, system: "SYS", messages: [{ role: "user", content: "go" }], tools });
+  const call = (model as any).doGenerateCalls[0];
+  expect(call.providerOptions?.openai?.instructions).toBeUndefined();
+  expect(JSON.stringify(call.prompt)).toContain("SYS"); // system delivered the normal way
+});
+
 test("returns a structured error (does not throw) when the model call fails", async () => {
   const model = new MockLanguageModelV3({ doGenerate: (() => { throw new Error("boom"); }) as any });
   const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools });

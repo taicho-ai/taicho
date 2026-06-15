@@ -28,6 +28,10 @@ export async function runLoop(opts: {
   pollSteer?: () => string | null;
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
+  /** ChatGPT/Codex-backend shape: the subscription endpoint rejects requests whose system prompt
+   *  is sent as an `input` message ("Instructions are required") — it must arrive in the top-level
+   *  `instructions` field, with store:false. The env (api.openai.com / Anthropic) path uses `system`. */
+  codexBackend?: boolean;
 }): Promise<LoopResult> {
   const counts: Record<string, number> = {};
   let tokens = 0, inputTokens = 0, outputTokens = 0, costUsd = 0, iterations = 0;
@@ -49,7 +53,10 @@ export async function runLoop(opts: {
 
     let res;
     try {
-      res = await generateText({ model: opts.model, system: opts.system, messages, tools: opts.tools, abortSignal: opts.signal });
+      const call: Parameters<typeof generateText>[0] = { model: opts.model, messages, tools: opts.tools, abortSignal: opts.signal };
+      if (opts.codexBackend) call.providerOptions = { openai: { instructions: opts.system, store: false } };
+      else call.system = opts.system;
+      res = await generateText(call);
     } catch (e) {
       if (opts.signal?.aborted) return done({ text: "[cancelled]", aborted: true });
       return done({ text: "[error]", error: e instanceof Error ? e.message : String(e) });
