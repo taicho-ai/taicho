@@ -32,6 +32,9 @@ export async function runLoop(opts: {
    *  is sent as an `input` message ("Instructions are required") — it must arrive in the top-level
    *  `instructions` field, with store:false. The env (api.openai.com / Anthropic) path uses `system`. */
   codexBackend?: boolean;
+  /** OpenRouter (usage:{include:true}) returns the authoritative per-call cost in
+   *  providerMetadata.openrouter.usage.cost — prefer it over the static token pricer when set. */
+  captureProviderCost?: boolean;
 }): Promise<LoopResult> {
   const counts: Record<string, number> = {};
   let tokens = 0, inputTokens = 0, outputTokens = 0, costUsd = 0, iterations = 0;
@@ -56,6 +59,7 @@ export async function runLoop(opts: {
     let usage: GenResult["usage"];
     let toolCalls: GenResult["toolCalls"];
     let responseMessages: GenResult["response"]["messages"];
+    let providerMetadata: GenResult["providerMetadata"];
     try {
       if (opts.codexBackend) {
         // The ChatGPT/Codex backend requires SSE streaming ("Stream must be set to true") plus the
@@ -77,6 +81,7 @@ export async function runLoop(opts: {
       } else {
         const r = await generateText({ model: opts.model, system: opts.system, messages, tools: opts.tools, abortSignal: opts.signal });
         text = r.text; usage = r.usage; toolCalls = r.toolCalls; responseMessages = r.response.messages;
+        providerMetadata = r.providerMetadata;
       }
     } catch (e) {
       if (opts.signal?.aborted) return done({ text: "[cancelled]", aborted: true });
@@ -87,7 +92,9 @@ export async function runLoop(opts: {
     inputTokens += inTok;
     outputTokens += outTok;
     tokens += usage?.totalTokens ?? inTok + outTok;
-    costUsd += opts.priceUsd?.({ inputTokens: inTok, outputTokens: outTok }) ?? 0;
+    // Prefer a provider-reported cost (OpenRouter) when available; else the static token pricer.
+    const provCost = opts.captureProviderCost ? openrouterCostUsd(providerMetadata) : undefined;
+    costUsd += provCost ?? opts.priceUsd?.({ inputTokens: inTok, outputTokens: outTok }) ?? 0;
 
     if (toolCalls.length === 0) {
       opts.onStep?.({ text });
@@ -100,4 +107,11 @@ export async function runLoop(opts: {
     messages.push(...responseMessages);
   }
   return done({ text: "[budget exhausted]", exhausted: true });
+}
+
+/** Read the authoritative USD cost OpenRouter returns under providerMetadata.openrouter.usage.cost.
+ *  Returns undefined when absent/non-finite so the caller can fall back to the token pricer. */
+function openrouterCostUsd(meta: unknown): number | undefined {
+  const cost = (meta as { openrouter?: { usage?: { cost?: unknown } } } | undefined)?.openrouter?.usage?.cost;
+  return typeof cost === "number" && Number.isFinite(cost) ? cost : undefined;
 }

@@ -67,6 +67,30 @@ test("meters input/output/total tokens and cost via the injected pricer", async 
   expect(res.costUsd).toBe(5);
 });
 
+test("captureProviderCost: uses providerMetadata.openrouter.usage.cost, overriding the token pricer", async () => {
+  const withCost = {
+    ...(finalResp as object),
+    providerMetadata: { openrouter: { usage: { cost: 0.0042 } } },
+  } as unknown as LanguageModelV3GenerateResult;
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(withCost) as any });
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
+    captureProviderCost: true,
+    priceUsd: () => 999, // would be used if the provider cost were missing — proves the override
+  });
+  expect(res.costUsd).toBe(0.0042);
+});
+
+test("captureProviderCost: falls back to the token pricer when no provider cost is reported", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(finalResp) as any });
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
+    captureProviderCost: true,
+    priceUsd: ({ inputTokens, outputTokens }) => inputTokens * 2 + outputTokens * 3,
+  });
+  expect(res.costUsd).toBe(5); // usage fixture 1/1 → 1*2 + 1*3
+});
+
 test("stops with exhausted when the token cap is reached", async () => {
   const capped = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 30, maxTokensPerRun: 1 } };
   const model = new MockLanguageModelV3({ doGenerate: (async () => toolCallResp) as any });

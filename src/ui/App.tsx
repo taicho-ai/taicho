@@ -18,7 +18,7 @@ import { mergeDraft } from "../core/draft";
 
 type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
 
-type ResolveModelFn = (agentId: string) => { model: Model; modelId: string; subscription?: boolean };
+type ResolveModelFn = (agentId: string) => { model: Model; modelId: string; subscription?: boolean; captureCost?: boolean };
 type PriceFn = (u: { inputTokens: number; outputTokens: number }) => number;
 interface BuiltAuth { model: Model | null; resolveModel?: ResolveModelFn; priceUsd?: PriceFn }
 
@@ -88,7 +88,7 @@ export function App(props: {
     // Slash commands work even without a model (e.g. /login to acquire one).
     if (parsed.kind === "slash") return runSlash(parsed.cmd, parsed.arg);
 
-    if (!model) { say({ kind: "system", text: "No credentials — set ANTHROPIC_API_KEY / OPENAI_API_KEY and relaunch, or run /login openai. I won't burn tokens until then." }); return; }
+    if (!model) { say({ kind: "system", text: "No credentials — set ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY and relaunch, or run /login openai. I won't burn tokens until then." }); return; }
     const activeModel = model;
 
     setBusy(true);
@@ -120,6 +120,10 @@ export function App(props: {
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
       }
+    } catch (e) {
+      // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
+      // explicit-model guard for a misconfigured OpenRouter agent. Surface it instead of crashing Ink.
+      say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
     } finally { setBusy(false); }
   };
 

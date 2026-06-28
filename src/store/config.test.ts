@@ -24,6 +24,27 @@ test("reports missing when no key present", () => {
   expect(isMissing(resolveConfig({}))).toBe(true);
 });
 
+test("resolves openrouter on TAICHO_PROVIDER=openrouter with the key + explicit model", () => {
+  const c = resolveConfig({ TAICHO_PROVIDER: "openrouter", OPENROUTER_API_KEY: "sk-or", TAICHO_MODEL: "anthropic/claude-sonnet-4.5" });
+  expect(isMissing(c)).toBe(false);
+  if (!isMissing(c)) { expect(c.provider).toBe("openrouter"); expect(c.model).toBe("anthropic/claude-sonnet-4.5"); }
+});
+
+test("TAICHO_PROVIDER=openrouter without the key reports missing", () => {
+  expect(isMissing(resolveConfig({ TAICHO_PROVIDER: "openrouter" }))).toBe(true);
+});
+
+test("auto-detects openrouter when it is the only key, with no default model", () => {
+  const c = resolveConfig({ OPENROUTER_API_KEY: "sk-or" });
+  expect(isMissing(c) ? null : c.provider).toBe("openrouter");
+  expect(isMissing(c) ? null : c.model).toBe(""); // openrouter carries no default slug
+});
+
+test("a first-party key wins over an OpenRouter key in auto-detect", () => {
+  const c = resolveConfig({ OPENAI_API_KEY: "sk-o", OPENROUTER_API_KEY: "sk-or" });
+  expect(isMissing(c) ? null : c.provider).toBe("openai");
+});
+
 test("loadConfig returns empty config when no file exists", async () => {
   const ws = mkdtempSync(join(tmpdir(), "taicho-cfg-"));
   const c = await loadConfig(ws);
@@ -70,6 +91,11 @@ test("resolveAuth: chatgpt_signin:false ignores the profile", () => {
 });
 test("resolveAuth: TAICHO_PROVIDER=openai-codex forces oauth even with an anthropic key", () => {
   expect(resolveAuth({ env: { TAICHO_PROVIDER: "openai-codex", ANTHROPIC_API_KEY: "k" }, config: TaichoConfig.parse({}), loadProfile: () => prof }).kind).toBe("oauth-openai-codex");
+});
+test("resolveAuth: TAICHO_PROVIDER=openrouter forces the env key even with a stored subscription", () => {
+  const r = resolveAuth({ env: { TAICHO_PROVIDER: "openrouter", OPENROUTER_API_KEY: "k", TAICHO_MODEL: "openai/gpt-4o" }, config: TaichoConfig.parse({}), loadProfile: () => prof });
+  expect(r.kind).toBe("env");
+  if (r.kind === "env") expect(r.provider).toBe("openrouter");
 });
 test("resolveAuth: nothing -> none", () => {
   expect(resolveAuth({ env: {}, config: TaichoConfig.parse({}), loadProfile: () => null }).kind).toBe("none");

@@ -4,25 +4,31 @@ import { z } from "zod";
 import { YAML } from "bun";
 import { join } from "node:path";
 
-export type Provider = "anthropic" | "openai";
+export type Provider = "anthropic" | "openai" | "openrouter";
 export interface ResolvedConfig { provider: Provider; model: string; }
 export interface MissingConfig { missing: true; }
 
+// OpenRouter has no sensible default slug (its catalog drifts), so it maps to "" — an empty
+// sentinel meaning "model is required". buildModel/createModelResolver enforce non-empty there.
 const DEFAULT_MODEL: Record<Provider, string> = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-5.5",
+  openrouter: "",
 };
 
+const keyFor = (env: Record<string, string | undefined>, p: Provider): string | undefined =>
+  p === "anthropic" ? env.ANTHROPIC_API_KEY : p === "openai" ? env.OPENAI_API_KEY : env.OPENROUTER_API_KEY;
+
 export function resolveConfig(env: Record<string, string | undefined> = process.env): ResolvedConfig | MissingConfig {
-  const wanted = env.TAICHO_PROVIDER === "openai" ? "openai" : env.TAICHO_PROVIDER === "anthropic" ? "anthropic" : null;
+  const tp = env.TAICHO_PROVIDER;
+  const wanted: Provider | null = tp === "openai" ? "openai" : tp === "anthropic" ? "anthropic" : tp === "openrouter" ? "openrouter" : null;
   const pick = (p: Provider): ResolvedConfig => ({ provider: p, model: env.TAICHO_MODEL ?? DEFAULT_MODEL[p] });
 
-  if (wanted) {
-    const key = wanted === "anthropic" ? env.ANTHROPIC_API_KEY : env.OPENAI_API_KEY;
-    return key ? pick(wanted) : { missing: true };
-  }
+  if (wanted) return keyFor(env, wanted) ? pick(wanted) : { missing: true };
+  // Auto-detect: prefer a first-party key; OpenRouter is last so a stray key can't hijack a setup.
   if (env.ANTHROPIC_API_KEY) return pick("anthropic");
   if (env.OPENAI_API_KEY) return pick("openai");
+  if (env.OPENROUTER_API_KEY) return pick("openrouter");
   return { missing: true };
 }
 
@@ -38,14 +44,14 @@ const PartialBudgets = z.object({
 }).optional();
 
 const AgentOverride = z.object({
-  provider: z.enum(["anthropic", "openai"]).optional(),
+  provider: z.enum(["anthropic", "openai", "openrouter"]).optional(),
   model: z.string().optional(),
   budgets: PartialBudgets,
 });
 
 export const TaichoConfig = z.object({
   defaults: z.object({
-    provider: z.enum(["anthropic", "openai"]).optional(),
+    provider: z.enum(["anthropic", "openai", "openrouter"]).optional(),
     model: z.string().optional(),
     budgets: PartialBudgets,
   }).optional(),
@@ -60,9 +66,9 @@ export type AuthSource =
   | { kind: "none" };
 
 /** Precedence: an explicit `TAICHO_PROVIDER` always wins (`openai-codex` → subscription;
- *  `openai`/`anthropic` → that env API key). Otherwise a signed-in ChatGPT subscription is
- *  PREFERRED over env API keys (if you logged in, you meant it), then env keys, then none.
- *  `auth.chatgpt_signin: false` disables the subscription path entirely. */
+ *  `openai`/`anthropic`/`openrouter` → that env API key). Otherwise a signed-in ChatGPT
+ *  subscription is PREFERRED over env API keys (if you logged in, you meant it), then env keys,
+ *  then none. `auth.chatgpt_signin: false` disables the subscription path entirely. */
 export function resolveAuth(opts: {
   env?: Record<string, string | undefined>;
   config: TaichoConfig;
@@ -79,7 +85,7 @@ export function resolveAuth(opts: {
   };
 
   if (env.TAICHO_PROVIDER === "openai-codex") return oauth();
-  if (env.TAICHO_PROVIDER === "openai" || env.TAICHO_PROVIDER === "anthropic") return envAuth();
+  if (env.TAICHO_PROVIDER === "openai" || env.TAICHO_PROVIDER === "anthropic" || env.TAICHO_PROVIDER === "openrouter") return envAuth();
   return profile ? oauth() : envAuth(); // signed-in subscription preferred over env keys
 }
 

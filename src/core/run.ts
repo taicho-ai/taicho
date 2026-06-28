@@ -62,7 +62,7 @@ export interface RunDeps {
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
   runCounter?: { n: number };
-  resolveModel?: (agentId: string) => { model: Model; modelId: string; subscription?: boolean };
+  resolveModel?: (agentId: string) => { model: Model; modelId: string; subscription?: boolean; captureCost?: boolean };
   configDefaults?: TaichoConfig["defaults"];
   globalPolicyCache?: { notes?: PolicyNote[] };
 }
@@ -186,6 +186,7 @@ export async function executeRun(
     signal: deps.signal,
     priceUsd,
     codexBackend: subscription, // subscription:true ⇒ Codex backend ⇒ system goes in `instructions`
+    captureProviderCost: picked?.captureCost, // OpenRouter reports real cost in providerMetadata
   });
   const outcome: RunTrace["outcome"] =
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";

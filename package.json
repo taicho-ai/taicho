@@ -1,7 +1,7 @@
 {
   "name": "taicho",
   "version": "0.0.1",
-  "description": "\u968a\u9577 \u2014 a controllable multi-agent system. You're the captain; the agents are the squad.",
+  "description": "隊長 — a controllable multi-agent system. You're the captain; the agents are the squad.",
   "license": "MIT",
   "repository": "github:taicho-ai/taicho",
   "homepage": "https://taicho.ai",
@@ -15,6 +15,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.82",
     "@ai-sdk/openai": "^3.0.69",
+    "@openrouter/ai-sdk-provider": "^2.10.0",
     "ai": "^6.0.199",
     "ink": "^7.0.5",
     "ink-text-input": "^6.0.0",

@@ -31,7 +31,7 @@ if (authSource.kind === "oauth-openai-codex" && (process.env.OPENAI_API_KEY || p
 
 export interface BuiltAuth {
   model: Model | null;
-  resolveModel?: (id: string) => { model: Model; modelId: string; subscription?: boolean };
+  resolveModel?: (id: string) => { model: Model; modelId: string; subscription?: boolean; captureCost?: boolean };
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
 }
 
@@ -39,11 +39,13 @@ export interface BuiltAuth {
  *  construction; called both at boot and after a live /login so the REPL re-arms without restart. */
 function buildFromAuth(src: AuthSource): BuiltAuth {
   if (src.kind === "env") {
-    const cfg = { provider: src.provider, model: src.model };
+    // A config-supplied default model is honored for the top-level fallback model too — needed for
+    // OpenRouter, whose env-resolved src.model may be empty (it carries no default slug).
+    const cfg = { provider: src.provider, model: config.defaults?.model ?? src.model };
     return {
       model: buildModel(cfg),
       resolveModel: createModelResolver({ config, fallback: cfg }).resolveModel,
-      priceUsd: pricerFor(src.model),
+      priceUsd: pricerFor(cfg.model),
     };
   }
   if (src.kind === "oauth-openai-codex") {
@@ -62,7 +64,15 @@ function buildFromAuth(src: AuthSource): BuiltAuth {
   return { model: null };
 }
 
-const initial = buildFromAuth(authSource);
+// buildFromAuth can throw on misconfiguration (e.g. OpenRouter selected with no model) — fail fast
+// with the actionable message rather than an Ink render crash.
+let initial: BuiltAuth;
+try {
+  initial = buildFromAuth(authSource);
+} catch (e) {
+  console.error(`taicho: ${e instanceof Error ? e.message : String(e)}`);
+  process.exit(1);
+}
 
 async function onLogin(): Promise<AuthSource> {
   // Never log the token bundle; only print the authorize URL for the paste fallback.

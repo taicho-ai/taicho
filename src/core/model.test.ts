@@ -18,6 +18,41 @@ test("builds an openai model carrying the requested id", () => {
   expect((m as { provider: string }).provider).toContain("openai");
 });
 
+test("builds an openrouter model carrying the namespaced slug, and never warns mismatch", () => {
+  const m = buildModel({ provider: "openrouter", model: "anthropic/claude-sonnet-4.5" });
+  expect((m as { modelId: string }).modelId).toBe("anthropic/claude-sonnet-4.5");
+});
+
+test("openrouter without an explicit model throws an actionable error", () => {
+  expect(() => buildModel({ provider: "openrouter", model: "" })).toThrow(/OpenRouter requires an explicit/);
+});
+
+test("openrouter rejects a non-namespaced slug (a first-party default bleeding in)", () => {
+  // A per-agent `provider: openrouter` override with no model can inherit a first-party fallback
+  // like "claude-sonnet-4-6"; require vendor/model so that fails fast, not as an opaque 400.
+  expect(() => buildModel({ provider: "openrouter", model: "claude-sonnet-4-6" })).toThrow(/namespaced/);
+});
+
+test("resolveModel: openrouter override inheriting a non-namespaced fallback throws", () => {
+  const config = TaichoConfig.parse({ agents: { writer: { provider: "openrouter" } } });
+  const { resolveModel } = createModelResolver({ config, fallback: { provider: "anthropic", model: "claude-sonnet-4-6" } });
+  expect(() => resolveModel("writer")).toThrow(/namespaced/);
+});
+
+test("resolveModel: openrouter sets captureCost and requires a model", () => {
+  const config = TaichoConfig.parse({ defaults: { provider: "openrouter", model: "openai/gpt-4o" } });
+  const { resolveModel } = createModelResolver({ config, fallback: { provider: "anthropic", model: "claude-sonnet-4-6" } });
+  const r = resolveModel("x");
+  expect(r.provider).toBe("openrouter");
+  expect(r.modelId).toBe("openai/gpt-4o");
+  expect(r.captureCost).toBe(true);
+});
+
+test("resolveModel: non-openrouter providers do not set captureCost", () => {
+  const { resolveModel } = createModelResolver({ config: TaichoConfig.parse({}), fallback: { provider: "anthropic", model: "claude-sonnet-4-6" } });
+  expect(resolveModel("x").captureCost).toBeUndefined();
+});
+
 test("resolveModel: per-agent override beats defaults beats fallback", () => {
   const config = TaichoConfig.parse({ defaults: { model: "claude-opus-4-8" }, agents: { writer: { provider: "openai", model: "gpt-5.5" } } });
   const { resolveModel } = createModelResolver({ config, fallback: { provider: "anthropic", model: "claude-sonnet-4-6" } });
