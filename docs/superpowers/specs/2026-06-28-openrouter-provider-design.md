@@ -50,8 +50,11 @@ from its usage accounting, and requiring an explicit model slug (no hardcoded de
   (headers are OpenRouter's recommended app-attribution; harmless, one-time).
 - `buildModel` and `createModelResolver` gain an openrouter branch:
   `openrouter(model, { usage: { include: true } })`.
-- Explicit-model guard: if `provider === "openrouter"` and `!model`, throw
-  `Error("OpenRouter requires an explicit model. Set TAICHO_MODEL or defaults.model in taicho.yaml, e.g. 'anthropic/claude-sonnet-4.5'. Browse slugs at https://openrouter.ai/models")`.
+- Explicit-model guard: if `provider === "openrouter"` and the slug is not namespaced
+  (`!model.includes("/")`), throw an actionable error. Requiring `vendor/model` (not just
+  non-empty) also catches a first-party fallback model (e.g. `claude-sonnet-4-6`) bleeding
+  into a per-agent `provider: openrouter` override with no model — which would otherwise
+  reach OpenRouter as an opaque 400.
 - Mismatch heuristic (`looksMismatched`) applies only to `anthropic`/`openai`;
   openrouter slugs (`vendor/model`) are all valid and must not warn.
 - `ResolvedModel` and the resolver return gain `captureCost?: boolean` (true for
@@ -79,9 +82,23 @@ from its usage accounting, and requiring an explicit model slug (no hardcoded de
   error, `console.error("taicho: " + message)` and `process.exit(1)` (fail fast,
   actionable). `/login` (subscription only) is untouched.
 
-### 6. `src/ui/App.tsx` — type mirror
-- `ResolveModelFn` return type gains `captureCost?: boolean`. No behavioral change
-  (openrouter is env-auth; `/login` re-arm path is subscription only).
+### 6. `src/ui/App.tsx` — type mirror + resolver-throw safety net
+- `ResolveModelFn` return type gains `captureCost?: boolean`.
+- `submit` gains a `catch` around the run: a pre-run throw (e.g. the explicit-model
+  guard firing inside `resolveModel` for a misconfigured per-agent OpenRouter override)
+  is surfaced as a system line instead of crashing Ink. The boot path is already
+  guarded; this covers the per-agent path. `/login` re-arm is subscription only.
+- No-credentials hint also mentions `OPENROUTER_API_KEY`.
+
+## Known limitations (accepted)
+- **Provider selection is env-driven.** `resolveConfig`/`resolveAuth` choose the provider
+  from `TAICHO_PROVIDER` or which `*_API_KEY` is present — `config.defaults.provider`
+  alone does NOT switch boot auth (it only affects per-agent resolution, pre-existing
+  behavior). To use OpenRouter, set `TAICHO_PROVIDER=openrouter` (or have `OPENROUTER_API_KEY`
+  as the sole key). A `defaults.provider: openrouter` with a mismatched env key surfaces
+  via the existing provider/model mismatch warning.
+- **Cost falls back to $0 when OpenRouter omits `usage.cost`.** Tokens remain the hard
+  budget; the static price table has no OpenRouter slugs by design.
 
 ## Tests (no network; mirror existing patterns)
 - `config.test.ts`: `resolveConfig`/`resolveAuth` select openrouter on

@@ -21,6 +21,39 @@ Status: pre-alpha, under active development. See SPEC for design.
 4. **Traces** — every run inspectable: what fired, what it cost, what it produced
 5. **Coaching** — corrections become durable, conditional, approval-gated policy
 
+## Models & providers
+
+taicho reads credentials from the environment. Set one of:
+
+```
+export ANTHROPIC_API_KEY=sk-ant-...     # Anthropic   (default model: claude-sonnet-4-6)
+export OPENAI_API_KEY=sk-...            # OpenAI      (default model: gpt-5.5)
+export OPENROUTER_API_KEY=sk-or-...     # OpenRouter  (model REQUIRED — see below)
+```
+
+Or sign in with a **ChatGPT subscription** (no API key, runs on the Codex backend):
+
+```
+/login openai
+```
+
+**OpenRouter** needs an explicit, namespaced (`vendor/model`) model — it has no default.
+Set it via `TAICHO_MODEL` or `taicho.yaml`, and browse slugs at <https://openrouter.ai/models>:
+
+```
+export OPENROUTER_API_KEY=sk-or-...
+export TAICHO_MODEL=anthropic/claude-sonnet-4.5
+```
+
+OpenRouter runs report their real per-call cost; other env-key runs use an advisory price
+table; subscription runs report `subscription` instead of a dollar cost.
+
+**Selection & precedence.** A signed-in subscription is preferred over env keys. Otherwise
+the provider is auto-detected (Anthropic → OpenAI → OpenRouter). Force a specific one with
+`TAICHO_PROVIDER` = `anthropic` | `openai` | `openrouter` | `openai-codex` (subscription).
+Override the model with `TAICHO_MODEL`. For per-agent providers/models and budgets, use a
+`taicho.yaml` in the workspace root — API keys are never read from that file.
+
 ## Development
 
 Requires [Bun](https://bun.sh).
