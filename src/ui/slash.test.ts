@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { runSlash, COMMANDS, suggestCommands } from "./slash";
+import { runSlash, COMMANDS, suggestCommands, cycleIndex } from "./slash";
 import type { RunTrace } from "../schemas/trace";
 
 const roster = [{ id: "root", role: "orch", is_root: 1 }, { id: "w", role: "writes", is_root: 0 }];
@@ -54,6 +54,13 @@ test("suggestCommands: all on bare slash, prefix-filtered, none past the command
   expect(suggestCommands("/runs ")).toEqual([]); // space -> into args, not completing the name
   expect(suggestCommands("hello")).toEqual([]);
   expect(suggestCommands("")).toEqual([]);
+});
+
+test("cycleIndex: wraps both ends, moves in the middle, guards empty", () => {
+  expect(cycleIndex(2, 3, +1)).toBe(0); // wrap past the end
+  expect(cycleIndex(0, 3, -1)).toBe(2); // wrap before the start
+  expect(cycleIndex(0, 3, +1)).toBe(1); // middle move
+  expect(cycleIndex(0, 0, +1)).toBe(0); // empty-list guard
 });
 
 test("/help is derived from COMMANDS (lists every command)", () => {

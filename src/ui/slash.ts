@@ -5,21 +5,27 @@ import type { PolicyNote } from "../schemas/policy";
 
 export type Line = { kind: "user" | "agent" | "system"; from?: string; text: string };
 
-export interface SlashCommand { name: string; summary: string; usage?: string; }
+export interface SlashCommand { name: string; summary: string; usage?: string; requiresArg?: boolean; }
 
 /** Single source of truth for slash commands — drives both /help and the live suggester. */
 export const COMMANDS: SlashCommand[] = [
   { name: "help", summary: "list commands" },
   { name: "agents", summary: "list the squad" },
   { name: "runs", summary: "list runs", usage: "[agent]" },
-  { name: "trace", summary: "show a run", usage: "<id>" },
-  { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>" },
-  { name: "policies", summary: "list an agent's coaching notes", usage: "<agent>" },
-  { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>" },
+  { name: "trace", summary: "show a run", usage: "<id>", requiresArg: true },
+  { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>", requiresArg: true },
+  { name: "policies", summary: "list an agent's coaching notes", usage: "<agent>", requiresArg: true },
+  { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>", requiresArg: true },
   { name: "status", summary: "show the auth source" },
   { name: "login", summary: "sign in with a ChatGPT subscription", usage: "openai" },
   { name: "logout", summary: "sign out", usage: "openai" },
 ];
+
+/** Wrap an index by delta within [0, len); returns 0 for an empty list. */
+export function cycleIndex(current: number, len: number, delta: number): number {
+  if (len <= 0) return 0;
+  return (((current + delta) % len) + len) % len;
+}
 
 /** Commands matching what the captain is typing, while still on the command NAME (before a space). */
 export function suggestCommands(buffer: string): SlashCommand[] {

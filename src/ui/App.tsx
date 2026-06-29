@@ -12,7 +12,7 @@ import { appendTurn, shouldPersistTurn } from "../store/thread";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
-import { runSlash as runSlashPure, type Line, suggestCommands } from "./slash";
+import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
 import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 
@@ -37,6 +37,7 @@ export function App(props: {
   const { exit } = useApp();
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
   const [input, setInput] = useState("");
+  const [selected, setSelected] = useState(0);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<Pending>(null);
   const [roster, setRoster] = useState(props.roster);
@@ -50,12 +51,30 @@ export function App(props: {
   const thread = useRef<ModelMessage[]>(props.rootThread ?? []);
   const aborter = useRef<AbortController | null>(null);
 
+  // The live suggester: which commands match what's being typed (empty once past the command name).
+  const sugg = suggestCommands(input);
+
   useInput((_i, key) => {
     if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else exit(); return; }
-    if (key.tab) { const s = suggestCommands(input); if (s.length) setInput(`/${s[0].name} `); }
+    if (sugg.length > 0) {
+      if (key.upArrow)   { setSelected((s) => cycleIndex(s, sugg.length, -1)); return; }
+      if (key.downArrow) { setSelected((s) => cycleIndex(s, sugg.length, +1)); return; }
+      if (key.tab)       { acceptSuggestion(sugg); return; }
+    }
   }, { isActive: !pending });
 
   const say = (l: Line) => setLines((prev) => [...prev, l]);
+
+  // Run the highlighted command now (no arg) or fill `/<cmd> ` so the captain can type its argument.
+  const acceptSuggestion = (list: SlashCommand[]) => {
+    const cmd = list[Math.min(selected, list.length - 1)];
+    if (!cmd) return;
+    setSelected(0);
+    if (cmd.requiresArg) { setInput(`/${cmd.name} `); return; }
+    setInput("");
+    say({ kind: "user", text: `/${cmd.name}` });
+    void runSlash(cmd.name, "");
+  };
   // Best-effort: a failed run whose surfaced text reflects an AuthExpiredError ("session expired")
   // gets an explicit nudge to re-run /login openai (the run already returned a failed outcome).
   const maybeSayAuthExpired = (text: string) => {
@@ -78,9 +97,12 @@ export function App(props: {
 
   const submit = async (value: string) => {
     if (!value.trim()) return;
-    setInput("");
 
-    if (busy) { steerQueue.current.push(value); say({ kind: "user", text: `(steer) ${value}` }); return; }
+    if (busy) { setInput(""); steerQueue.current.push(value); say({ kind: "user", text: `(steer) ${value}` }); return; }
+
+    const matches = suggestCommands(value);
+    if (matches.length > 0) { acceptSuggestion(matches); return; } // Enter selects the highlighted command
+    setInput("");
 
     const parsed = parseInput(value);
     say({ kind: "user", text: value });
@@ -220,15 +242,18 @@ export function App(props: {
         <>
           <Box>
             <Text color="cyan">{busy ? "… " : "> "}</Text>
-            <TextInput value={input} onChange={setInput} onSubmit={submit} />
+            <TextInput value={input} onChange={(v) => { setInput(v); setSelected(0); }} onSubmit={submit} />
           </Box>
-          {!pending && suggestCommands(input).length > 0 && (
+          {!pending && sugg.length > 0 && (
             <Box flexDirection="column">
-              {suggestCommands(input).map((c, i) => (
-                <Text key={c.name} color={i === 0 ? "cyan" : "gray"}>
-                  {`  /${c.name}${c.usage ? " " + c.usage : ""} — ${c.summary}`}
-                </Text>
-              ))}
+              {sugg.map((c, i) => {
+                const on = i === Math.min(selected, sugg.length - 1);
+                return (
+                  <Text key={c.name} color={on ? "cyan" : "gray"}>
+                    {`${on ? "›" : " "} /${c.name}${c.usage ? " " + c.usage : ""} — ${c.summary}`}
+                  </Text>
+                );
+              })}
             </Box>
           )}
         </>
