@@ -271,6 +271,8 @@ test("add_mcp end-to-end: agent proposes a server, the card renders, captain app
   await send(stdin, "add the tavily mcp from its docs", ENTER);
   await waitFor(lastFrame, "Add MCP server");          // the ProposalCard rendered the proposal
   expect(lastFrame()).toContain("tavily");
+  expect(lastFrame()).toContain("https://api.tavily.com/mcp"); // transport field
+  expect(lastFrame()).toContain("oauth");                       // env field
   await send(stdin, "y");                               // captain approves
   await waitFor(lastFrame, "Connected tavily");         // connect ran, run resumed
   expect(connected).toEqual(["tavily"]);

@@ -336,23 +336,28 @@ export function App(props: {
       {liveText !== "" && (
         <Text color="green">{streamFromRef.current ? `${streamFromRef.current}: ` : ""}{liveText}</Text>
       )}
-      {pending ? (
-        pending.req.kind === "ask_human" ? (
-          <QuestionCard
-            question={pending.req.question}
-            options={pending.req.options}
-            keyHandlerRef={cardKeyRef}
-            onDecision={(d) => { const r = pending.resolve; cardKeyRef.current = null; setPending(null); r(d); }}
-          />
-        ) : (
+      {pending && (() => {
+        if (pending.req.kind === "ask_human") {
+          return (
+            <QuestionCard
+              question={pending.req.question}
+              options={pending.req.options}
+              keyHandlerRef={cardKeyRef}
+              onDecision={(d) => { const r = pending.resolve; cardKeyRef.current = null; setPending(null); r(d); }}
+            />
+          );
+        }
+        const view = proposalView(pending.req);
+        return (
           <ProposalCard
-            title={proposalView(pending.req).title}
-            fields={proposalView(pending.req).fields}
+            title={view.title}
+            fields={view.fields}
             keyHandlerRef={cardKeyRef}
             onDecision={(d) => { const r = pending.resolve; cardKeyRef.current = null; setPending(null); r(d); }}
           />
-        )
-      ) : (
+        );
+      })()}
+      {!pending && (
         <>
           {busy && <RunStatus activity={activity} />}
           <Box>
