@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { useState, type MutableRefObject } from "react";
+import { Box, Text, type Key } from "ink";
 import TextInput from "ink-text-input";
 import type { ApprovalDecision } from "../core/run";
 
@@ -7,10 +7,15 @@ import type { ApprovalDecision } from "../core/run";
  *  coaching notes, exemplar promotion. */
 export interface CardField { label: string; value: string; }
 
+/** A card's keyboard handler. Cards publish this to App's single, boot-registered useInput (via a
+ *  ref) instead of owning a useInput of their own — see ProposalCard/QuestionCard for why. */
+export type CardKeyHandler = (input: string, key: Key) => void;
+
 export function ProposalCard(props: {
   title: string;
   fields: CardField[];
   supersedes?: string;          // "this replaces: ..." line
+  keyHandlerRef: MutableRefObject<CardKeyHandler | null>;
   onDecision: (d: ApprovalDecision) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -19,7 +24,10 @@ export function ProposalCard(props: {
   );
   const [fieldIndex, setFieldIndex] = useState(0);
 
-  useInput((input, key) => {
+  // Published during render so App's boot-registered useInput forwards the captain's first keystroke
+  // (a card-owned useInput registers a beat late and would drop it — see QuestionCard). In edit mode
+  // we only handle Esc here; field text is typed by the TextInput, whose input handling fires on its own.
+  props.keyHandlerRef.current = (input, key) => {
     if (editing) {
       // Esc from edit mode returns to y/n/e prompt
       if (key.escape) { setEditing(false); setFieldIndex(0); }
@@ -28,7 +36,7 @@ export function ProposalCard(props: {
     if (input === "y") props.onDecision({ type: "approve" });
     else if (input === "n") props.onDecision({ type: "reject" });
     else if (input === "e") { setEditing(true); setFieldIndex(0); }
-  }, { isActive: true });
+  };
 
   if (editing) {
     const currentField = props.fields[fieldIndex];

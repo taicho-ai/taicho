@@ -10,21 +10,34 @@
     "dev": "TAICHO_DEBUG=1 bun --watch src/index.tsx",
     "start": "bun src/index.tsx",
     "build": "bun scripts/ensure-devtools-stub.ts && bun build --compile --minify src/index.tsx --outfile dist/taicho",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "test:e2e": "bun run build && tui-test"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.82",
-    "@ai-sdk/openai": "^3.0.69",
-    "@openrouter/ai-sdk-provider": "^2.10.0",
-    "ai": "^6.0.199",
+    "@ai-sdk/anthropic": "3.0.82",
+    "@ai-sdk/openai": "3.0.69",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openrouter/ai-sdk-provider": "2.10.0",
+    "ai": "6.0.199",
     "ink": "^7.0.5",
     "ink-text-input": "^6.0.0",
     "react": "^19.2.7",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@microsoft/tui-test": "^0.0.4",
     "@types/react": "^19.2.17",
     "bun-types": "^1.3.14",
+    "ink-testing-library": "^4.0.0",
     "typescript": "^6.0.3"
-  }
+  },
+  "//overrides": "A newer in-range AI-SDK patch publishes a broken transitive (@vercel/ai-tsconfig@0.0.0, unpublished -> 404), breaking `bun add`/`bun install` re-resolution. Direct AI-SDK deps are pinned exact (above); overrides pin only the TRANSITIVE @ai-sdk packages — overriding a direct dep is rejected by npm (EOVERRIDE), which npx uses to launch stdio MCP servers. Remove once upstream is fixed.",
+  "overrides": {
+    "@ai-sdk/provider": "3.0.10",
+    "@ai-sdk/provider-utils": "4.0.27",
+    "@ai-sdk/gateway": "3.0.127"
+  },
+  "trustedDependencies": [
+    "@swc/core"
+  ]
 }

@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { resolveConfig, isMissing, loadConfig, resolveAuth, TaichoConfig } from "./config";
+import { resolveConfig, isMissing, loadConfig, resolveAuth, TaichoConfig, interpolateEnv, isStdioServer } from "./config";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -99,4 +99,26 @@ test("resolveAuth: TAICHO_PROVIDER=openrouter forces the env key even with a sto
 });
 test("resolveAuth: nothing -> none", () => {
   expect(resolveAuth({ env: {}, config: TaichoConfig.parse({}), loadProfile: () => null }).kind).toBe("none");
+});
+
+test("interpolateEnv expands ${VAR}, blanks missing ones", () => {
+  expect(interpolateEnv("Bearer ${TOK}", { TOK: "abc" })).toBe("Bearer abc");
+  expect(interpolateEnv("${A}/${B}", { A: "x", B: "y" })).toBe("x/y");
+  expect(interpolateEnv("plain", {})).toBe("plain");
+  expect(interpolateEnv("${MISSING}", {})).toBe("");
+});
+
+test("loadConfig parses an mcp block (stdio + http + oauth)", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-cfg-"));
+  writeFileSync(join(ws, "taicho.yaml"),
+    'mcp:\n  enabled: true\n  servers:\n    web:\n      command: npx\n      args: ["-y", "tavily-mcp"]\n    docs:\n      url: https://mcp.example.com/mcp\n      headers: { Authorization: "Bearer ${DOCS_TOKEN}" }\n    linear:\n      url: https://mcp.linear.app/mcp\n      auth: oauth\n');
+  const c = await loadConfig(ws);
+  expect(c.mcp?.enabled).toBe(true);
+  expect(Object.keys(c.mcp?.servers ?? {})).toEqual(["web", "docs", "linear"]);
+  const web = c.mcp!.servers!.web!;
+  expect(isStdioServer(web)).toBe(true);
+  if (isStdioServer(web)) expect(web.command).toBe("npx");
+  const linear = c.mcp!.servers!.linear!;
+  expect(isStdioServer(linear)).toBe(false);
+  if (!isStdioServer(linear)) expect(linear.auth).toBe("oauth");
 });

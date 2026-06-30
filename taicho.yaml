@@ -1,0 +1,8 @@
+# taicho workspace config. MCP servers here are connected at every boot ("always running").
+# Swap `everything` for a real server, e.g. a web-fetch server for the reporter, or add more.
+mcp:
+  enabled: true
+  servers:
+    everything:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-everything"]

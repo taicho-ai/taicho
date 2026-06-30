@@ -2,6 +2,8 @@
 import type { RegistryRow } from "../store/roster";
 import type { RunTrace } from "../schemas/trace";
 import type { PolicyNote } from "../schemas/policy";
+import { McpServerConfig } from "../store/config";
+import type { McpServerStatus } from "../core/mcp/manager";
 
 export type Line = { kind: "user" | "agent" | "system"; from?: string; text: string };
 
@@ -16,6 +18,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>", requiresArg: true },
   { name: "policies", summary: "list an agent's coaching notes", usage: "<agent>", requiresArg: true },
   { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>", requiresArg: true },
+  { name: "mcp", summary: "manage MCP servers", usage: "[list|add|remove|login] …" },
   { name: "status", summary: "show the auth source" },
   { name: "login", summary: "sign in with a ChatGPT subscription", usage: "openai" },
   { name: "logout", summary: "sign out", usage: "openai" },
@@ -79,4 +82,89 @@ export function runSlash(cmd: string, arg: string, deps: SlashDeps): Line[] {
     return [sys(deps.deletePolicy(agentId, polId) ? `  forgot ${polId}` : `  no such policy: ${polId}`)];
   }
   return [sys(`  unknown command: /${cmd}`)];
+}
+
+// ---- /mcp parsing & formatting (pure; the async handler lives in App.tsx) -------------------------
+
+export type McpCommand =
+  | { kind: "list" }
+  | { kind: "add"; name: string; spec: McpServerConfig }
+  | { kind: "remove"; name: string }
+  | { kind: "login"; name: string }
+  | { kind: "reconnect"; name: string }
+  | { kind: "error"; message: string };
+
+/** Split on whitespace but keep "double quoted" runs together (so --header "K: V" survives). */
+function tokenize(s: string): string[] {
+  const out: string[] = [];
+  let cur = "", q = false, has = false;
+  for (const c of s) {
+    if (c === '"') { q = !q; has = true; continue; }
+    if (!q && /\s/.test(c)) { if (has) { out.push(cur); cur = ""; has = false; } continue; }
+    cur += c; has = true;
+  }
+  if (has) out.push(cur);
+  return out;
+}
+
+/** Parse the argument string of `/mcp …` into a command. Supports:
+ *   (bare) | list
+ *   add <name> <command> [args…] [--env K=V …]            (stdio)
+ *   add <name> <https://url> [--oauth] [--header "K: V" …] (http)
+ *   remove|login|reconnect <name>                                                     */
+const NAME_RE = /^[a-z0-9][a-z0-9_-]*$/i; // no `/` (it delimits server/tool refs), no spaces
+
+export function parseMcpCommand(arg: string): McpCommand {
+  const tokens = tokenize(arg.trim());
+  const sub = (tokens[0] ?? "list").toLowerCase();
+  if (sub === "list" || sub === "ls") return { kind: "list" };
+
+  if (sub === "remove" || sub === "rm" || sub === "login" || sub === "reconnect") {
+    const name = tokens[1];
+    if (!name) return { kind: "error", message: `usage: /mcp ${sub} <name>` };
+    if (!NAME_RE.test(name)) return { kind: "error", message: `invalid server name "${name}" (use letters, digits, _ or -)` };
+    const kind = sub === "rm" ? "remove" : (sub as "remove" | "login" | "reconnect");
+    return { kind, name };
+  }
+
+  if (sub === "add") {
+    const name = tokens[1];
+    if (!name) return { kind: "error", message: "usage: /mcp add <name> <command…|https://url> [flags]" };
+    if (!NAME_RE.test(name)) return { kind: "error", message: `invalid server name "${name}" (use letters, digits, _ or -)` };
+    const rest = tokens.slice(2);
+    const positionals: string[] = [];
+    const headers: Record<string, string> = {};
+    const env: Record<string, string> = {};
+    let oauth = false;
+    for (let i = 0; i < rest.length; i++) {
+      const t = rest[i];
+      if (t === "--oauth") oauth = true;
+      else if (t === "--header") { const kv = rest[++i] ?? ""; const j = kv.indexOf(":"); if (j > 0) headers[kv.slice(0, j).trim()] = kv.slice(j + 1).trim(); }
+      else if (t === "--env") { const kv = rest[++i] ?? ""; const j = kv.indexOf("="); if (j > 0) env[kv.slice(0, j)] = kv.slice(j + 1); }
+      else positionals.push(t);
+    }
+    if (!positionals.length) return { kind: "error", message: "usage: /mcp add <name> <command…|https://url> [flags]" };
+    const head = positionals[0];
+    const isHttp = /^https?:\/\//.test(head);
+    if (isHttp && Object.keys(env).length) return { kind: "error", message: "--env applies to stdio servers, not an http url" };
+    if (!isHttp && (Object.keys(headers).length || oauth)) return { kind: "error", message: "--header/--oauth apply to http servers, not a stdio command" };
+    const raw: unknown = isHttp
+      ? { url: head, ...(Object.keys(headers).length ? { headers } : {}), ...(oauth ? { auth: "oauth" } : {}) }
+      : { command: head, ...(positionals.length > 1 ? { args: positionals.slice(1) } : {}), ...(Object.keys(env).length ? { env } : {}) };
+    const parsed = McpServerConfig.safeParse(raw);
+    if (!parsed.success) return { kind: "error", message: `invalid server spec: ${parsed.error.issues[0]?.message ?? "bad input"}` };
+    return { kind: "add", name, spec: parsed.data };
+  }
+
+  return { kind: "error", message: `unknown /mcp subcommand "${sub}" (try list, add, remove, login, reconnect)` };
+}
+
+const statusIcon = (s: McpServerStatus["status"]): string => (s === "connected" ? "●" : s === "needs-auth" ? "◌" : "✗");
+
+export function formatMcpStatus(servers: McpServerStatus[]): string[] {
+  if (!servers.length) return ["  (no MCP servers — add one with /mcp add <name> npx -y <server> …)"];
+  return servers.map((s) =>
+    `  ${statusIcon(s.status)} ${s.name} [${s.kind}] ${s.status}` +
+    (s.status === "connected" ? ` · ${s.toolCount} tool(s)` : "") +
+    (s.error ? ` · ${s.error}` : ""));
 }

@@ -30,6 +30,7 @@ const ROOT_IDENTITY = `You are the root orchestrator of a taicho squad — the c
 Your job is to TURN THE CAPTAIN'S INTENT INTO ACTION, never to do the domain work yourself:
 - When the captain needs a capability no agent has, call create_agent to PROPOSE a worker (a clear id, a one-line role, and an identity that gives it a strong point of view). The captain approves before it exists.
 - When a fitting agent exists, use find_agents to locate it and delegate_task to hand off the goal.
+- When the captain's intent is ambiguous, call ask_human with 2-4 concrete options to get clarity BEFORE acting — don't guess at what they meant.
 - Keep your own replies short. You coordinate; the squad produces artifacts.`;
 
 export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]): Promise<void> {
@@ -39,7 +40,7 @@ export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]):
     id: "root",
     role: "Orchestrator — interviews the captain, proposes and coordinates worker agents",
     identity: ROOT_IDENTITY,
-    tools: ["create_agent", "delegate_task", "find_agents"],
+    tools: ["create_agent", "delegate_task", "find_agents", "ask_human"],
     canSee: ["*"], canDelegateTo: ["*"], isRoot: true,
     created: new Date().toISOString(),
     budgets: defaults?.budgets,

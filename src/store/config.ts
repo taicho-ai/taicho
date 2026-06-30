@@ -49,6 +49,33 @@ const AgentOverride = z.object({
   budgets: PartialBudgets,
 });
 
+/** An MCP server: a local stdio subprocess, or a remote HTTP endpoint. Distinguished by
+ *  `command` vs `url` (no explicit type tag). Secrets in env/headers use ${VAR} (see interpolateEnv). */
+const McpStdioServer = z.object({
+  command: z.string(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+});
+const McpHttpServer = z.object({
+  url: z.string().url(),
+  headers: z.record(z.string(), z.string()).optional(),
+  auth: z.literal("oauth").optional(), // omitted ⇒ no-auth or static-header auth
+});
+export const McpServerConfig = z.union([McpStdioServer, McpHttpServer]);
+export type McpServerConfig = z.infer<typeof McpServerConfig>;
+export const isStdioServer = (s: McpServerConfig): s is z.infer<typeof McpStdioServer> => "command" in s;
+
+const McpConfig = z.object({
+  enabled: z.boolean().optional(), // default: on when servers are present
+  servers: z.record(z.string(), McpServerConfig).optional(),
+}).optional();
+export type McpConfig = z.infer<typeof McpConfig>;
+
+/** Expand ${VAR} references against the environment so secrets stay in env, not the config file. */
+export function interpolateEnv(value: string, env: Record<string, string | undefined> = process.env): string {
+  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, name: string) => env[name] ?? "");
+}
+
 export const TaichoConfig = z.object({
   defaults: z.object({
     provider: z.enum(["anthropic", "openai", "openrouter"]).optional(),
@@ -57,6 +84,7 @@ export const TaichoConfig = z.object({
   }).optional(),
   agents: z.record(z.string(), AgentOverride).optional(),
   auth: z.object({ chatgpt_signin: z.boolean().optional() }).optional(),
+  mcp: McpConfig,
 }).default({});
 export type TaichoConfig = z.infer<typeof TaichoConfig>;
 

@@ -1,8 +1,9 @@
-import { useState, useRef } from "react";
-import { Box, Text, useInput, useApp } from "ink";
+import { useState, useRef, useEffect } from "react";
+import { Box, Text, useInput, useApp, type Key } from "ink";
 import TextInput from "ink-text-input";
 import type { Database } from "bun:sqlite";
-import { ProposalCard } from "./ProposalCard";
+import { ProposalCard, type CardKeyHandler } from "./ProposalCard";
+import { QuestionCard } from "./QuestionCard";
 import { parseInput } from "./input";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, type RegistryRow } from "../store/roster";
@@ -15,12 +16,37 @@ import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
 import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
+import type { McpManager } from "../core/mcp/manager";
+import { addMcpServer, removeMcpServer } from "../store/mcp-store";
+import { parseMcpCommand, formatMcpStatus } from "./slash";
 
 type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
 
 type ResolveModelFn = (agentId: string) => { model: Model; modelId: string; subscription?: boolean; captureCost?: boolean };
 type PriceFn = (u: { inputTokens: number; outputTokens: number }) => number;
 interface BuiltAuth { model: Model | null; resolveModel?: ResolveModelFn; priceUsd?: PriceFn }
+
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/** Animated run indicator: a braille spinner + the live activity (which agent is doing what) +
+ *  elapsed seconds + the controls hint. Owns its own ticker so only this line repaints. */
+function RunStatus({ activity }: { activity: string }) {
+  const [frame, setFrame] = useState(0);
+  const started = useRef(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setFrame((f) => (f + 1) % SPINNER.length), 80);
+    return () => clearInterval(t);
+  }, []);
+  const secs = ((Date.now() - started.current) / 1000).toFixed(1);
+  return (
+    <Box>
+      <Text color="cyan">{SPINNER[frame]} </Text>
+      <Text color="yellow">{activity}</Text>
+      <Text color="gray">{`  ${secs}s  `}</Text>
+      <Text dimColor>esc to cancel · type to steer</Text>
+    </Box>
+  );
+}
 
 export function App(props: {
   ws: string; db: Database; model: Model | null; roster: RegistryRow[];
@@ -33,11 +59,14 @@ export function App(props: {
   onLogin: () => Promise<AuthSource>;
   onLogout: () => boolean;
   rootThread?: ModelMessage[];
+  mcp?: McpManager;
+  mcpYamlServers?: string[];
 }) {
   const { exit } = useApp();
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
   const [input, setInput] = useState("");
   const [selected, setSelected] = useState(0);
+  const [activity, setActivity] = useState("working…"); // live status shown by the run spinner
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<Pending>(null);
   const [roster, setRoster] = useState(props.roster);
@@ -50,18 +79,26 @@ export function App(props: {
   const steerQueue = useRef<string[]>([]);
   const thread = useRef<ModelMessage[]>(props.rootThread ?? []);
   const aborter = useRef<AbortController | null>(null);
+  // The active approval/question card publishes its key handler here (during its render). App's one
+  // boot-registered useInput forwards to it while a card is up — see the useInput below.
+  const cardKeyRef = useRef<CardKeyHandler | null>(null);
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
 
-  useInput((_i, key) => {
-    if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else exit(); return; }
+  useInput((input, key) => {
+    // While a card is up, this boot-registered useInput is the only listener guaranteed to be wired
+    // when the captain's first keystroke arrives, so we forward it to the active card. (A card-owned
+    // useInput registers a beat after its render commits and would drop that first key — the hang
+    // we're fixing.) The card publishes its handler to cardKeyRef during render.
+    if (pending) { cardKeyRef.current?.(input, key); return; }
+    if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else { void (async () => { await props.mcp?.closeAll(); exit(); })(); } return; }
     if (sugg.length > 0) {
       if (key.upArrow)   { setSelected((s) => cycleIndex(s, sugg.length, -1)); return; }
       if (key.downArrow) { setSelected((s) => cycleIndex(s, sugg.length, +1)); return; }
       if (key.tab)       { acceptSuggestion(sugg); return; }
     }
-  }, { isActive: !pending });
+  }, { isActive: true });
 
   const say = (l: Line) => setLines((prev) => [...prev, l]);
 
@@ -87,12 +124,13 @@ export function App(props: {
   const deps = (model: Model) => makeDeps({
     ws: props.ws, db: props.db, model,
     requestApproval,
-    onStep: ({ tool, agent }) => { if (tool) say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); },
+    onStep: ({ tool, agent }) => { if (tool) { setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); } },
     pollSteer: () => steerQueue.current.shift() ?? null,
     signal: aborter.current?.signal,
     priceUsd,
     resolveModel,
     configDefaults: props.configDefaults,
+    mcp: props.mcp,
   });
 
   const submit = async (value: string) => {
@@ -114,6 +152,7 @@ export function App(props: {
     const activeModel = model;
 
     setBusy(true);
+    setActivity(parsed.kind === "address" ? `${parsed.to} · thinking…` : "root · thinking…");
     steerQueue.current = [];
     aborter.current = new AbortController();
     try {
@@ -154,6 +193,7 @@ export function App(props: {
     if (cmd === "login") {
       if (arg && arg !== "openai") { say({ kind: "system", text: `  unknown login target: ${arg} (try /login openai)` }); return; }
       setBusy(true);
+      setActivity("signing in…");
       say({ kind: "system", text: "  opening browser…" });
       try {
         const src = await props.onLogin();
@@ -181,6 +221,38 @@ export function App(props: {
       say({ kind: "system", text: "  logged out of openai." });
       return;
     }
+    if (cmd === "mcp") {
+      if (!props.mcp) { say({ kind: "system", text: "  MCP is disabled (set mcp.enabled in taicho.yaml or add a server)." }); return; }
+      const mcp = props.mcp;
+      const parsed = parseMcpCommand(arg);
+      if (parsed.kind === "error") { say({ kind: "system", text: `  ${parsed.message}` }); return; }
+      if (parsed.kind === "list") { formatMcpStatus(mcp.list()).forEach((t) => say({ kind: "system", text: t })); return; }
+      const inYaml = (props.mcpYamlServers ?? []).includes(parsed.name);
+      if (parsed.kind === "remove") {
+        const inStore = removeMcpServer(props.ws, parsed.name);
+        const live = await mcp.removeServer(parsed.name);
+        if (inYaml) say({ kind: "system", text: `  "${parsed.name}" is defined in taicho.yaml — dropped for this session; edit the file to remove it permanently.` });
+        else say({ kind: "system", text: inStore || live ? `  removed "${parsed.name}".` : `  no such MCP server "${parsed.name}".` });
+        return;
+      }
+      if (parsed.kind === "add" && inYaml) { say({ kind: "system", text: `  "${parsed.name}" is already defined in taicho.yaml — edit the file, or add it under a different name.` }); return; }
+      // add | login | reconnect — all may connect (and open a browser for OAuth).
+      setBusy(true);
+      const verb = parsed.kind === "add" ? "connecting" : parsed.kind === "login" ? "signing in to" : "reconnecting";
+      setActivity(`${verb} ${parsed.name}…`);
+      say({ kind: "system", text: `  ${verb} "${parsed.name}"…` });
+      try {
+        let st;
+        if (parsed.kind === "add") { addMcpServer(props.ws, parsed.name, parsed.spec); st = await mcp.addServer(parsed.name, parsed.spec); }
+        else if (parsed.kind === "login") st = await mcp.login(parsed.name);
+        else st = await mcp.reconnect(parsed.name);
+        formatMcpStatus([st]).forEach((t) => say({ kind: "system", text: t }));
+        if (st.status === "connected" && parsed.kind === "add") say({ kind: "system", text: `  add "mcp:${parsed.name}" to an agent's tools to let it use these.` });
+      } catch (e) {
+        say({ kind: "system", text: `  ${parsed.kind} failed: ${e instanceof Error ? e.message : String(e)}` });
+      } finally { setBusy(false); }
+      return;
+    }
     if (cmd === "teach") {
       const spaceIdx = arg.indexOf(" ");
       const agentId = spaceIdx === -1 ? arg : arg.slice(0, spaceIdx);
@@ -190,6 +262,7 @@ export function App(props: {
       if (!model) { say({ kind: "system", text: "  no model — set credentials first" }); return; }
       const activeModel = model;
       setBusy(true);
+      setActivity(`teaching ${agentId}…`);
       try {
         const draft = await draftPolicy(activeModel, agentId, correction);
         const decision = await requestApproval({ kind: "propose_coaching", draft });
@@ -221,27 +294,38 @@ export function App(props: {
         </Text>
       ))}
       {pending ? (
-        <ProposalCard
-          title={pending.req.kind === "propose_coaching" ? "New coaching note — approve?" : "New agent — approve?"}
-          fields={
-            pending.req.kind === "propose_coaching"
-              ? [
-                  { label: "when", value: pending.req.draft.when },
-                  { label: "do", value: pending.req.draft.do },
-                  { label: "scope", value: pending.req.draft.scope },
-                ]
-              : [
-                  { label: "id", value: pending.req.draft.id },
-                  { label: "role", value: pending.req.draft.role },
-                  { label: "identity", value: pending.req.draft.identity },
-                ]
-          }
-          onDecision={(d) => { const r = pending.resolve; setPending(null); r(d); }}
-        />
+        pending.req.kind === "ask_human" ? (
+          <QuestionCard
+            question={pending.req.question}
+            options={pending.req.options}
+            keyHandlerRef={cardKeyRef}
+            onDecision={(d) => { const r = pending.resolve; cardKeyRef.current = null; setPending(null); r(d); }}
+          />
+        ) : (
+          <ProposalCard
+            title={pending.req.kind === "propose_coaching" ? "New coaching note — approve?" : "New agent — approve?"}
+            fields={
+              pending.req.kind === "propose_coaching"
+                ? [
+                    { label: "when", value: pending.req.draft.when },
+                    { label: "do", value: pending.req.draft.do },
+                    { label: "scope", value: pending.req.draft.scope },
+                  ]
+                : [
+                    { label: "id", value: pending.req.draft.id },
+                    { label: "role", value: pending.req.draft.role },
+                    { label: "identity", value: pending.req.draft.identity },
+                  ]
+            }
+            keyHandlerRef={cardKeyRef}
+            onDecision={(d) => { const r = pending.resolve; cardKeyRef.current = null; setPending(null); r(d); }}
+          />
+        )
       ) : (
         <>
+          {busy && <RunStatus activity={activity} />}
           <Box>
-            <Text color="cyan">{busy ? "… " : "> "}</Text>
+            <Text color={busy ? "gray" : "cyan"}>{busy ? "❯ " : "> "}</Text>
             <TextInput value={input} onChange={(v) => { setInput(v); setSelected(0); }} onSubmit={submit} />
           </Box>
           {!pending && sugg.length > 0 && (

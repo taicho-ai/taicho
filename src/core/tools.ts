@@ -6,10 +6,11 @@ import { z } from "zod";
 import { writeFile } from "node:fs/promises";
 import type { AgentDef } from "../schemas/agent";
 import type { RunContext } from "./run";
+import type { McpManager } from "./mcp/manager";
 import { artifactPath } from "../store/files";
 import { mergeDraft } from "./draft";
 
-export function toolsForAgent(agent: AgentDef, ctx: RunContext): ToolSet {
+export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
   const set: ToolSet = {};
 
   if (agent.tools.includes("write_artifact"))
@@ -83,6 +84,29 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext): ToolSet {
       inputSchema: z.object({ query: z.string(), k: z.number().int().positive().max(20).default(8) }),
       execute: async ({ query, k }) => ({ matches: ctx.findAgents(query, k) }),
     });
+
+  if (agent.tools.includes("ask_human"))
+    set.ask_human = tool({
+      description: "Ask the human captain a clarifying question with 2-4 options when intent is ambiguous. The captain picks an option or types their own answer; you receive { answer } and continue.",
+      inputSchema: z.object({
+        question: z.string().describe("a single clear question"),
+        options: z.array(z.string()).min(2).max(4).describe("2-4 concrete choices"),
+      }),
+      execute: async ({ question, options }) => {
+        const d = await ctx.requestApproval({ kind: "ask_human", question, options });
+        return d.type === "answered" ? { answer: d.answer } : { cancelled: true };
+      },
+    });
+
+  // MCP tools: each agent.tools entry "mcp:<server>" (whole server) or "mcp:<server>/<tool>" (one
+  // tool) merges the matching connected MCP tools (namespaced server_tool). Unknown/unconnected → none.
+  // Never overwrite an existing key, so an MCP tool can't shadow a privileged built-in (e.g. a server
+  // "create" with tool "agent" -> create_agent) or another server's already-merged tool (first wins).
+  if (mcp)
+    for (const t of agent.tools)
+      if (t.startsWith("mcp:"))
+        for (const [k, v] of Object.entries(mcp.toolsForRef(t.slice(4))))
+          if (!(k in set)) set[k] = v;
 
   return set;
 }

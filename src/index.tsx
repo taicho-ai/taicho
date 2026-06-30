@@ -13,6 +13,8 @@ import { createRefresher } from "./core/auth/refresh";
 import { runLoginFlow } from "./core/auth/login";
 import { createCodexProvider } from "./core/providers/openai-codex";
 import { OPENAI_CODEX_AUTH } from "./core/auth/constants";
+import { createMcpManager, type McpManager } from "./core/mcp/manager";
+import { readMcpStore } from "./store/mcp-store";
 
 const ws = process.cwd();
 const config = await loadConfig(ws);
@@ -21,6 +23,21 @@ await seedRoot(ws, config.defaults);
 const db = openDb(ws);
 if (loadIndex(db).length === 0) await reindex(ws, db);
 const roster = loadIndex(db);
+
+// MCP: connect configured servers (taicho.yaml `mcp.servers` ∪ the /mcp-added store; yaml wins on
+// name collision). Best-effort — a server that fails is skipped, never blocking the REPL. The
+// manager is mutable so /mcp add/remove/login work at runtime. `mcp.enabled: false` disables it.
+const mcp: McpManager | undefined = config.mcp?.enabled === false
+  ? undefined
+  : await createMcpManager({
+      ws,
+      servers: { ...readMcpStore(ws), ...(config.mcp?.servers ?? {}) },
+      onUrl: (u) => console.error("Open to authorize the MCP server:\n" + u),
+    });
+// Reap MCP servers on shutdown. The ESC quit path awaits closeAll(); SIGTERM closes then exits.
+// (Ctrl+C/SIGINT is owned by Ink, which exits the app; stdio children otherwise die with the
+// foreground process group. Async cleanup can't run in a process "exit" handler, so we don't use one.)
+if (mcp) process.on("SIGTERM", () => { void mcp.closeAll().finally(() => process.exit(0)); });
 
 const authSource = resolveAuth({ config, loadProfile: () => readProfile() });
 
@@ -92,6 +109,8 @@ render(
     onLogin={onLogin}
     onLogout={() => deleteProfile()}
     rootThread={rootThread}
+    mcp={mcp}
+    mcpYamlServers={Object.keys(config.mcp?.servers ?? {})}
     {...initial}
     cfg={authSource.kind === "env" ? { provider: authSource.provider, model: authSource.model } : null}
   />,

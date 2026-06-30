@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { runSlash, COMMANDS, suggestCommands, cycleIndex } from "./slash";
+import { runSlash, COMMANDS, suggestCommands, cycleIndex, parseMcpCommand, formatMcpStatus } from "./slash";
 import type { RunTrace } from "../schemas/trace";
 
 const roster = [{ id: "root", role: "orch", is_root: 1 }, { id: "w", role: "writes", is_root: 0 }];
@@ -66,4 +66,49 @@ test("cycleIndex: wraps both ends, moves in the middle, guards empty", () => {
 test("/help is derived from COMMANDS (lists every command)", () => {
   const text = runSlash("help", "", { roster: [], listTraces: () => [], readTrace: () => { throw new Error(); }, listPolicies: () => [], deletePolicy: () => false }).map((l) => l.text).join("\n");
   for (const c of COMMANDS) expect(text).toContain(`/${c.name}`);
+});
+
+test("parseMcpCommand: bare and explicit list", () => {
+  expect(parseMcpCommand("")).toEqual({ kind: "list" });
+  expect(parseMcpCommand("list")).toEqual({ kind: "list" });
+});
+test("parseMcpCommand: add stdio with args", () => {
+  expect(parseMcpCommand("add web npx -y tavily-mcp")).toEqual({ kind: "add", name: "web", spec: { command: "npx", args: ["-y", "tavily-mcp"] } });
+});
+test("parseMcpCommand: add stdio with --env", () => {
+  expect(parseMcpCommand("add svc node server.js --env KEY=val")).toEqual({ kind: "add", name: "svc", spec: { command: "node", args: ["server.js"], env: { KEY: "val" } } });
+});
+test("parseMcpCommand: add http with --oauth", () => {
+  expect(parseMcpCommand("add linear https://mcp.linear.app/mcp --oauth")).toEqual({ kind: "add", name: "linear", spec: { url: "https://mcp.linear.app/mcp", auth: "oauth" } });
+});
+test("parseMcpCommand: add http with a quoted --header (space in value survives)", () => {
+  expect(parseMcpCommand('add docs https://x.com/mcp --header "Authorization: Bearer abc"')).toEqual({ kind: "add", name: "docs", spec: { url: "https://x.com/mcp", headers: { Authorization: "Bearer abc" } } });
+});
+test("parseMcpCommand: remove/login/reconnect take a name", () => {
+  expect(parseMcpCommand("remove web")).toEqual({ kind: "remove", name: "web" });
+  expect(parseMcpCommand("login linear")).toEqual({ kind: "login", name: "linear" });
+  expect(parseMcpCommand("reconnect web")).toEqual({ kind: "reconnect", name: "web" });
+});
+test("parseMcpCommand: errors on missing pieces and unknown subcommand", () => {
+  expect(parseMcpCommand("add").kind).toBe("error");
+  expect(parseMcpCommand("add web").kind).toBe("error"); // no command/url
+  expect(parseMcpCommand("remove").kind).toBe("error");
+  expect(parseMcpCommand("bogus").kind).toBe("error");
+});
+test("parseMcpCommand: rejects bad names and mismatched transport flags", () => {
+  expect(parseMcpCommand("add a/b npx x").kind).toBe("error");                  // `/` in name
+  expect(parseMcpCommand("remove a/b").kind).toBe("error");
+  expect(parseMcpCommand("add web https://x.com/mcp --env K=V").kind).toBe("error"); // --env on http
+  expect(parseMcpCommand("add web npx pkg --oauth").kind).toBe("error");        // --oauth on stdio
+});
+test("formatMcpStatus renders icons + tool counts", () => {
+  const lines = formatMcpStatus([
+    { name: "web", kind: "stdio", status: "connected", toolCount: 3 },
+    { name: "lin", kind: "http", status: "needs-auth", toolCount: 0 },
+    { name: "bad", kind: "http", status: "error", toolCount: 0, error: "boom" },
+  ]);
+  expect(lines[0]).toContain("web"); expect(lines[0]).toContain("3 tool(s)");
+  expect(lines[1]).toContain("needs-auth");
+  expect(lines[2]).toContain("boom");
+  expect(formatMcpStatus([])[0]).toContain("no MCP servers");
 });

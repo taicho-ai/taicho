@@ -17,6 +17,7 @@ import type { TaichoConfig } from "../store/config";
 import { recentRunsDigest } from "./memory";
 import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
+import type { McpManager } from "./mcp/manager";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -25,11 +26,13 @@ const MAX_RUNS_PER_REQUEST = 50;
 
 export type ApprovalRequest =
   | { kind: "create_agent"; draft: NewAgentDraft }
-  | { kind: "propose_coaching"; draft: ProposalDraft };
+  | { kind: "propose_coaching"; draft: ProposalDraft }
+  | { kind: "ask_human"; question: string; options: string[] };
 export type ApprovalDecision =
   | { type: "approve" }
   | { type: "reject" }
-  | { type: "edit"; draft: Record<string, string> };
+  | { type: "edit"; draft: Record<string, string> }
+  | { type: "answered"; answer: string };
 export interface RunResult { runId: string; text: string; trace: RunTrace; }
 
 /** Mutable per-run context handed to tools' execute fns. */
@@ -65,6 +68,7 @@ export interface RunDeps {
   resolveModel?: (agentId: string) => { model: Model; modelId: string; subscription?: boolean; captureCost?: boolean };
   configDefaults?: TaichoConfig["defaults"];
   globalPolicyCache?: { notes?: PolicyNote[] };
+  mcp?: McpManager;
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -79,6 +83,7 @@ export function makeDeps(opts: {
   resolveModel?: RunDeps["resolveModel"];
   configDefaults?: RunDeps["configDefaults"];
   globalPolicyCache?: { notes?: PolicyNote[] };
+  mcp?: McpManager;
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
@@ -88,6 +93,7 @@ export function makeDeps(opts: {
     runCounter: opts.runCounter ?? { n: 0 },
     resolveModel: opts.resolveModel, configDefaults: opts.configDefaults,
     globalPolicyCache: opts.globalPolicyCache ?? {},
+    mcp: opts.mcp,
   };
 }
 
@@ -172,7 +178,7 @@ export async function executeRun(
     policies: applied,
     memoryBlock,
   });
-  const tools = toolsForAgent(opts.agent, ctx);
+  const tools = toolsForAgent(opts.agent, ctx, deps.mcp);
 
   const picked = deps.resolveModel?.(opts.agent.id);
   const subscription = picked?.subscription === true;
