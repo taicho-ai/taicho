@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Box, Text, useInput, useApp, type Key } from "ink";
 import TextInput from "ink-text-input";
 import type { Database } from "bun:sqlite";
-import { ProposalCard, type CardKeyHandler } from "./ProposalCard";
+import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCard";
 import { QuestionCard } from "./QuestionCard";
 import { parseInput } from "./input";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
@@ -12,6 +12,7 @@ import { listPolicies, deletePolicy } from "../store/policy";
 import { appendTurn, shouldPersistTurn } from "../store/thread";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
+import { isStdioServer } from "../store/config";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
 import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
@@ -46,6 +47,24 @@ function RunStatus({ activity }: { activity: string }) {
       <Text dimColor>esc to cancel · type to steer</Text>
     </Box>
   );
+}
+
+/** Title + fields for the non-question approval cards. */
+function proposalView(req: Exclude<ApprovalRequest, { kind: "ask_human" }>): { title: string; fields: CardField[] } {
+  if (req.kind === "propose_coaching")
+    return { title: "New coaching note — approve?", fields: [
+      { label: "when", value: req.draft.when }, { label: "do", value: req.draft.do }, { label: "scope", value: req.draft.scope },
+    ] };
+  if (req.kind === "add_mcp") {
+    const transport = isStdioServer(req.spec) ? `${req.spec.command} ${(req.spec.args ?? []).join(" ")}`.trim() : req.spec.url;
+    const env = isStdioServer(req.spec) ? Object.keys(req.spec.env ?? {}).join(", ") : (req.spec.auth ?? Object.keys(req.spec.headers ?? {}).join(", "));
+    return { title: "Add MCP server — approve?", fields: [
+      { label: "name", value: req.name }, { label: "transport", value: transport }, { label: "env", value: env || "—" },
+    ] };
+  }
+  return { title: "New agent — approve?", fields: [
+    { label: "id", value: req.draft.id }, { label: "role", value: req.draft.role }, { label: "identity", value: req.draft.identity },
+  ] };
 }
 
 export function App(props: {
@@ -327,28 +346,8 @@ export function App(props: {
           />
         ) : (
           <ProposalCard
-            title={
-              pending.req.kind === "propose_coaching" ? "New coaching note — approve?"
-              : pending.req.kind === "create_agent" ? "New agent — approve?"
-              : `Add MCP server "${pending.req.name}"?`
-            }
-            fields={
-              pending.req.kind === "propose_coaching"
-                ? [
-                    { label: "when", value: pending.req.draft.when },
-                    { label: "do", value: pending.req.draft.do },
-                    { label: "scope", value: pending.req.draft.scope },
-                  ]
-                : pending.req.kind === "create_agent"
-                  ? [
-                      { label: "id", value: pending.req.draft.id },
-                      { label: "role", value: pending.req.draft.role },
-                      { label: "identity", value: pending.req.draft.identity },
-                    ]
-                  : [
-                      { label: "name", value: pending.req.name },
-                    ]
-            }
+            title={proposalView(pending.req).title}
+            fields={proposalView(pending.req).fields}
             keyHandlerRef={cardKeyRef}
             onDecision={(d) => { const r = pending.resolve; cardKeyRef.current = null; setPending(null); r(d); }}
           />

@@ -256,3 +256,22 @@ test("no credentials: a chat message is refused without burning tokens", async (
   await send(stdin, "hello", ENTER);
   await waitFor(lastFrame, "No credentials");
 });
+
+test("add_mcp end-to-end: agent proposes a server, the card renders, captain approves, run resumes", async () => {
+  const addCall = {
+    content: [{ type: "tool-call", toolCallId: "c1", toolName: "add_mcp_server", input: JSON.stringify({ name: "tavily", url: "https://api.tavily.com/mcp", auth: "oauth" }) }],
+    finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+  } as unknown as LanguageModelV3GenerateResult;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(addCall, finalText("Connected tavily (3 tools)")) as any });
+  const connected: string[] = [];
+  const mcp = fakeMcp({ addServer: async (n) => { connected.push(n); return { name: n, kind: "http", status: "connected", toolCount: 3 }; } });
+  const { props } = await setup({ model, mcp });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "add the tavily mcp from its docs", ENTER);
+  await waitFor(lastFrame, "Add MCP server");          // the ProposalCard rendered the proposal
+  expect(lastFrame()).toContain("tavily");
+  await send(stdin, "y");                               // captain approves
+  await waitFor(lastFrame, "Connected tavily");         // connect ran, run resumed
+  expect(connected).toEqual(["tavily"]);
+});
