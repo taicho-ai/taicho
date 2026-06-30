@@ -53,7 +53,7 @@ export async function createMcpManager(opts: McpManagerOptions): Promise<McpMana
       } else if (spec.auth === "oauth") {
         // Fresh provider+transport per attempt — the OAuth reconnect after finishAuth needs a new
         // transport (the first one is already started), so runMcpOAuth calls makeTransport twice.
-        const makeTransport = () => new StreamableHTTPClientTransport(new URL(spec.url), {
+        const makeTransport = () => new StreamableHTTPClientTransport(new URL(interpolateEnv(spec.url)), {
           authProvider: createMcpOAuthProvider({
             ws: opts.ws,
             serverName: name,
@@ -66,7 +66,7 @@ export async function createMcpManager(opts: McpManagerOptions): Promise<McpMana
         else await client.connect(makeTransport());
       } else {
         const headers = Object.fromEntries(Object.entries(spec.headers ?? {}).map(([k, v]) => [k, interpolateEnv(v)]));
-        await client.connect(new StreamableHTTPClientTransport(new URL(spec.url), { requestInit: { headers } }));
+        await client.connect(new StreamableHTTPClientTransport(new URL(interpolateEnv(spec.url)), { requestInit: { headers } }));
       }
       const { tools } = await client.listTools();
       const set: ToolSet = {};
