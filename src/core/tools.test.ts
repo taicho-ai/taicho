@@ -70,3 +70,21 @@ test("an MCP tool cannot shadow a privileged built-in", () => {
   const set = toolsForAgent(agent(["create_agent", "mcp:create"]), ctx, shadow);
   expect(set.create_agent?.description).toContain("Propose"); // the built-in, not fakeTool ("x")
 });
+
+test("read_url: present only when granted", () => {
+  expect("read_url" in toolsForAgent(agent(["read_url"]), ctx)).toBe(true);
+  expect("read_url" in toolsForAgent(agent(["write_artifact"]), ctx)).toBe(false);
+});
+
+test("read_url: returns an actionable error when FIRECRAWL_API_KEY is unset", async () => {
+  const prev = process.env.FIRECRAWL_API_KEY;
+  delete process.env.FIRECRAWL_API_KEY;
+  try {
+    const set = toolsForAgent(agent(["read_url"]), ctx);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const out = await (set.read_url as any).execute({ url: "https://docs.example.com" });
+    expect(out.error).toMatch(/FIRECRAWL_API_KEY/);
+  } finally {
+    if (prev !== undefined) process.env.FIRECRAWL_API_KEY = prev;
+  }
+});

@@ -9,6 +9,7 @@ import type { RunContext } from "./run";
 import type { McpManager } from "./mcp/manager";
 import { artifactPath } from "../store/files";
 import { mergeDraft } from "./draft";
+import { scrapeUrl } from "./firecrawl";
 
 export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
   const set: ToolSet = {};
@@ -83,6 +84,16 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       description: "Search the squad for agents whose role matches a capability. Returns top matches.",
       inputSchema: z.object({ query: z.string(), k: z.number().int().positive().max(20).default(8) }),
       execute: async ({ query, k }) => ({ matches: ctx.findAgents(query, k) }),
+    });
+
+  if (agent.tools.includes("read_url"))
+    set.read_url = tool({
+      description: "Fetch a web page (e.g. an MCP server's setup docs) and return it as clean markdown. Requires FIRECRAWL_API_KEY in the environment.",
+      inputSchema: z.object({ url: z.string().url() }),
+      execute: async ({ url }) => {
+        const r = await scrapeUrl(url);
+        return "markdown" in r ? { markdown: r.markdown } : { error: r.error };
+      },
     });
 
   if (agent.tools.includes("ask_human"))
