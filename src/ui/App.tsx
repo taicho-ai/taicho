@@ -327,7 +327,11 @@ export function App(props: {
           />
         ) : (
           <ProposalCard
-            title={pending.req.kind === "propose_coaching" ? "New coaching note — approve?" : "New agent — approve?"}
+            title={
+              pending.req.kind === "propose_coaching" ? "New coaching note — approve?"
+              : pending.req.kind === "create_agent" ? "New agent — approve?"
+              : `Add MCP server "${pending.req.name}"?`
+            }
             fields={
               pending.req.kind === "propose_coaching"
                 ? [
@@ -335,11 +339,15 @@ export function App(props: {
                     { label: "do", value: pending.req.draft.do },
                     { label: "scope", value: pending.req.draft.scope },
                   ]
-                : [
-                    { label: "id", value: pending.req.draft.id },
-                    { label: "role", value: pending.req.draft.role },
-                    { label: "identity", value: pending.req.draft.identity },
-                  ]
+                : pending.req.kind === "create_agent"
+                  ? [
+                      { label: "id", value: pending.req.draft.id },
+                      { label: "role", value: pending.req.draft.role },
+                      { label: "identity", value: pending.req.draft.identity },
+                    ]
+                  : [
+                      { label: "name", value: pending.req.name },
+                    ]
             }
             keyHandlerRef={cardKeyRef}
             onDecision={(d) => { const r = pending.resolve; cardKeyRef.current = null; setPending(null); r(d); }}

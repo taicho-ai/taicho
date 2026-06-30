@@ -18,6 +18,7 @@ import { recentRunsDigest } from "./memory";
 import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
+import type { McpServerConfig } from "../store/config";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -27,7 +28,8 @@ const MAX_RUNS_PER_REQUEST = 50;
 export type ApprovalRequest =
   | { kind: "create_agent"; draft: NewAgentDraft }
   | { kind: "propose_coaching"; draft: ProposalDraft }
-  | { kind: "ask_human"; question: string; options: string[] };
+  | { kind: "ask_human"; question: string; options: string[] }
+  | { kind: "add_mcp"; name: string; spec: McpServerConfig };
 export type ApprovalDecision =
   | { type: "approve" }
   | { type: "reject" }

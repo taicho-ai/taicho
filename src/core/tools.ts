@@ -10,6 +10,8 @@ import type { McpManager } from "./mcp/manager";
 import { artifactPath } from "../store/files";
 import { mergeDraft } from "./draft";
 import { scrapeUrl } from "./firecrawl";
+import { McpServerConfig } from "../store/config";
+import { addMcpServer } from "../store/mcp-store";
 
 export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
   const set: ToolSet = {};
@@ -93,6 +95,36 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       execute: async ({ url }) => {
         const r = await scrapeUrl(url);
         return "markdown" in r ? { markdown: r.markdown } : { error: r.error };
+      },
+    });
+
+  if (mcp && agent.tools.includes("add_mcp_server"))
+    set.add_mcp_server = tool({
+      description: "Connect a NEW MCP server for the captain to approve. Provide a `url` for a remote/hosted server (with auth:'oauth' or headers), or a `command`/`args` for a local stdio server. Put secrets as ${ENV_VAR} refs (ask_human for the var name first). Returns the connection status + tool count; on error, fix the config and call again.",
+      inputSchema: z.object({
+        name: z.string().regex(/^[a-z][a-z0-9-]*$/, "lowercase id: letters, digits, hyphens"),
+        url: z.string().url().optional(),
+        auth: z.literal("oauth").optional(),
+        headers: z.record(z.string(), z.string()).optional(),
+        command: z.string().optional(),
+        args: z.array(z.string()).optional(),
+        env: z.record(z.string(), z.string()).optional(),
+      }),
+      execute: async ({ name, url, auth, headers, command, args, env }) => {
+        const raw = url
+          ? { url, ...(auth ? { auth } : {}), ...(headers ? { headers } : {}) }
+          : command
+            ? { command, ...(args ? { args } : {}), ...(env ? { env } : {}) }
+            : null;
+        if (!raw) return { error: "provide a `url` (remote server) or a `command` (local stdio server)" };
+        const parsed = McpServerConfig.safeParse(raw);
+        if (!parsed.success) return { error: `invalid server config: ${parsed.error.issues[0]?.message ?? "unknown"}` };
+        const spec = parsed.data;
+        const decision = await ctx.requestApproval({ kind: "add_mcp", name, spec });
+        if (decision.type !== "approve") return { rejected: true };
+        addMcpServer(ctx.ws, name, spec);
+        const status = await mcp.addServer(name, spec);
+        return { name, status: status.status, toolCount: status.toolCount, error: status.error };
       },
     });
 

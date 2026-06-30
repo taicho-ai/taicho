@@ -1,10 +1,14 @@
 import { test, expect } from "bun:test";
 import { tool } from "ai";
 import { z } from "zod";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { toolsForAgent } from "./tools";
 import type { AgentDef } from "../schemas/agent";
 import type { RunContext } from "./run";
 import type { McpManager } from "./mcp/manager";
+import { readMcpStore } from "../store/mcp-store";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
 const fakeMcp = {
@@ -87,4 +91,56 @@ test("read_url: returns an actionable error when FIRECRAWL_API_KEY is unset", as
   } finally {
     if (prev !== undefined) process.env.FIRECRAWL_API_KEY = prev;
   }
+});
+
+test("add_mcp_server: absent without an MCP manager", () => {
+  expect("add_mcp_server" in toolsForAgent(agent(["add_mcp_server"]), ctx)).toBe(false);
+});
+
+test("add_mcp_server: granted + manager present → approve connects and persists", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-tools-"));
+  const added: Array<[string, unknown]> = [];
+  const mcp = {
+    toolsForRef: () => ({}),
+    addServer: async (n: string, spec: unknown) => { added.push([n, spec]); return { name: n, kind: "http", status: "connected", toolCount: 3 }; },
+  } as unknown as McpManager;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const c = { ws, requestApproval: async () => ({ type: "approve" }) } as any;
+  const set = toolsForAgent(agent(["add_mcp_server"]), c, mcp);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await (set.add_mcp_server as any).execute({ name: "tavily", url: "https://api.tavily.com/mcp", auth: "oauth" });
+  expect(out).toMatchObject({ name: "tavily", status: "connected", toolCount: 3 });
+  expect(added[0][0]).toBe("tavily");
+  expect(readMcpStore(ws).tavily).toEqual({ url: "https://api.tavily.com/mcp", auth: "oauth" });
+});
+
+test("add_mcp_server: reject → does not connect", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-tools-"));
+  let connected = false;
+  const mcp = {
+    toolsForRef: () => ({}),
+    addServer: async () => { connected = true; return { name: "x", kind: "http", status: "connected", toolCount: 0 }; },
+  } as unknown as McpManager;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const c = { ws, requestApproval: async () => ({ type: "reject" }) } as any;
+  const set = toolsForAgent(agent(["add_mcp_server"]), c, mcp);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await (set.add_mcp_server as any).execute({ name: "x", url: "https://x.example.com/mcp" });
+  expect(out).toEqual({ rejected: true });
+  expect(connected).toBe(false);
+});
+
+test("add_mcp_server: a failed connect is returned (not thrown) so the model can retry", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-tools-"));
+  const mcp = {
+    toolsForRef: () => ({}),
+    addServer: async (n: string) => ({ name: n, kind: "stdio", status: "error", toolCount: 0, error: "npx: package not found" }),
+  } as unknown as McpManager;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const c = { ws, requestApproval: async () => ({ type: "approve" }) } as any;
+  const set = toolsForAgent(agent(["add_mcp_server"]), c, mcp);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await (set.add_mcp_server as any).execute({ name: "bad", command: "npx", args: ["-y", "nope"] });
+  expect(out).toMatchObject({ name: "bad", status: "error" });
+  expect(out.error).toContain("not found");
 });
