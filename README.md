@@ -54,6 +54,27 @@ the provider is auto-detected (Anthropic → OpenAI → OpenRouter). Force a spe
 Override the model with `TAICHO_MODEL`. For per-agent providers/models and budgets, use a
 `taicho.yaml` in the workspace root — API keys are never read from that file.
 
+## MCP servers
+
+Agents can use [MCP](https://modelcontextprotocol.io) tools. Manage servers with `/mcp`
+(`/mcp add <name> <command…>`, `/mcp list`, `/mcp remove <name>`), and grant an agent a
+server's tools by adding `mcp:<server>` (or `mcp:<server>/<tool>`) to its `tools`.
+
+**Add a server from its docs.** Point root at a setup page and it reads the page, infers the
+config, and connects it — *after you approve the exact command/URL on a card*:
+
+> *"add the Tavily MCP — docs at https://docs.tavily.com/mcp"*
+
+This needs a [Firecrawl](https://firecrawl.dev) key so root can read the docs page:
+
+```
+export FIRECRAWL_API_KEY=fc-...     # enables read_url → "add an MCP from its docs"
+```
+
+Without it, the docs-reading step is unavailable; you can still add servers by hand with
+`/mcp add`. Secrets a server needs stay in your environment — reference them as `${VAR}` in
+the config, never inline.
+
 ## Development
 
 Requires [Bun](https://bun.sh).
