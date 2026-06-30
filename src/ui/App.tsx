@@ -82,6 +82,13 @@ export function App(props: {
   // The active approval/question card publishes its key handler here (during its render). App's one
   // boot-registered useInput forwards to it while a card is up — see the useInput below.
   const cardKeyRef = useRef<CardKeyHandler | null>(null);
+  // Live streaming: text deltas accumulate in streamRef (authoritative, dodges stale closures) and
+  // mirror into liveText (re-renders the in-progress agent line). streamedRef records whether ANY
+  // delta arrived this run, so we only fall back to res.text for non-streaming (env-key) providers.
+  const streamRef = useRef("");
+  const streamFromRef = useRef("");
+  const streamedRef = useRef(false);
+  const [liveText, setLiveText] = useState("");
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
@@ -101,6 +108,14 @@ export function App(props: {
   }, { isActive: true });
 
   const say = (l: Line) => setLines((prev) => [...prev, l]);
+
+  // Commit the in-progress streamed text (if any) as a finalized agent line — called when a tool
+  // interrupts the stream and at run end. No-op when nothing has streamed.
+  const flushStream = () => {
+    if (streamRef.current) say({ kind: "agent", from: streamFromRef.current, text: streamRef.current });
+    streamRef.current = "";
+    setLiveText("");
+  };
 
   // Run the highlighted command now (no arg) or fill `/<cmd> ` so the captain can type its argument.
   const acceptSuggestion = (list: SlashCommand[]) => {
@@ -124,7 +139,10 @@ export function App(props: {
   const deps = (model: Model) => makeDeps({
     ws: props.ws, db: props.db, model,
     requestApproval,
-    onStep: ({ tool, agent }) => { if (tool) { setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); } },
+    onStep: ({ tool, agent, delta }) => {
+      if (delta) { streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta; setLiveText(streamRef.current); return; }
+      if (tool) { flushStream(); setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); }
+    },
     pollSteer: () => steerQueue.current.shift() ?? null,
     signal: aborter.current?.signal,
     priceUsd,
@@ -155,12 +173,14 @@ export function App(props: {
     setActivity(parsed.kind === "address" ? `${parsed.to} · thinking…` : "root · thinking…");
     steerQueue.current = [];
     aborter.current = new AbortController();
+    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; setLiveText("");
     try {
       if (parsed.kind === "chat") {
         thread.current.push({ role: "user", content: parsed.text });
         const root = await loadAgent(props.ws, "root");
         const res = await executeRun(deps(activeModel), { agent: root, messages: [...thread.current], triggeredBy: "user" });
-        say({ kind: "agent", from: "root", text: res.text });
+        flushStream(); // commit the final streamed turn; only fall back to res.text if nothing streamed
+        if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text });
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
           if (shouldPersistTurn(res.trace.outcome)) {
@@ -177,7 +197,8 @@ export function App(props: {
         const target = await loadAgent(props.ws, parsed.to).catch(() => null);
         if (!target) { say({ kind: "system", text: `No agent "${parsed.to}". Try /agents, or describe one to root.` }); return; }
         const res = await executeRun(deps(activeModel), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
-        say({ kind: "agent", from: target.id, text: res.text });
+        flushStream();
+        if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text });
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
       }
@@ -293,6 +314,9 @@ export function App(props: {
           {l.kind === "user" ? "> " : l.from ? `${l.from}: ` : ""}{l.text}
         </Text>
       ))}
+      {liveText !== "" && (
+        <Text color="green">{streamFromRef.current ? `${streamFromRef.current}: ` : ""}{liveText}</Text>
+      )}
       {pending ? (
         pending.req.kind === "ask_human" ? (
           <QuestionCard

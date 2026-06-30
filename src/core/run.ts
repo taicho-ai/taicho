@@ -60,7 +60,7 @@ export interface RunDeps {
   db: Database;
   model: Model;
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
-  onStep?: (info: { text?: string; tool?: string; agent: string }) => void;
+  onStep?: (info: { text?: string; tool?: string; delta?: string; agent: string }) => void;
   pollSteer?: () => string | null;
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;

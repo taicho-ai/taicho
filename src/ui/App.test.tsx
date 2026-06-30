@@ -8,6 +8,7 @@
 import { test, expect } from "bun:test";
 import { render } from "ink-testing-library";
 import { MockLanguageModelV3, mockValues } from "ai/test";
+import { simulateReadableStream } from "ai";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,7 +46,7 @@ function fakeMcp(over: Partial<McpManager> = {}): McpManager {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function setup(opts: { model?: any; mcp?: McpManager; authKind?: "env" | "none" } = {}) {
+async function setup(opts: { model?: any; mcp?: McpManager; authKind?: "env" | "none"; subscription?: boolean } = {}) {
   const ws = mkdtempSync(join(tmpdir(), "taicho-app-"));
   await ensureWorkspace(ws);
   await seedRoot(ws);
@@ -57,7 +58,7 @@ async function setup(opts: { model?: any; mcp?: McpManager; authKind?: "env" | "
   const props = {
     ws, db, roster, model,
     cfg: { provider: "openai", model: "gpt-5.5" },
-    resolveModel: model ? () => ({ model, modelId: "mock" }) : undefined,
+    resolveModel: model ? () => ({ model, modelId: "mock", subscription: opts.subscription === true }) : undefined,
     authSource,
     buildFromAuth: () => ({ model }),
     onLogin: async () => authSource,
@@ -222,6 +223,31 @@ test("create_agent end-to-end: agent proposes, the card renders, captain approve
   expect(lastFrame()).toContain("scout");
   await send(stdin, "y");                             // captain approves
   await waitFor(lastFrame, "Created scout");         // approval flowed back; run resumed and replied
+});
+
+test("subscription path streams the reply live: deltas assemble into the rendered response", async () => {
+  const chunks = [
+    { type: "stream-start", warnings: [] },
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "stream" },
+    { type: "text-delta", id: "1", delta: "ed " },
+    { type: "text-delta", id: "1", delta: "reply" },
+    { type: "text-end", id: "1" },
+    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+  ];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doStream: (async () => ({ stream: simulateReadableStream({ initialDelayInMs: 0, chunkDelayInMs: 15, chunks }) })) as any });
+  const { ws, props } = await setup({ model, subscription: true });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "streamed reply");           // assembled live from the streamed deltas
+  expect(lastFrame()).toContain("root: streamed reply");
+  // The reply renders LIVE (before the run finishes), so poll for the completed trace rather than
+  // assuming completion the instant the text appears.
+  const start = Date.now();
+  let done = listTraces(ws, "root").filter((t) => t.outcome === "completed");
+  while (done.length === 0 && Date.now() - start < 2000) { await sleep(20); done = listTraces(ws, "root").filter((t) => t.outcome === "completed"); }
+  expect(done.length).toBeGreaterThan(0);               // the run completed via the streaming path
 });
 
 test("no credentials: a chat message is refused without burning tokens", async () => {

@@ -158,3 +158,84 @@ test("returns a structured error (does not throw) when the model call fails", as
   expect(res.aborted).toBe(false);
   expect(res.exhausted).toBe(false);
 });
+
+// A model whose call never settles: simulates the bun fetch stream that wedges on a dropped
+// connection (never errors, never closes, never honors abort), which used to hang the loop forever.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const wedgedStream = () => new MockLanguageModelV3({ doStream: (() => new Promise(() => {})) as any });
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const wedgedGen = () => new MockLanguageModelV3({ doGenerate: (() => new Promise(() => {})) as any });
+
+test("cancels a wedged streaming model call when the signal aborts (does not hang)", async () => {
+  const controller = new AbortController();
+  const p = runLoop({ model: wedgedStream(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true, signal: controller.signal });
+  setTimeout(() => controller.abort(), 50);
+  const res = await p;
+  expect(res.aborted).toBe(true);
+  expect(res.text).toBe("[cancelled]");
+}, 3000);
+
+test("times out a wedged streaming model call instead of hanging", async () => {
+  const res = await runLoop({ model: wedgedStream(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true, modelCallTimeoutMs: 150 });
+  expect(res.error).toBeDefined();
+  expect(res.text).toBe("[timed out]");
+  expect(res.aborted).toBe(false);
+}, 3000);
+
+test("times out a wedged non-streaming model call instead of hanging", async () => {
+  const res = await runLoop({ model: wedgedGen(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, modelCallTimeoutMs: 150 });
+  expect(res.text).toBe("[timed out]");
+  expect(res.error).toBeDefined();
+}, 3000);
+
+test("codexBackend forwards streamed text deltas via onStep (so the UI can render live)", async () => {
+  const model = new MockLanguageModelV3({
+    doStream: (async () => ({
+      stream: simulateReadableStream({
+        initialDelayInMs: 0, chunkDelayInMs: 0,
+        chunks: [
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "1" },
+          { type: "text-delta", id: "1", delta: "Hel" },
+          { type: "text-delta", id: "1", delta: "lo, " },
+          { type: "text-delta", id: "1", delta: "world" },
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+        ],
+      }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    })) as any,
+  });
+  const deltas: string[] = [];
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true,
+    onStep: (i) => { if (i.delta) deltas.push(i.delta); },
+  });
+  expect(deltas).toEqual(["Hel", "lo, ", "world"]); // each chunk surfaced incrementally, in order
+  expect(deltas.join("")).toBe(res.text);            // and they reconstruct the final text
+});
+
+test("does NOT time out a streaming call that keeps making progress (idle timer resets per chunk)", async () => {
+  // ~8 chunks at 20ms each ≈ 160ms total > the 100ms idle window, but each text-delta resets the
+  // idle timer, so a steadily-progressing response is never falsely killed.
+  const model = new MockLanguageModelV3({
+    doStream: (async () => ({
+      stream: simulateReadableStream({
+        initialDelayInMs: 0, chunkDelayInMs: 20,
+        chunks: [
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "1" },
+          { type: "text-delta", id: "1", delta: "a" },
+          { type: "text-delta", id: "1", delta: "b" },
+          { type: "text-delta", id: "1", delta: "c" },
+          { type: "text-delta", id: "1", delta: "d" },
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+        ],
+      }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    })) as any,
+  });
+  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true, modelCallTimeoutMs: 100 });
+  expect(res.text).toBe("abcd");
+}, 3000);
