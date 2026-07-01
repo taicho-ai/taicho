@@ -111,16 +111,32 @@ export function reindexKnowledge(ws: string, db: Database): void {
 
 export interface NodeFilter { ids?: string[]; kind?: string; sourcePrefix?: string }
 
+/** Build the WHERE clause + params for a NodeFilter, shared by the destructive (resolveNodeIds) and
+ *  list (listNodeRows) paths. Combine clauses with AND. */
+function filterClause(filter: NodeFilter): { where: string; params: (string | number)[] } {
+  const parts: string[] = [];
+  const params: (string | number)[] = [];
+  if (filter.ids?.length) { parts.push(`id IN (${filter.ids.map(() => "?").join(",")})`); params.push(...filter.ids); }
+  if (filter.kind) { parts.push("kind = ?"); params.push(filter.kind); }
+  if (filter.sourcePrefix) { parts.push("source LIKE ? ESCAPE '\\'"); params.push(likePrefix(filter.sourcePrefix)); }
+  return { where: parts.length ? `WHERE ${parts.join(" AND ")}` : "", params };
+}
+
 /** Node ids matching a filter. An EMPTY filter matches nothing (never "everything") — a safety
  *  guard so a mis-built prune can't wipe the whole graph. Combine clauses with AND. */
 export function resolveNodeIds(db: Database, filter: NodeFilter): string[] {
-  const where: string[] = [];
-  const params: (string | number)[] = [];
-  if (filter.ids?.length) { where.push(`id IN (${filter.ids.map(() => "?").join(",")})`); params.push(...filter.ids); }
-  if (filter.kind) { where.push("kind = ?"); params.push(filter.kind); }
-  if (filter.sourcePrefix) { where.push("source LIKE ? ESCAPE '\\'"); params.push(likePrefix(filter.sourcePrefix)); }
-  if (!where.length) return [];
-  return (db.query(`SELECT id FROM kb_nodes WHERE ${where.join(" AND ")}`).all(...params) as { id: string }[]).map((r) => r.id);
+  const c = filterClause(filter);
+  if (!c.where) return []; // empty filter matches NOTHING — the destructive-path safety guard
+  return (db.query(`SELECT id FROM kb_nodes ${c.where}`).all(...c.params) as { id: string }[]).map((r) => r.id);
+}
+
+export interface NodeRow { id: string; kind: string; title: string; source: string | null }
+
+/** List semantics: an EMPTY filter lists ALL nodes — deliberately different from resolveNodeIds,
+ *  which is the destructive path and matches nothing on empty. */
+export function listNodeRows(db: Database, filter: NodeFilter): NodeRow[] {
+  const c = filterClause(filter);
+  return db.query(`SELECT id, kind, title, source FROM kb_nodes ${c.where} ORDER BY updated DESC, id`).all(...c.params) as NodeRow[];
 }
 
 /** Escape LIKE wildcards in a literal prefix, then append `%`. */

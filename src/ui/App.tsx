@@ -21,7 +21,7 @@ import type { McpManager } from "../core/mcp/manager";
 import { addMcpServer, removeMcpServer } from "../store/mcp-store";
 import { parseMcpCommand, formatMcpStatus, parseKbCommand } from "./slash";
 import { syncKnowledgeSources } from "../knowledge/sync";
-import { resolveNodeIds, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
+import { listNodeRows, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 
 type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
 
@@ -331,10 +331,8 @@ export function App(props: {
       const parsed = parseKbCommand(arg);
       if (parsed.kind === "error") { say({ kind: "system", text: `  ${parsed.message}` }); return; }
       if (parsed.kind === "list") {
-        const ids = resolveNodeIds(props.db, parsed.filter);
-        if (!ids.length) { say({ kind: "system", text: "  (no matching nodes)" }); return; }
-        const ph = ids.map(() => "?").join(",");
-        const rows = props.db.query(`SELECT id, kind, title, source FROM kb_nodes WHERE id IN (${ph})`).all(...ids) as { id: string; kind: string; title: string; source: string | null }[];
+        const rows = listNodeRows(props.db, parsed.filter);
+        if (!rows.length) { say({ kind: "system", text: "  (no matching nodes)" }); return; }
         rows.forEach((r) => say({ kind: "system", text: `  [${r.id}] (${r.kind}) ${r.title} · ${r.source ?? "—"}` }));
         return;
       }

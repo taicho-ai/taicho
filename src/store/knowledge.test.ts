@@ -6,7 +6,7 @@ import { openDb } from "./db";
 import { paths } from "./files";
 import { putVector } from "./vectors";
 import { KbNode } from "../schemas/knowledge";
-import { serializeNode, parseNode, writeNode, readNode, nodeExists, neighbors, reindexKnowledge, mkKbId, resolveNodeIds, forgetNodes, reembedAll } from "./knowledge";
+import { serializeNode, parseNode, writeNode, readNode, nodeExists, neighbors, reindexKnowledge, mkKbId, resolveNodeIds, forgetNodes, reembedAll, listNodeRows } from "./knowledge";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-kb-"));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -84,6 +84,15 @@ test("resolveNodeIds matches by kind, ids, and sourcePrefix", () => {
   expect(resolveNodeIds(db, { sourcePrefix: "sources/a.md@" })).toEqual(["kb_1"]);
   expect(resolveNodeIds(db, { ids: ["kb_2"] })).toEqual(["kb_2"]);
   expect(resolveNodeIds(db, {})).toEqual([]); // empty filter matches nothing (safety)
+});
+
+test("listNodeRows lists all nodes on an empty filter, and filters by kind", () => {
+  const w = ws();
+  const db = openDb(w);
+  writeNode(w, db, mkNode({ id: "kb_1", kind: "fact" }));
+  writeNode(w, db, mkNode({ id: "kb_2", kind: "decision" }));
+  expect(listNodeRows(db, {}).map((r) => r.id).sort()).toEqual(["kb_1", "kb_2"]); // empty → ALL
+  expect(listNodeRows(db, { kind: "decision" }).map((r) => r.id)).toEqual(["kb_2"]);
 });
 
 test("reembedAll writes a vector per node from a stubbed embedder", async () => {
