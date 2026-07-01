@@ -3,7 +3,7 @@ import { render } from "ink";
 import { App } from "./ui/App";
 import { ensureWorkspace } from "./store/files";
 import { openDb } from "./store/db";
-import { seedRoot, seedLibrarian, reindex, loadIndex } from "./store/roster";
+import { seedRoot, seedLibrarian, reindex, loadIndex, LIBRARIAN_ID } from "./store/roster";
 import { reindexKnowledge } from "./store/knowledge";
 import { diffSources } from "./store/sources";
 import { createEmbedder } from "./core/embed";
@@ -26,7 +26,8 @@ await ensureWorkspace(ws);
 await seedRoot(ws, config.defaults);
 await seedLibrarian(ws, config.defaults);
 const db = openDb(ws);
-if (loadIndex(db).length === 0) await reindex(ws, db);
+const idx = loadIndex(db);
+if (idx.length === 0 || !idx.some((r) => r.id === LIBRARIAN_ID)) await reindex(ws, db);
 reindexKnowledge(ws, db); // rebuild the KB graph index from kb/nodes/*.md (files are canon)
 const kbDrift = diffSources(ws, db);
 const startupNotice = (kbDrift.changed.length || kbDrift.deleted.length)
