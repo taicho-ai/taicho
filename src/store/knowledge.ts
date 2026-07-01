@@ -7,6 +7,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync
 import { join } from "node:path";
 import { KbNode } from "../schemas/knowledge";
 import { paths } from "./files";
+import { putVector } from "./vectors";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
@@ -142,4 +143,17 @@ export function forgetNodes(ws: string, db: Database, filter: NodeFilter): { rem
   })();
   for (const id of ids) { try { rmSync(paths.kbNodeFile(ws, id)); } catch { /* file already gone */ } }
   return { removedNodes: ids.length, removedEdges };
+}
+
+/** (Re)compute a vector for every kb_node from its title/summary/content. Used by /kb reindex to
+ *  refresh semantic vectors after hand-edits or a blown-away embeddings table. Best-effort per node:
+ *  one failure doesn't abort the pass. */
+export async function reembedAll(ws: string, db: Database, embed: (t: string) => Promise<Float32Array>): Promise<number> {
+  const rows = db.query("SELECT id, title, summary, content FROM kb_nodes").all() as KbRow[];
+  let n = 0;
+  for (const r of rows) {
+    try { putVector(db, r.id, "kb", await embed(`${r.title}\n${r.summary ?? ""}\n${r.content}`)); n++; }
+    catch (e) { console.error(`reembed ${r.id} failed: ${String(e)}`); }
+  }
+  return n;
 }

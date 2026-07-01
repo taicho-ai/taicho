@@ -6,7 +6,7 @@ import { openDb } from "./db";
 import { paths } from "./files";
 import { putVector } from "./vectors";
 import { KbNode } from "../schemas/knowledge";
-import { serializeNode, parseNode, writeNode, readNode, nodeExists, neighbors, reindexKnowledge, mkKbId, resolveNodeIds, forgetNodes } from "./knowledge";
+import { serializeNode, parseNode, writeNode, readNode, nodeExists, neighbors, reindexKnowledge, mkKbId, resolveNodeIds, forgetNodes, reembedAll } from "./knowledge";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-kb-"));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -82,4 +82,15 @@ test("resolveNodeIds matches by kind, ids, and sourcePrefix", () => {
   expect(resolveNodeIds(db, { sourcePrefix: "sources/a.md@" })).toEqual(["kb_1"]);
   expect(resolveNodeIds(db, { ids: ["kb_2"] })).toEqual(["kb_2"]);
   expect(resolveNodeIds(db, {})).toEqual([]); // empty filter matches nothing (safety)
+});
+
+test("reembedAll writes a vector per node from a stubbed embedder", async () => {
+  const w = ws();
+  const db = openDb(w);
+  writeNode(w, db, mkNode({ id: "kb_a", title: "Alpha" }));
+  writeNode(w, db, mkNode({ id: "kb_b", title: "Beta" }));
+  const embed = async (t: string) => new Float32Array([t.length, 0, 0]); // deterministic stub
+  const n = await reembedAll(w, db, embed);
+  expect(n).toBe(2);
+  expect(count(db, "SELECT COUNT(*) c FROM embeddings WHERE kind='kb'")).toBe(2);
 });
