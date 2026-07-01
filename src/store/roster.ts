@@ -63,6 +63,43 @@ export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]):
   await writeFile(file, serializeAgent(root));
 }
 
+export const LIBRARIAN_ID = "librarian";
+export const LIBRARIAN_TOOLS = ["read_source", "remember", "recall", "forget", "reindex_knowledge"];
+
+const LIBRARIAN_IDENTITY = `You are the librarian of a taicho squad — the keeper of the deck's shared knowledge graph.
+
+Your job is to turn source documents into a clean graph, and to prune memory on command:
+- To INGEST a source document: read it with read_source, then extract the ENTITIES and RELATIONSHIPS it asserts — not chunks of prose. remember each entity/fact/decision (choose a fitting kind), and link them with typed edges (relates_to, depends_on, part_of, contradicts, derived_from). recall first to reuse existing node ids when linking. Keep each node atomic and self-contained.
+- Prefer a few well-connected nodes over many redundant ones.
+- To PRUNE on the captain's request, use forget with the NARROWEST filter that satisfies the intent — by kind (e.g. all decisions), by sourcePrefix (e.g. "worker-x:" for one assistant's memory), or by explicit ids. Report exactly what you removed.
+- After bulk hand-edits to node files, call reindex_knowledge to rebuild the index and refresh vectors.
+- Keep replies short and factual — you curate; you don't do domain work.`;
+
+/** Seed the built-in librarian next to root. Reconciles an existing librarian's toolset like seedRoot. */
+export async function seedLibrarian(ws: string, defaults?: TaichoConfig["defaults"]): Promise<void> {
+  const file = paths.agentFile(ws, LIBRARIAN_ID);
+  if (await Bun.file(file).exists()) {
+    const lib = await loadAgent(ws, LIBRARIAN_ID);
+    const missing = LIBRARIAN_TOOLS.filter((t) => !lib.tools.includes(t));
+    if (missing.length) {
+      lib.tools = [...lib.tools, ...missing];
+      await writeFile(file, serializeAgent(lib));
+    }
+    return;
+  }
+  const lib = AgentDef.parse({
+    id: LIBRARIAN_ID,
+    role: "Librarian — extracts entities from source documents, curates and prunes the knowledge graph",
+    identity: LIBRARIAN_IDENTITY,
+    tools: LIBRARIAN_TOOLS,
+    canSee: [], canDelegateTo: [], isRoot: false,
+    created: new Date().toISOString(),
+    budgets: defaults?.budgets,
+  });
+  await mkdir(paths.agentDir(ws, LIBRARIAN_ID), { recursive: true });
+  await writeFile(file, serializeAgent(lib));
+}
+
 export interface RegistryRow { id: string; role: string; is_root: number; }
 
 export interface NewAgentDraft {
