@@ -354,7 +354,7 @@ git commit -m "feat(kb): cascade-correct forgetNodes + resolveNodeIds (nodes+edg
 
 **Interfaces:**
 - Consumes: `putVector` (`./vectors`), existing `KbRow` query.
-- Produces: `reembedAll(ws: string, db: Database, embed: (t: string) => Promise<Float32Array>): Promise<number>` — (re)embeds every kb_node from its `title\nsummary\ncontent`; returns the count embedded.
+- Produces: `reembedAll(db: Database, embed: (t: string) => Promise<Float32Array>): Promise<number>` — (re)embeds every kb_node from its `title\nsummary\ncontent`; returns the count embedded. (No `ws` — it reads/writes SQLite only, never the filesystem.)
 
 - [ ] **Step 1: Write the failing test** — append to `src/store/knowledge.test.ts` (add `reembedAll` to the `./knowledge` import):
 
@@ -365,7 +365,7 @@ test("reembedAll writes a vector per node from a stubbed embedder", async () => 
   writeNode(w, db, mkNode({ id: "kb_a", title: "Alpha" }));
   writeNode(w, db, mkNode({ id: "kb_b", title: "Beta" }));
   const embed = async (t: string) => new Float32Array([t.length, 0, 0]); // deterministic stub
-  const n = await reembedAll(w, db, embed);
+  const n = await reembedAll(db, embed);
   expect(n).toBe(2);
   expect(count(db, "SELECT COUNT(*) c FROM embeddings WHERE kind='kb'")).toBe(2);
 });
@@ -382,7 +382,7 @@ Expected: FAIL — `reembedAll` not exported.
 /** (Re)compute a vector for every kb_node from its title/summary/content. Used by /kb reindex to
  *  refresh semantic vectors after hand-edits or a blown-away embeddings table. Best-effort per node:
  *  one failure doesn't abort the pass. */
-export async function reembedAll(ws: string, db: Database, embed: (t: string) => Promise<Float32Array>): Promise<number> {
+export async function reembedAll(db: Database, embed: (t: string) => Promise<Float32Array>): Promise<number> {
   const rows = db.query("SELECT id, title, summary, content FROM kb_nodes").all() as KbRow[];
   let n = 0;
   for (const r of rows) {
@@ -708,7 +708,7 @@ import { forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
       inputSchema: z.object({}),
       execute: async () => {
         reindexKnowledge(ctx.ws, ctx.db);
-        const embedded = ctx.embed ? await reembedAll(ctx.ws, ctx.db, ctx.embed) : 0;
+        const embedded = ctx.embed ? await reembedAll(ctx.db, ctx.embed) : 0;
         return { reindexed: true, embedded };
       },
     });
@@ -844,6 +844,15 @@ and call it right after `await seedRoot(ws, config.defaults);`:
 ```ts
 await seedLibrarian(ws, config.defaults);
 ```
+
+Also add `LIBRARIAN_ID` to that same `./store/roster` import, and update the registry-reindex guard so an EXISTING workspace registers the newly-added librarian (seeding writes the agent file but not the `registry` row; the old `length === 0` guard would skip reindex on a populated registry, leaving the librarian undiscoverable). Replace `if (loadIndex(db).length === 0) await reindex(ws, db);` with:
+
+```ts
+const idx = loadIndex(db);
+if (idx.length === 0 || !idx.some((r) => r.id === LIBRARIAN_ID)) await reindex(ws, db);
+```
+
+Safe because `reindex` rebuilds from the on-disk agent files and `syncRegistry` uses `INSERT OR REPLACE`.
 
 - [ ] **Step 2: Compute the drift notice** — in `src/index.tsx`, after `reindexKnowledge(ws, db);` (line ~28), add:
 
@@ -1021,7 +1030,7 @@ Then, inside the `runSlash` async handler, add this branch **before** the `runSl
       }
       if (parsed.kind === "reindex") {
         reindexKnowledge(props.ws, props.db);
-        const embedded = props.embed ? await reembedAll(props.ws, props.db, props.embed) : 0;
+        const embedded = props.embed ? await reembedAll(props.db, props.embed) : 0;
         say({ kind: "system", text: `  reindexed from files; re-embedded ${embedded} node(s)` });
         return;
       }
@@ -1120,6 +1129,6 @@ git commit -m "docs(kb): document kb/sources authoring, /kb sync, and curation c
 
 **Placeholder scan:** none — every code step has full code; every run step has an exact command + expected result.
 
-**Type consistency:** `NodeFilter`/`KbFilter` share the shape `{ ids?, kind?, sourcePrefix? }` (store uses `NodeFilter`, the parser emits the structurally-identical `KbFilter`; App passes it straight into `forgetNodes`/`resolveNodeIds`). `forgetNodes` returns `{ removedNodes, removedEdges }` used identically in Tasks 3, 7, 10. `reembedAll(ws, db, embed) → Promise<number>` used in Tasks 4, 7, 10. `syncKnowledgeSources({ws,db,ingest}) → Promise<SyncSummary>` with `IngestFn = (path, hash) => Promise<void>` matches the App `ingest` closure and the Task 5 fake. `ingestSource` string is set in `run.ts` (Task 6) and passed by App (Task 10). `LIBRARIAN_ID = "librarian"` and `LIBRARIAN_TOOLS` gate the exact tool names added in Task 7.
+**Type consistency:** `NodeFilter`/`KbFilter` share the shape `{ ids?, kind?, sourcePrefix? }` (store uses `NodeFilter`, the parser emits the structurally-identical `KbFilter`; App passes it straight into `forgetNodes`/`resolveNodeIds`). `forgetNodes` returns `{ removedNodes, removedEdges }` used identically in Tasks 3, 7, 10. `reembedAll(db, embed) → Promise<number>` used in Tasks 4, 7, 10. `syncKnowledgeSources({ws,db,ingest}) → Promise<SyncSummary>` with `IngestFn = (path, hash) => Promise<void>` matches the App `ingest` closure and the Task 5 fake. `ingestSource` string is set in `run.ts` (Task 6) and passed by App (Task 10). `LIBRARIAN_ID = "librarian"` and `LIBRARIAN_TOOLS` gate the exact tool names added in Task 7.
 
 **Known accepted limitation** (spec §12): re-extraction assigns fresh random node ids, so cross-document edges *into* a re-synced doc break on sync. v1 accepts this; stable-id keying is a future refinement.
