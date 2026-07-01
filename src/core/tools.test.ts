@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { tool } from "ai";
 import { z } from "zod";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toolsForAgent } from "./tools";
@@ -10,7 +10,9 @@ import type { RunContext } from "./run";
 import type { McpManager } from "./mcp/manager";
 import { readMcpStore } from "../store/mcp-store";
 import { openDb } from "../store/db";
-import { readNode } from "../store/knowledge";
+import { readNode, writeNode } from "../store/knowledge";
+import { paths } from "../store/files";
+import { KbNode } from "../schemas/knowledge";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
 const fakeMcp = {
@@ -188,4 +190,33 @@ test("remember stamps ingestSource provenance when set (else agentId:runId)", as
   const out2 = await set2.remember!.execute!({ title: "Note", content: "y", kind: "fact", edges: [] }, { toolCallId: "2", messages: [] } as any);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   expect(readNode(w, (out2 as any).id)?.source).toBe("librarian:r1");
+});
+
+test("read_source reads kb/sources files and rejects traversal", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-rs-"));
+  mkdirSync(paths.kbSourceDir(w), { recursive: true });
+  writeFileSync(paths.kbSourceFile(w, "a.md"), "alpha body");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rctx = { ws: w } as any as RunContext;
+  const set = toolsForAgent(agent(["read_source"]), rctx);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((await set.read_source!.execute!({ path: "sources/a.md" }, { toolCallId: "1", messages: [] } as any) as any).content).toBe("alpha body");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((await set.read_source!.execute!({ path: "../secret" }, { toolCallId: "2", messages: [] } as any) as any).error).toBeDefined();
+});
+
+test("forget tool cascades and rejects an empty filter", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-fg-"));
+  const db = openDb(w);
+  writeNode(w, db, KbNode.parse({ id: "kb_d", kind: "decision", title: "t", content: "c", source: "worker-x:r1", created: new Date().toISOString() }));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fctx = { ws: w, db, notes: [] as string[] } as any as RunContext;
+  const set = toolsForAgent(agent(["forget"]), fctx);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await set.forget!.execute!({ kind: "decision" }, { toolCallId: "1", messages: [] } as any);
+  expect(out).toMatchObject({ removedNodes: 1 });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const empty = await set.forget!.execute!({}, { toolCallId: "2", messages: [] } as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((empty as any).error).toBeDefined();
 });
