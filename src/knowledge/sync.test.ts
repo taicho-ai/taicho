@@ -1,12 +1,12 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../store/db";
 import { paths } from "../store/files";
 import { KbNode } from "../schemas/knowledge";
-import { writeNode, nodeExists, resolveNodeIds } from "../store/knowledge";
-import { upsertSourceHash, hashContent } from "../store/sources";
+import { writeNode, resolveNodeIds } from "../store/knowledge";
+import { upsertSourceHash, hashContent, readTrackedSources } from "../store/sources";
 import { syncKnowledgeSources } from "./sync";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-sync-"));
@@ -43,4 +43,24 @@ test("sync ingests changed docs, cleans deleted docs, and records hashes; is ide
   expect(s3.removedNodes).toBe(1); // the v1 node was forgotten before re-ingest
   expect(resolveNodeIds(db, { sourcePrefix: "sources/a.md@" })).toHaveLength(1);
   expect(resolveNodeIds(db, { sourcePrefix: `sources/a.md@${hashContent("alpha v2")}` })).toHaveLength(1);
+});
+
+test("sync cleans up a deleted source: forgets its nodes and drops the tracked hash", async () => {
+  const w = ws();
+  const db = openDb(w);
+  write(w, "d.md", "delta v1");
+  let calls = 0;
+  const ingest = async (path: string, hash: string) => {
+    calls++;
+    writeNode(w, db, mkNode({ id: `kb_d${calls}`, source: `${path}@${hash}` }));
+  };
+
+  await syncKnowledgeSources({ ws: w, db, ingest });
+  expect(resolveNodeIds(db, { sourcePrefix: "sources/d.md@" })).toHaveLength(1);
+
+  rmSync(paths.kbSourceFile(w, "d.md"));
+  const s2 = await syncKnowledgeSources({ ws: w, db, ingest });
+  expect(s2.deletedDocs).toBe(1);
+  expect(resolveNodeIds(db, { sourcePrefix: "sources/d.md@" })).toEqual([]);
+  expect(readTrackedSources(db).has("sources/d.md")).toBe(false);
 });
