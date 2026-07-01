@@ -3,10 +3,11 @@
  *  index. Mirrors store/policy.ts + store/roster.ts. */
 import { YAML } from "bun";
 import type { Database } from "bun:sqlite";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { KbNode } from "../schemas/knowledge";
 import { paths } from "./files";
+import { putVector } from "./vectors";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
@@ -106,4 +107,73 @@ export function neighbors(db: Database, seedIds: string[], hops: number, rels?: 
 export function reindexKnowledge(ws: string, db: Database): void {
   db.exec("DELETE FROM kb_edges; DELETE FROM kb_nodes;");
   for (const n of listNodes(ws)) indexNode(db, n);
+}
+
+export interface NodeFilter { ids?: string[]; kind?: string; sourcePrefix?: string }
+
+/** Build the WHERE clause + params for a NodeFilter, shared by the destructive (resolveNodeIds) and
+ *  list (listNodeRows) paths. Combine clauses with AND. */
+function filterClause(filter: NodeFilter): { where: string; params: (string | number)[] } {
+  const parts: string[] = [];
+  const params: (string | number)[] = [];
+  if (filter.ids?.length) { parts.push(`id IN (${filter.ids.map(() => "?").join(",")})`); params.push(...filter.ids); }
+  if (filter.kind) { parts.push("kind = ?"); params.push(filter.kind); }
+  if (filter.sourcePrefix) { parts.push("source LIKE ? ESCAPE '\\'"); params.push(likePrefix(filter.sourcePrefix)); }
+  return { where: parts.length ? `WHERE ${parts.join(" AND ")}` : "", params };
+}
+
+/** Node ids matching a filter. An EMPTY filter matches nothing (never "everything") — a safety
+ *  guard so a mis-built prune can't wipe the whole graph. Combine clauses with AND. */
+export function resolveNodeIds(db: Database, filter: NodeFilter): string[] {
+  const c = filterClause(filter);
+  if (!c.where) return []; // empty filter matches NOTHING — the destructive-path safety guard
+  return (db.query(`SELECT id FROM kb_nodes ${c.where}`).all(...c.params) as { id: string }[]).map((r) => r.id);
+}
+
+export interface NodeRow { id: string; kind: string; title: string; source: string | null }
+
+/** List semantics: an EMPTY filter lists ALL nodes — deliberately different from resolveNodeIds,
+ *  which is the destructive path and matches nothing on empty. */
+export function listNodeRows(db: Database, filter: NodeFilter): NodeRow[] {
+  const c = filterClause(filter);
+  return db.query(`SELECT id, kind, title, source FROM kb_nodes ${c.where} ORDER BY updated DESC, id`).all(...c.params) as NodeRow[];
+}
+
+/** Escape LIKE wildcards in a literal prefix, then append `%`. */
+function likePrefix(prefix: string): string {
+  return prefix.replace(/[\\%_]/g, (c) => "\\" + c) + "%";
+}
+
+/** Cascade delete: for the matched nodes, remove their edges (both directions), vectors, node rows,
+ *  and canonical files — atomically. The single prune path for /kb forget and source re-sync. */
+export function forgetNodes(ws: string, db: Database, filter: NodeFilter): { removedNodes: number; removedEdges: number } {
+  const ids = resolveNodeIds(db, filter);
+  if (!ids.length) return { removedNodes: 0, removedEdges: 0 };
+  const ph = ids.map(() => "?").join(",");
+  // Files are canon: delete them FIRST so a crash can't leave a file that boot-reindex resurrects.
+  for (const id of ids) {
+    try { rmSync(paths.kbNodeFile(ws, id)); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+  }
+  let removedEdges = 0;
+  db.transaction(() => {
+    removedEdges = (db.query(`SELECT COUNT(*) c FROM kb_edges WHERE from_id IN (${ph}) OR to_id IN (${ph})`).get(...ids, ...ids) as { c: number }).c;
+    db.query(`DELETE FROM kb_edges WHERE from_id IN (${ph}) OR to_id IN (${ph})`).run(...ids, ...ids);
+    db.query(`DELETE FROM embeddings WHERE kind = 'kb' AND ref IN (${ph})`).run(...ids);
+    db.query(`DELETE FROM kb_nodes WHERE id IN (${ph})`).run(...ids);
+  })();
+  return { removedNodes: ids.length, removedEdges };
+}
+
+/** (Re)compute a vector for every kb_node from its title/summary/content. Used by /kb reindex to
+ *  refresh semantic vectors after hand-edits or a blown-away embeddings table. Best-effort per node:
+ *  one failure doesn't abort the pass. */
+export async function reembedAll(db: Database, embed: (t: string) => Promise<Float32Array>): Promise<number> {
+  const rows = db.query("SELECT id, title, summary, content FROM kb_nodes").all() as KbRow[];
+  let n = 0;
+  for (const r of rows) {
+    try { putVector(db, r.id, "kb", await embed(`${r.title}\n${r.summary ?? ""}\n${r.content}`)); n++; }
+    catch (e) { console.error(`reembed ${r.id} failed: ${String(e)}`); }
+  }
+  return n;
 }

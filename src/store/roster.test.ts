@@ -2,10 +2,11 @@ import { test, expect } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { serializeAgent, parseAgent, seedRoot, reindex, loadIndex, loadAgent, createAgent, type RegistryRow } from "./roster";
+import { writeFile } from "node:fs/promises";
+import { serializeAgent, parseAgent, seedRoot, seedLibrarian, LIBRARIAN_ID, LIBRARIAN_TOOLS, reindex, loadIndex, loadAgent, createAgent, type RegistryRow } from "./roster";
 import { AgentDef } from "../schemas/agent";
 import { openDb } from "./db";
-import { ensureWorkspace } from "./files";
+import { ensureWorkspace, paths } from "./files";
 
 const sample = AgentDef.parse({
   id: "researcher", role: "Covers geopolitics with web search",
@@ -92,4 +93,19 @@ test("seedRoot gives root the MCP tools, and reconciles an older root that lacks
   expect(reconciled.tools).toContain("read_url");
   expect(reconciled.tools).toContain("add_mcp_server");
   expect(reconciled.tools).toContain("create_agent"); // existing tools preserved
+});
+
+test("seedLibrarian creates the librarian with its toolset; reconciles missing tools", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-lib-"));
+  await seedLibrarian(w);
+  const lib = await loadAgent(w, LIBRARIAN_ID);
+  expect(lib.id).toBe("librarian");
+  expect(lib.isRoot).toBe(false);
+  for (const t of LIBRARIAN_TOOLS) expect(lib.tools).toContain(t);
+
+  // drop a tool on disk, re-seed → reconciled back
+  lib.tools = lib.tools.filter((t) => t !== "forget");
+  await writeFile(paths.agentFile(w, LIBRARIAN_ID), serializeAgent(lib));
+  await seedLibrarian(w);
+  expect((await loadAgent(w, LIBRARIAN_ID)).tools).toContain("forget");
 });

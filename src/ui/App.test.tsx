@@ -10,15 +10,17 @@ import { render } from "ink-testing-library";
 import { MockLanguageModelV3, mockValues } from "ai/test";
 import { simulateReadableStream } from "ai";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { App } from "./App";
-import { ensureWorkspace } from "../store/files";
+import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
-import { seedRoot, reindex, loadIndex } from "../store/roster";
+import { seedRoot, reindex, loadIndex, seedLibrarian } from "../store/roster";
 import { listTraces } from "../store/trace";
 import { readMcpStore } from "../store/mcp-store";
+import { writeNode, resolveNodeIds } from "../store/knowledge";
+import { KbNode } from "../schemas/knowledge";
 import type { AuthSource } from "../store/config";
 import type { McpManager, McpServerStatus } from "../core/mcp/manager";
 
@@ -85,6 +87,10 @@ async function waitFor(frame: () => string | undefined, sub: string, timeout = 4
     await sleep(15);
   }
 }
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mkNode = (over: object) =>
+  KbNode.parse({ id: "kb_" + Math.random().toString(36).slice(2, 8), title: "t", content: "c", created: new Date().toISOString(), ...over });
 
 test("boots to a banner mentioning taicho", async () => {
   const { props } = await setup({ model: mockModel("hi") });
@@ -277,4 +283,68 @@ test("add_mcp end-to-end: agent proposes a server, the card renders, captain app
   await send(stdin, "y");                               // captain approves
   await waitFor(lastFrame, "Connected tavily");         // connect ran, run resumed
   expect(connected).toEqual(["tavily"]);
+});
+
+test("/kb list on an empty KB reports no matches", async () => {
+  const { props } = await setup();
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/kb list", ENTER);
+  await waitFor(lastFrame, "no matching nodes");
+});
+
+test("/kb list shows a stored node", async () => {
+  const { ws, db, props } = await setup();
+  writeNode(ws, db, mkNode({ id: "kb_a", title: "Alpha", kind: "fact" }));
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/kb list", ENTER);
+  await waitFor(lastFrame, "Alpha");
+});
+
+test("/kb forget kind=… actually deletes (asserted against the DB)", async () => {
+  const { ws, db, props } = await setup();
+  writeNode(ws, db, mkNode({ id: "kb_dec", kind: "decision", title: "D" }));
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/kb forget kind=decision", ENTER);
+  await waitFor(lastFrame, "forgot 1 node");
+  expect(resolveNodeIds(db, { kind: "decision" })).toEqual([]);
+});
+
+test("/kb forget with no filter is refused by the parser", async () => {
+  const { props } = await setup();
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/kb forget", ENTER);
+  await waitFor(lastFrame, "at least one");
+});
+
+test("/kb reindex rebuilds from files", async () => {
+  const { ws, db, props } = await setup();
+  writeNode(ws, db, mkNode({ id: "kb_r", title: "R" }));
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/kb reindex", ENTER);
+  await waitFor(lastFrame, "reindexed from files");
+});
+
+test("/kb sync with no model is refused", async () => {
+  const { props } = await setup({});
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/kb sync", ENTER);
+  await waitFor(lastFrame, "needs a model");
+});
+
+test("/kb sync drives the librarian to ingest a source doc (mocked model, real wiring)", async () => {
+  const rememberCall = {
+    content: [{ type: "tool-call", toolCallId: "c1", toolName: "remember",
+      input: JSON.stringify({ title: "Deploy pipeline", content: "pushes to prod", kind: "entity", edges: [] }) }],
+    finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+  } as unknown as LanguageModelV3GenerateResult;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(rememberCall, finalText("ingested deploy.md")) as any });
+  const { ws, db, props } = await setup({ model });
+  await seedLibrarian(ws);
+  mkdirSync(paths.kbSourceDir(ws), { recursive: true });
+  writeFileSync(paths.kbSourceFile(ws, "deploy.md"), "# Deploy\nThe deploy pipeline pushes to prod.\n");
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/kb sync", ENTER);
+  await waitFor(lastFrame, "1 doc(s) ingested", 8000);
+  expect(resolveNodeIds(db, { sourcePrefix: "sources/deploy.md@" }).length).toBeGreaterThan(0);
 });

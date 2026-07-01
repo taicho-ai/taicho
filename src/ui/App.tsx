@@ -6,7 +6,7 @@ import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCar
 import { QuestionCard } from "./QuestionCard";
 import { parseInput } from "./input";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
-import { loadAgent, loadIndex, type RegistryRow } from "../store/roster";
+import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy } from "../store/policy";
 import { appendTurn, shouldPersistTurn } from "../store/thread";
@@ -19,7 +19,9 @@ import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
 import { addMcpServer, removeMcpServer } from "../store/mcp-store";
-import { parseMcpCommand, formatMcpStatus } from "./slash";
+import { parseMcpCommand, formatMcpStatus, parseKbCommand } from "./slash";
+import { syncKnowledgeSources } from "../knowledge/sync";
+import { listNodeRows, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 
 type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
 
@@ -81,6 +83,7 @@ export function App(props: {
   mcp?: McpManager;
   mcpYamlServers?: string[];
   embed?: (text: string) => Promise<Float32Array>;
+  startupNotice?: string;
 }) {
   const { exit } = useApp();
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
@@ -128,6 +131,11 @@ export function App(props: {
   }, { isActive: true });
 
   const say = (l: Line) => setLines((prev) => [...prev, l]);
+
+  useEffect(() => {
+    if (props.startupNotice) say({ kind: "system", text: `  ${props.startupNotice}` });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Commit the in-progress streamed text (if any) as a finalized agent line — called when a tool
   // interrupts the stream and at run end. No-op when nothing has streamed.
@@ -316,6 +324,48 @@ export function App(props: {
         }
       } catch (e) {
         say({ kind: "system", text: `  teach error: ${e instanceof Error ? e.message : String(e)}` });
+      } finally { setBusy(false); }
+      return;
+    }
+    if (cmd === "kb") {
+      const parsed = parseKbCommand(arg);
+      if (parsed.kind === "error") { say({ kind: "system", text: `  ${parsed.message}` }); return; }
+      if (parsed.kind === "list") {
+        const rows = listNodeRows(props.db, parsed.filter);
+        if (!rows.length) { say({ kind: "system", text: "  (no matching nodes)" }); return; }
+        rows.forEach((r) => say({ kind: "system", text: `  [${r.id}] (${r.kind}) ${r.title} · ${r.source ?? "—"}` }));
+        return;
+      }
+      if (parsed.kind === "forget") {
+        const r = forgetNodes(props.ws, props.db, parsed.filter);
+        say({ kind: "system", text: `  forgot ${r.removedNodes} node(s), ${r.removedEdges} edge(s)` });
+        return;
+      }
+      if (parsed.kind === "reindex") {
+        reindexKnowledge(props.ws, props.db);
+        const embedded = props.embed ? await reembedAll(props.db, props.embed) : 0;
+        say({ kind: "system", text: `  reindexed from files; re-embedded ${embedded} node(s)` });
+        return;
+      }
+      // sync — drives the librarian per changed doc through the run pipeline
+      if (!model) { say({ kind: "system", text: "  /kb sync needs a model — set a key or /login openai." }); return; }
+      const activeModel = model;
+      setBusy(true);
+      setActivity("librarian · syncing…");
+      try {
+        const ingest = async (path: string, hash: string) => {
+          const librarian = await loadAgent(props.ws, LIBRARIAN_ID);
+          await executeRun(deps(activeModel), {
+            agent: librarian,
+            messages: [{ role: "user", content: `Ingest the source document "${path}". Read it with read_source, extract the entities and relationships it asserts, and remember each with typed edges.` }],
+            triggeredBy: "user",
+            ingestSource: `${path}@${hash}`,
+          });
+        };
+        const s = await syncKnowledgeSources({ ws: props.ws, db: props.db, ingest });
+        say({ kind: "system", text: `  sync: ${s.changedDocs} doc(s) ingested, ${s.deletedDocs} removed, ${s.removedNodes} old node(s) cleared` });
+      } catch (e) {
+        say({ kind: "system", text: `  sync failed: ${e instanceof Error ? e.message : String(e)}` });
       } finally { setBusy(false); }
       return;
     }

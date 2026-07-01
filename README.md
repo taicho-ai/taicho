@@ -98,6 +98,24 @@ PATH — the same toolchain MCP servers use) and runs it in a spawned worker; mo
 `~/.taicho/models`. From source (`bun run dev`) it loads in-process. If neither is available (no
 package manager, offline) it degrades to keyword + graph search, so the KB works under any provider.
 
+### Authoring source documents
+
+Write markdown/text into `kb/sources/`. Run `/kb sync` and the **librarian** agent reads each
+changed doc, extracts entities + typed relationships, and files them into the graph (stamped
+`sources/<file>@<hash>`). Editing a doc and re-syncing replaces exactly that doc's subgraph — the
+content hash drives it. On boot, taicho notes how many sources changed since the last sync.
+
+### Curating
+
+- `/kb list [kind=… | source=…]` — inspect nodes.
+- `/kb forget kind=decision` — prune all decisions (cascade: nodes + edges + vectors).
+- `/kb forget source=worker-x:` — wipe everything a given assistant remembered.
+- `/kb reindex` — rebuild the graph from files and refresh semantic vectors after hand-edits.
+
+You can also just ask root to "clear all X" — it delegates to the librarian, which runs the same
+`forget` under the hood. Agent-written memory (`remember`) stays write-through and immediately
+recallable; only pruning is admin-driven.
+
 ## Development
 
 Requires [Bun](https://bun.sh).

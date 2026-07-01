@@ -30,3 +30,10 @@ test("ensureEmbedSpace wipes kb vectors when the model/dim changes, and no-ops w
   ensureEmbedSpace(db, "m2", 384); // model changed: wipe
   expect(count(db, "SELECT COUNT(*) c FROM embeddings WHERE kind='kb'")).toBe(0);
 });
+
+test("v3 creates kb_sources and bumps SCHEMA_VERSION to 3", () => {
+  const db = openDb(ws());
+  expect(SCHEMA_VERSION).toBe(3);
+  expect(getMeta(db, "schema_version")).toBe("3");
+  expect(() => db.query("SELECT path, hash, updated FROM kb_sources").all()).not.toThrow();
+});

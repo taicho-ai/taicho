@@ -58,6 +58,7 @@ export interface RunContext {
   runId: string;
   agentId: string;
   embed?: (text: string) => Promise<Float32Array>; // present only when an embedder is configured (semantic KB)
+  ingestSource?: string; // when set (a source-ingestion run), remember stamps this instead of agentId:runId
   artifacts: string[];
   delegatedOut: string[];
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
@@ -118,7 +119,7 @@ export function makeDeps(opts: {
 
 export async function executeRun(
   deps: RunDeps,
-  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; fromRun: string }; triggeredBy: string; depth?: number; ancestry?: string[] },
+  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; fromRun: string }; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string },
 ): Promise<RunResult> {
   const depth = opts.depth ?? 0;
   const ancestry = opts.ancestry ?? [];
@@ -134,6 +135,7 @@ export async function executeRun(
 
   const ctx: RunContext = {
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
+    ingestSource: opts.ingestSource,
     artifacts: [], delegatedOut: [],
     requestApproval: deps.requestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),

@@ -3,17 +3,18 @@
  *  which is how create_agent awaits captain approval and delegate_task spawns child runs. */
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-import { writeFile } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
+import { resolve, sep } from "node:path";
 import type { AgentDef } from "../schemas/agent";
 import type { RunContext } from "./run";
 import type { McpManager } from "./mcp/manager";
-import { artifactPath } from "../store/files";
+import { artifactPath, paths } from "../store/files";
 import { mergeDraft } from "./draft";
 import { scrapeUrl } from "./firecrawl";
 import { McpServerConfig } from "../store/config";
 import { addMcpServer } from "../store/mcp-store";
 import { KbNode } from "../schemas/knowledge";
-import { writeNode, mkKbId, nodeExists } from "../store/knowledge";
+import { writeNode, mkKbId, nodeExists, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { putVector } from "../store/vectors";
 import { searchKnowledge } from "../knowledge/retrieval";
 
@@ -160,7 +161,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         const valid = requested.filter((e) => nodeExists(ctx.db, e.to)); // drop dangling edge targets
         const node = KbNode.parse({
           id: mkKbId(), title, content, kind, summary, scope: "deck",
-          source: `${ctx.agentId}:${ctx.runId}`, edges: valid, created: new Date().toISOString(),
+          source: ctx.ingestSource ?? `${ctx.agentId}:${ctx.runId}`, edges: valid, created: new Date().toISOString(),
         });
         writeNode(ctx.ws, ctx.db, node);
         if (ctx.embed) {
@@ -184,6 +185,47 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       execute: async ({ query, k, hops, rels }) => {
         const r = await searchKnowledge({ db: ctx.db, query, embed: ctx.embed, k, hops, rels });
         return { mode: r.mode, hits: r.hits.map((h) => ({ id: h.id, title: h.title, summary: h.summary, via: h.via, score: +h.score.toFixed(3) })) };
+      },
+    });
+
+  if (agent.tools.includes("read_source"))
+    set.read_source = tool({
+      description: "Read an admin-authored source document from kb/sources/ so you can extract entities from it. `path` is like \"sources/architecture.md\" or \"architecture.md\".",
+      inputSchema: z.object({ path: z.string() }),
+      execute: async ({ path }) => {
+        const name = path.replace(/^sources\//, "");
+        const dir = paths.kbSourceDir(ctx.ws);
+        const full = resolve(dir, name);
+        if (full !== dir && !full.startsWith(dir + sep)) return { error: "path must be a file under kb/sources/" };
+        try { return { content: await readFile(full, "utf8") }; }
+        catch { return { error: `no such source: ${name}` }; }
+      },
+    });
+
+  if (agent.tools.includes("forget"))
+    set.forget = tool({
+      description: "Prune the knowledgebase: cascade-delete nodes matching a filter, plus their edges and vectors. Filter by `kind` (e.g. decision), `sourcePrefix` (e.g. \"worker-x:\" for one assistant's memory, or \"sources/foo.md@\" for a doc), and/or explicit `ids`. At least one clause is required.",
+      inputSchema: z.object({
+        ids: z.array(z.string()).optional(),
+        kind: z.string().optional(),
+        sourcePrefix: z.string().optional(),
+      }),
+      execute: async ({ ids, kind, sourcePrefix }) => {
+        if (!ids?.length && !kind && !sourcePrefix) return { error: "provide at least one of ids, kind, or sourcePrefix" };
+        const r = forgetNodes(ctx.ws, ctx.db, { ids, kind, sourcePrefix });
+        ctx.notes.push(`forgot ${r.removedNodes} node(s)`);
+        return r;
+      },
+    });
+
+  if (agent.tools.includes("reindex_knowledge"))
+    set.reindex_knowledge = tool({
+      description: "Rebuild the knowledge graph index from the canonical node files and refresh semantic vectors. Use after bulk hand-edits.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        reindexKnowledge(ctx.ws, ctx.db);
+        const embedded = ctx.embed ? await reembedAll(ctx.db, ctx.embed) : 0;
+        return { reindexed: true, embedded };
       },
     });
 
