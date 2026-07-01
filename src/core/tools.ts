@@ -160,7 +160,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         const valid = requested.filter((e) => nodeExists(ctx.db, e.to)); // drop dangling edge targets
         const node = KbNode.parse({
           id: mkKbId(), title, content, kind, summary, scope: "deck",
-          source: `${ctx.agentId}:${ctx.runId}`, edges: valid, created: new Date().toISOString(),
+          source: ctx.ingestSource ?? `${ctx.agentId}:${ctx.runId}`, edges: valid, created: new Date().toISOString(),
         });
         writeNode(ctx.ws, ctx.db, node);
         if (ctx.embed) {

@@ -10,6 +10,7 @@ import type { RunContext } from "./run";
 import type { McpManager } from "./mcp/manager";
 import { readMcpStore } from "../store/mcp-store";
 import { openDb } from "../store/db";
+import { readNode } from "../store/knowledge";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
 const fakeMcp = {
@@ -167,4 +168,24 @@ test("remember drops dangling edge targets", async () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const out = await (set.remember as any).execute({ title: "x", content: "y", edges: [{ to: "kb_nope", rel: "relates_to" }] });
   expect(out).toMatchObject({ edgesAdded: 0, edgesDropped: 1 });
+});
+
+test("remember stamps ingestSource provenance when set (else agentId:runId)", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-rem-"));
+  const db = openDb(w);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const base = { ws: w, db, runId: "r1", agentId: "librarian", notes: [] as string[] } as any as RunContext;
+  const ingestCtx = { ...base, ingestSource: "sources/a.md@abc123abc123" } as RunContext;
+
+  const set = toolsForAgent(agent(["remember"]), ingestCtx);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await set.remember!.execute!({ title: "Deploy", content: "x", kind: "entity", edges: [] }, { toolCallId: "1", messages: [] } as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect(readNode(w, (out as any).id)?.source).toBe("sources/a.md@abc123abc123");
+
+  const set2 = toolsForAgent(agent(["remember"]), base);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out2 = await set2.remember!.execute!({ title: "Note", content: "y", kind: "fact", edges: [] }, { toolCallId: "2", messages: [] } as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect(readNode(w, (out2 as any).id)?.source).toBe("librarian:r1");
 });
