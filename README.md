@@ -85,14 +85,18 @@ auto-injected into an agent's prompt (like coaching notes). Nodes are files (`kb
 git-diffable); the SQLite index rebuilds from them.
 
 **Semantic search** uses a local model by default — `all-MiniLM-L6-v2` via transformers.js, **no API
-key**, self-installing on first use into `~/.taicho/models`. Configure in `taicho.yaml`:
+key**. Configure in `taicho.yaml`:
 
 ```
 embeddings:
   provider: local    # local (default, no key) | openai (needs OPENAI_API_KEY) | off (keyword+graph only)
 ```
 
-Without an embedder it degrades to keyword + graph search, so the KB works under any provider.
+The local model runs the native ONNX runtime, which can't bundle into the single binary — so on first
+use the binary self-installs the model runtime into `~/.taicho/runtime` (needs `bun` or `node` on
+PATH — the same toolchain MCP servers use) and runs it in a spawned worker; model weights cache in
+`~/.taicho/models`. From source (`bun run dev`) it loads in-process. If neither is available (no
+package manager, offline) it degrades to keyword + graph search, so the KB works under any provider.
 
 ## Development
 
