@@ -19,6 +19,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "policies", summary: "list an agent's coaching notes", usage: "<agent>", requiresArg: true },
   { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>", requiresArg: true },
   { name: "mcp", summary: "manage MCP servers", usage: "[list|add|remove|login] …" },
+  { name: "kb", summary: "manage the knowledgebase", usage: "sync | list [filter] | forget <filter> | reindex" },
   { name: "status", summary: "show the auth source" },
   { name: "login", summary: "sign in with a ChatGPT subscription", usage: "openai" },
   { name: "logout", summary: "sign out", usage: "openai" },
@@ -167,4 +168,46 @@ export function formatMcpStatus(servers: McpServerStatus[]): string[] {
     `  ${statusIcon(s.status)} ${s.name} [${s.kind}] ${s.status}` +
     (s.status === "connected" ? ` · ${s.toolCount} tool(s)` : "") +
     (s.error ? ` · ${s.error}` : ""));
+}
+
+// ---- /kb parsing (pure; the async handler lives in App.tsx) ---------------------------------------
+
+export interface KbFilter { ids?: string[]; kind?: string; sourcePrefix?: string }
+export type KbCommand =
+  | { kind: "sync" }
+  | { kind: "reindex" }
+  | { kind: "list"; filter: KbFilter }
+  | { kind: "forget"; filter: KbFilter }
+  | { kind: "error"; message: string };
+
+/** Parse `kind=…`, `source=…` (→ sourcePrefix), and repeatable `id=…` tokens into a filter. */
+function parseKbFilter(tokens: string[]): KbFilter {
+  const filter: KbFilter = {};
+  const ids: string[] = [];
+  for (const tok of tokens) {
+    const [k, ...rest] = tok.split("=");
+    const v = rest.join("=");
+    if (!v) continue;
+    if (k === "kind") filter.kind = v;
+    else if (k === "source") filter.sourcePrefix = v;
+    else if (k === "id") ids.push(v);
+  }
+  if (ids.length) filter.ids = ids;
+  return filter;
+}
+
+export function parseKbCommand(arg: string): KbCommand {
+  const parts = arg.trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0];
+  const rest = parts.slice(1);
+  if (sub === "sync") return { kind: "sync" };
+  if (sub === "reindex") return { kind: "reindex" };
+  if (sub === "list") return { kind: "list", filter: parseKbFilter(rest) };
+  if (sub === "forget") {
+    const filter = parseKbFilter(rest);
+    if (!filter.ids && !filter.kind && !filter.sourcePrefix)
+      return { kind: "error", message: "usage: /kb forget kind=… | source=… | id=… (at least one)" };
+    return { kind: "forget", filter };
+  }
+  return { kind: "error", message: `unknown /kb subcommand "${sub ?? ""}" (try sync, list, forget, reindex)` };
 }

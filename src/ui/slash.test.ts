@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { runSlash, COMMANDS, suggestCommands, cycleIndex, parseMcpCommand, formatMcpStatus } from "./slash";
+import { parseKbCommand } from "./slash";
 import type { RunTrace } from "../schemas/trace";
 
 const roster = [{ id: "root", role: "orch", is_root: 1 }, { id: "w", role: "writes", is_root: 0 }];
@@ -111,4 +112,16 @@ test("formatMcpStatus renders icons + tool counts", () => {
   expect(lines[1]).toContain("needs-auth");
   expect(lines[2]).toContain("boom");
   expect(formatMcpStatus([])[0]).toContain("no MCP servers");
+});
+
+test("parseKbCommand parses subcommands and filters", () => {
+  expect(parseKbCommand("sync")).toEqual({ kind: "sync" });
+  expect(parseKbCommand("reindex")).toEqual({ kind: "reindex" });
+  expect(parseKbCommand("forget kind=decision")).toEqual({ kind: "forget", filter: { kind: "decision" } });
+  expect(parseKbCommand("forget source=worker-x:")).toEqual({ kind: "forget", filter: { sourcePrefix: "worker-x:" } });
+  expect(parseKbCommand("forget id=kb_a id=kb_b")).toEqual({ kind: "forget", filter: { ids: ["kb_a", "kb_b"] } });
+  expect(parseKbCommand("list kind=fact")).toEqual({ kind: "list", filter: { kind: "fact" } });
+  expect(parseKbCommand("list")).toEqual({ kind: "list", filter: {} });
+  expect(parseKbCommand("forget").kind).toBe("error");   // refuse an empty forget filter
+  expect(parseKbCommand("wat").kind).toBe("error");
 });
