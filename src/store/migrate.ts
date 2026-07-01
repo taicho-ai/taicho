@@ -48,6 +48,18 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS kb_nodes_kind ON kb_nodes(kind);
       `),
   },
+  // v3: source-document tracking — one row per file in kb/sources/, holds its last-synced hash.
+  {
+    version: 3,
+    up: (db) =>
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS kb_sources (
+          path     TEXT PRIMARY KEY,   -- relative, e.g. "sources/architecture.md"
+          hash     TEXT NOT NULL,      -- content hash last synced
+          updated  INTEGER DEFAULT (unixepoch())
+        );
+      `),
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
