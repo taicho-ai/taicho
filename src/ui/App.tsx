@@ -81,6 +81,7 @@ export function App(props: {
   mcp?: McpManager;
   mcpYamlServers?: string[];
   embed?: (text: string) => Promise<Float32Array>;
+  startupNotice?: string;
 }) {
   const { exit } = useApp();
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
@@ -128,6 +129,11 @@ export function App(props: {
   }, { isActive: true });
 
   const say = (l: Line) => setLines((prev) => [...prev, l]);
+
+  useEffect(() => {
+    if (props.startupNotice) say({ kind: "system", text: `  ${props.startupNotice}` });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Commit the in-progress streamed text (if any) as a finalized agent line — called when a tool
   // interrupts the stream and at run end. No-op when nothing has streamed.

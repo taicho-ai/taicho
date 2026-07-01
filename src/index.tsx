@@ -3,8 +3,9 @@ import { render } from "ink";
 import { App } from "./ui/App";
 import { ensureWorkspace } from "./store/files";
 import { openDb } from "./store/db";
-import { seedRoot, reindex, loadIndex } from "./store/roster";
+import { seedRoot, seedLibrarian, reindex, loadIndex } from "./store/roster";
 import { reindexKnowledge } from "./store/knowledge";
+import { diffSources } from "./store/sources";
 import { createEmbedder } from "./core/embed";
 import { ensureEmbedSpace } from "./store/migrate";
 import { loadConfig, resolveAuth, type AuthSource } from "./store/config";
@@ -23,9 +24,14 @@ const ws = process.cwd();
 const config = await loadConfig(ws);
 await ensureWorkspace(ws);
 await seedRoot(ws, config.defaults);
+await seedLibrarian(ws, config.defaults);
 const db = openDb(ws);
 if (loadIndex(db).length === 0) await reindex(ws, db);
 reindexKnowledge(ws, db); // rebuild the KB graph index from kb/nodes/*.md (files are canon)
+const kbDrift = diffSources(ws, db);
+const startupNotice = (kbDrift.changed.length || kbDrift.deleted.length)
+  ? `kb: ${kbDrift.changed.length} changed / ${kbDrift.deleted.length} removed source(s) — run /kb sync`
+  : undefined;
 const roster = loadIndex(db);
 
 // Semantic KB embedder (optional; null ⇒ keyword+graph recall). Env-driven, decoupled from the chat
@@ -130,6 +136,7 @@ render(
     mcp={mcp}
     mcpYamlServers={Object.keys(config.mcp?.servers ?? {})}
     embed={embedder?.embed}
+    startupNotice={startupNotice}
     {...initial}
     cfg={authSource.kind === "env" ? { provider: authSource.provider, model: authSource.model } : null}
   />,
