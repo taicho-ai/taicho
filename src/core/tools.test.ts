@@ -192,17 +192,21 @@ test("remember stamps ingestSource provenance when set (else agentId:runId)", as
   expect(readNode(w, (out2 as any).id)?.source).toBe("librarian:r1");
 });
 
-test("read_source reads kb/sources files and rejects traversal", async () => {
+test("read_source reads kb/sources files (incl. benign dotted names) and rejects traversal", async () => {
   const w = mkdtempSync(join(tmpdir(), "taicho-rs-"));
   mkdirSync(paths.kbSourceDir(w), { recursive: true });
   writeFileSync(paths.kbSourceFile(w, "a.md"), "alpha body");
+  writeFileSync(paths.kbSourceFile(w, "foo..md"), "foo body");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rctx = { ws: w } as any as RunContext;
   const set = toolsForAgent(agent(["read_source"]), rctx);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   expect((await set.read_source!.execute!({ path: "sources/a.md" }, { toolCallId: "1", messages: [] } as any) as any).content).toBe("alpha body");
+  // a legitimately-named file containing ".." as a substring (not a traversal) must still be readable.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  expect((await set.read_source!.execute!({ path: "../secret" }, { toolCallId: "2", messages: [] } as any) as any).error).toBeDefined();
+  expect((await set.read_source!.execute!({ path: "sources/foo..md" }, { toolCallId: "2", messages: [] } as any) as any).content).toBe("foo body");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((await set.read_source!.execute!({ path: "../secret" }, { toolCallId: "3", messages: [] } as any) as any).error).toBeDefined();
 });
 
 test("forget tool cascades and rejects an empty filter", async () => {

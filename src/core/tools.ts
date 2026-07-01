@@ -4,6 +4,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { writeFile, readFile } from "node:fs/promises";
+import { resolve, sep } from "node:path";
 import type { AgentDef } from "../schemas/agent";
 import type { RunContext } from "./run";
 import type { McpManager } from "./mcp/manager";
@@ -193,8 +194,10 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       inputSchema: z.object({ path: z.string() }),
       execute: async ({ path }) => {
         const name = path.replace(/^sources\//, "");
-        if (name.includes("/") || name.includes("..")) return { error: "path must be a file directly under kb/sources/" };
-        try { return { content: await readFile(paths.kbSourceFile(ctx.ws, name), "utf8") }; }
+        const dir = paths.kbSourceDir(ctx.ws);
+        const full = resolve(dir, name);
+        if (full !== dir && !full.startsWith(dir + sep)) return { error: "path must be a file under kb/sources/" };
+        try { return { content: await readFile(full, "utf8") }; }
         catch { return { error: `no such source: ${name}` }; }
       },
     });

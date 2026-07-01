@@ -71,6 +71,8 @@ test("forgetNodes cascades: removes matched nodes, their edges (both dirs), vect
   expect(existsSync(paths.kbNodeFile(w, "kb_dec"))).toBe(false);
   expect(nodeExists(db, "kb_keep")).toBe(true); // untouched
   expect(count(db, "SELECT COUNT(*) c FROM embeddings WHERE ref='kb_dec'")).toBe(0);
+  expect(count(db, "SELECT COUNT(*) c FROM kb_edges WHERE from_id='kb_dec' OR to_id='kb_dec'")).toBe(0);
+  expect(nodeExists(db, "kb_ref")).toBe(true); // the node that pointed IN to kb_dec still exists
 });
 
 test("resolveNodeIds matches by kind, ids, and sourcePrefix", () => {

@@ -134,6 +134,11 @@ export function forgetNodes(ws: string, db: Database, filter: NodeFilter): { rem
   const ids = resolveNodeIds(db, filter);
   if (!ids.length) return { removedNodes: 0, removedEdges: 0 };
   const ph = ids.map(() => "?").join(",");
+  // Files are canon: delete them FIRST so a crash can't leave a file that boot-reindex resurrects.
+  for (const id of ids) {
+    try { rmSync(paths.kbNodeFile(ws, id)); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+  }
   let removedEdges = 0;
   db.transaction(() => {
     removedEdges = (db.query(`SELECT COUNT(*) c FROM kb_edges WHERE from_id IN (${ph}) OR to_id IN (${ph})`).get(...ids, ...ids) as { c: number }).c;
@@ -141,7 +146,6 @@ export function forgetNodes(ws: string, db: Database, filter: NodeFilter): { rem
     db.query(`DELETE FROM embeddings WHERE kind = 'kb' AND ref IN (${ph})`).run(...ids);
     db.query(`DELETE FROM kb_nodes WHERE id IN (${ph})`).run(...ids);
   })();
-  for (const id of ids) { try { rmSync(paths.kbNodeFile(ws, id)); } catch { /* file already gone */ } }
   return { removedNodes: ids.length, removedEdges };
 }
 
