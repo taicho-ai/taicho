@@ -4,6 +4,9 @@ import { App } from "./ui/App";
 import { ensureWorkspace } from "./store/files";
 import { openDb } from "./store/db";
 import { seedRoot, reindex, loadIndex } from "./store/roster";
+import { reindexKnowledge } from "./store/knowledge";
+import { createEmbedder } from "./core/embed";
+import { ensureEmbedSpace } from "./store/migrate";
 import { loadConfig, resolveAuth, type AuthSource } from "./store/config";
 import { buildModel, createModelResolver, type Model } from "./core/model";
 import { pricerFor } from "./core/pricing";
@@ -22,7 +25,13 @@ await ensureWorkspace(ws);
 await seedRoot(ws, config.defaults);
 const db = openDb(ws);
 if (loadIndex(db).length === 0) await reindex(ws, db);
+reindexKnowledge(ws, db); // rebuild the KB graph index from kb/nodes/*.md (files are canon)
 const roster = loadIndex(db);
+
+// Semantic KB embedder (optional; null ⇒ keyword+graph recall). Env-driven, decoupled from the chat
+// provider. ensureEmbedSpace wipes stale kb vectors if the embed model/dim changed.
+const embedder = createEmbedder({ provider: config.embeddings?.provider });
+if (embedder) ensureEmbedSpace(db, embedder.model, embedder.dim);
 
 // MCP: connect configured servers (taicho.yaml `mcp.servers` ∪ the /mcp-added store; yaml wins on
 // name collision). Best-effort — a server that fails is skipped, never blocking the REPL. The
@@ -31,7 +40,16 @@ const mcp: McpManager | undefined = config.mcp?.enabled === false
   ? undefined
   : await createMcpManager({
       ws,
-      servers: { ...readMcpStore(ws), ...(config.mcp?.servers ?? {}) },
+      // Firecrawl is a built-in default MCP server on every deck (scrape/crawl/search/map/extract)
+      // whenever FIRECRAWL_API_KEY is set — lowest precedence, so a workspace's store/yaml can override
+      // or replace it. Then layer the /mcp-added store, then taicho.yaml (yaml wins on a name clash).
+      servers: {
+        ...(process.env.FIRECRAWL_API_KEY
+          ? { firecrawl: { command: "npx", args: ["-y", "firecrawl-mcp"], env: { FIRECRAWL_API_KEY: "${FIRECRAWL_API_KEY}" } } }
+          : {}),
+        ...readMcpStore(ws),
+        ...(config.mcp?.servers ?? {}),
+      },
       onUrl: (u) => console.error("Open to authorize the MCP server:\n" + u),
     });
 // Reap MCP servers on shutdown. The ESC quit path awaits closeAll(); SIGTERM closes then exits.
@@ -111,6 +129,7 @@ render(
     rootThread={rootThread}
     mcp={mcp}
     mcpYamlServers={Object.keys(config.mcp?.servers ?? {})}
+    embed={embedder?.embed}
     {...initial}
     cfg={authSource.kind === "env" ? { provider: authSource.provider, model: authSource.model } : null}
   />,

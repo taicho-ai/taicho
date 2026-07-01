@@ -12,6 +12,10 @@ import { mergeDraft } from "./draft";
 import { scrapeUrl } from "./firecrawl";
 import { McpServerConfig } from "../store/config";
 import { addMcpServer } from "../store/mcp-store";
+import { KbNode } from "../schemas/knowledge";
+import { writeNode, mkKbId, nodeExists } from "../store/knowledge";
+import { putVector } from "../store/vectors";
+import { searchKnowledge } from "../knowledge/retrieval";
 
 export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
   const set: ToolSet = {};
@@ -141,15 +145,55 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  // MCP tools: each agent.tools entry "mcp:<server>" (whole server) or "mcp:<server>/<tool>" (one
-  // tool) merges the matching connected MCP tools (namespaced server_tool). Unknown/unconnected → none.
-  // Never overwrite an existing key, so an MCP tool can't shadow a privileged built-in (e.g. a server
-  // "create" with tool "agent" -> create_agent) or another server's already-merged tool (first wins).
+  if (agent.tools.includes("remember"))
+    set.remember = tool({
+      description: "Save a durable fact / decision / entity to the squad's shared knowledgebase, optionally linking it to existing nodes with typed edges (rel e.g. relates_to, depends_on, contradicts). Returns the node id — recall first to get ids to link to.",
+      inputSchema: z.object({
+        title: z.string(),
+        content: z.string(),
+        kind: z.string().default("fact"),
+        summary: z.string().optional(),
+        edges: z.array(z.object({ to: z.string(), rel: z.string().default("relates_to") })).default([]),
+      }),
+      execute: async ({ title, content, kind, summary, edges }) => {
+        const requested = edges ?? [];
+        const valid = requested.filter((e) => nodeExists(ctx.db, e.to)); // drop dangling edge targets
+        const node = KbNode.parse({
+          id: mkKbId(), title, content, kind, summary, scope: "deck",
+          source: `${ctx.agentId}:${ctx.runId}`, edges: valid, created: new Date().toISOString(),
+        });
+        writeNode(ctx.ws, ctx.db, node);
+        if (ctx.embed) {
+          try { putVector(ctx.db, node.id, "kb", await ctx.embed(`${node.title}\n${node.summary ?? ""}\n${node.content}`)); }
+          catch { /* semantic index is best-effort; keyword+graph still works */ }
+        }
+        ctx.notes.push(`remembered ${node.id}`);
+        return { id: node.id, edgesAdded: valid.length, edgesDropped: requested.length - valid.length };
+      },
+    });
+
+  if (agent.tools.includes("recall"))
+    set.recall = tool({
+      description: "Search the squad's shared knowledgebase and its typed-edge graph. Returns matching nodes plus their linked neighbors — by meaning (semantic when available) and by relationship.",
+      inputSchema: z.object({
+        query: z.string(),
+        k: z.number().int().positive().max(20).default(6),
+        hops: z.number().int().min(0).max(2).default(1),
+        rels: z.array(z.string()).optional(),
+      }),
+      execute: async ({ query, k, hops, rels }) => {
+        const r = await searchKnowledge({ db: ctx.db, query, embed: ctx.embed, k, hops, rels });
+        return { mode: r.mode, hits: r.hits.map((h) => ({ id: h.id, title: h.title, summary: h.summary, via: h.via, score: +h.score.toFixed(3) })) };
+      },
+    });
+
+  // Every agent gets every connected MCP server's tools (global defaults like Firecrawl + any
+  // deck-added server) — no per-agent opt-in for now; gatekeeping can come later. Built-ins already
+  // in `set` win (first-wins), so an MCP tool can't shadow a privileged built-in (e.g. a server
+  // "create" with a tool "agent" namespacing to create_agent).
   if (mcp)
-    for (const t of agent.tools)
-      if (t.startsWith("mcp:"))
-        for (const [k, v] of Object.entries(mcp.toolsForRef(t.slice(4))))
-          if (!(k in set)) set[k] = v;
+    for (const [k, v] of Object.entries(mcp.allTools()))
+      if (!(k in set)) set[k] = v;
 
   return set;
 }

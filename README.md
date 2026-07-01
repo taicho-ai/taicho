@@ -56,24 +56,43 @@ Override the model with `TAICHO_MODEL`. For per-agent providers/models and budge
 
 ## MCP servers
 
-Agents can use [MCP](https://modelcontextprotocol.io) tools. Manage servers with `/mcp`
-(`/mcp add <name> <command…>`, `/mcp list`, `/mcp remove <name>`), and grant an agent a
-server's tools by adding `mcp:<server>` (or `mcp:<server>/<tool>`) to its `tools`.
+Agents can use [MCP](https://modelcontextprotocol.io) tools. **Every agent automatically gets
+every connected server's tools** — the built-in defaults plus anything you add. Manage servers
+with `/mcp` (`/mcp add <name> <command…>`, `/mcp list`, `/mcp remove <name>`).
 
-**Add a server from its docs.** Point root at a setup page and it reads the page, infers the
-config, and connects it — *after you approve the exact command/URL on a card*:
+**Firecrawl is built in.** Set a [Firecrawl](https://firecrawl.dev) key and the Firecrawl MCP
+(scrape / crawl / search / map / extract) connects on every deck, available to all agents:
+
+```
+export FIRECRAWL_API_KEY=fc-...     # the Firecrawl MCP server + root's docs reader
+```
+
+**Add a server from its docs.** Point root at a setup page — it reads the page (via its
+`read_url` docs reader), infers the config, and connects it, *after you approve the exact
+command/URL on a card*:
 
 > *"add the Tavily MCP — docs at https://docs.tavily.com/mcp"*
 
-This needs a [Firecrawl](https://firecrawl.dev) key so root can read the docs page:
+Secrets a server needs stay in your environment — reference them as `${VAR}` in the config
+(in `env`, `headers`, or the URL), never inline.
+
+## Knowledge (shared deck memory)
+
+The squad shares a **knowledgebase** — a graph of typed nodes (facts, decisions, entities) linked by
+typed edges. Any agent granted `remember` / `recall` can save durable knowledge and search it by
+**meaning** (semantic) and by **relationship** (graph traversal); relevant knowledge is also
+auto-injected into an agent's prompt (like coaching notes). Nodes are files (`kb/nodes/*.md`,
+git-diffable); the SQLite index rebuilds from them.
+
+**Semantic search** uses a local model by default — `all-MiniLM-L6-v2` via transformers.js, **no API
+key**, self-installing on first use into `~/.taicho/models`. Configure in `taicho.yaml`:
 
 ```
-export FIRECRAWL_API_KEY=fc-...     # enables read_url → "add an MCP from its docs"
+embeddings:
+  provider: local    # local (default, no key) | openai (needs OPENAI_API_KEY) | off (keyword+graph only)
 ```
 
-Without it, the docs-reading step is unavailable; you can still add servers by hand with
-`/mcp add`. Secrets a server needs stay in your environment — reference them as `${VAR}` in
-the config, never inline.
+Without an embedder it degrades to keyword + graph search, so the KB works under any provider.
 
 ## Development
 

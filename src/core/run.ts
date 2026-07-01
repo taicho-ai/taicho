@@ -9,6 +9,7 @@ import { runLoop } from "./loop";
 import { canDelegate, visibleToRows } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
+import { searchKnowledge } from "../knowledge/retrieval";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
 import { reserveRunId, writeTrace } from "../store/trace";
 import type { ProposalDraft } from "../coaching/proposal";
@@ -21,6 +22,19 @@ import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
+
+/** Best-effort task query for KB auto-recall: the delegated goal, else the last user turn's text. */
+function lastUserText(messages: ModelMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "user") continue;
+    const c = m.content;
+    if (typeof c === "string") return c;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (Array.isArray(c)) return c.map((p: any) => (typeof p === "string" ? p : p?.text ?? "")).join(" ");
+  }
+  return "";
+}
 
 const MAX_DELEGATION_DEPTH = 5;
 const MAX_RUNS_PER_REQUEST = 50;
@@ -43,6 +57,7 @@ export interface RunContext {
   db: Database;
   runId: string;
   agentId: string;
+  embed?: (text: string) => Promise<Float32Array>; // present only when an embedder is configured (semantic KB)
   artifacts: string[];
   delegatedOut: string[];
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
@@ -71,6 +86,7 @@ export interface RunDeps {
   configDefaults?: TaichoConfig["defaults"];
   globalPolicyCache?: { notes?: PolicyNote[] };
   mcp?: McpManager;
+  embed?: (text: string) => Promise<Float32Array>; // semantic KB embedder; undefined ⇒ keyword+graph
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -86,6 +102,7 @@ export function makeDeps(opts: {
   configDefaults?: RunDeps["configDefaults"];
   globalPolicyCache?: { notes?: PolicyNote[] };
   mcp?: McpManager;
+  embed?: (text: string) => Promise<Float32Array>;
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
@@ -95,7 +112,7 @@ export function makeDeps(opts: {
     runCounter: opts.runCounter ?? { n: 0 },
     resolveModel: opts.resolveModel, configDefaults: opts.configDefaults,
     globalPolicyCache: opts.globalPolicyCache ?? {},
-    mcp: opts.mcp,
+    mcp: opts.mcp, embed: opts.embed,
   };
 }
 
@@ -116,7 +133,7 @@ export async function executeRun(
   const t0 = performance.now();
 
   const ctx: RunContext = {
-    ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id,
+    ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
     artifacts: [], delegatedOut: [],
     requestApproval: deps.requestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
@@ -174,11 +191,30 @@ export async function executeRun(
     console.error(`policy load failed for ${opts.agent.id}:`, e);
   }
 
+  // Auto-inject relevant deck knowledge for agents that use the KB (like coaching notes): keyword+
+  // graph normally, semantic when an embedder is configured. Skipped for agents without `recall`.
+  let knowledgeBlock: string | undefined;
+  let knowledgeIds: string[] = [];
+  if (opts.agent.tools.includes("recall")) {
+    const q = opts.brief?.goal ?? lastUserText(opts.messages);
+    if (q.trim()) {
+      try {
+        const kb = await searchKnowledge({ db: deps.db, query: q, embed: deps.embed, k: 5, hops: 1 });
+        if (kb.hits.length) {
+          knowledgeIds = kb.hits.map((h) => h.id);
+          knowledgeBlock = "## Relevant knowledge (shared deck memory — call recall for more)\n" +
+            kb.hits.map((h) => `- [${h.id}] ${h.title}${h.summary ? " — " + h.summary : ""}`).join("\n");
+        }
+      } catch (e) { console.error(`kb recall failed for ${opts.agent.id}:`, e); }
+    }
+  }
+
   const { system } = assemble(opts.agent, {
     visibleAgents: visible,
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
     policies: applied,
     memoryBlock,
+    knowledgeBlock,
   });
   const tools = toolsForAgent(opts.agent, ctx, deps.mcp);
 
@@ -202,7 +238,7 @@ export async function executeRun(
 
   const trace: RunTrace = {
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,
-    ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [] },
+    ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [], knowledge: knowledgeIds },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, outcome,
     tokens: result.tokens, costUsd: subscription ? null : result.costUsd,

@@ -1,8 +1,4 @@
-# taicho workspace config. MCP servers here are connected at every boot ("always running").
-# Swap `everything` for a real server, e.g. a web-fetch server for the reporter, or add more.
+# taicho workspace config. Servers under `mcp.servers` connect at every boot ("always running").
+# Firecrawl is added automatically when FIRECRAWL_API_KEY is set; /mcp-added servers persist too.
 mcp:
   enabled: true
-  servers:
-    everything:
-      command: npx
-      args: ["-y", "@modelcontextprotocol/server-everything"]

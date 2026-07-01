@@ -12,6 +12,8 @@ import { makeDeps, executeRun } from "./run";
 import { readTrace } from "../store/trace";
 import { writePolicy } from "../store/policy";
 import { PolicyNote } from "../schemas/policy";
+import { writeNode } from "../store/knowledge";
+import { KbNode } from "../schemas/knowledge";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -55,6 +57,19 @@ test("worker run writes an immutable artifact and a completed trace", async () =
   expect(res.trace.artifacts.length).toBe(1);
   expect(existsSync(res.trace.artifacts[0])).toBe(true);
   expect(existsSync(join(ws, "runs", "writer", `${res.runId.split("/")[1]}.json`))).toBe(true);
+});
+
+test("auto-injects deck knowledge for an agent with `recall` and records it in the trace ledger", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "seeker", role: "seeks", identity: "You seek.", tools: ["recall"] }, "root");
+  writeNode(ws, db, KbNode.parse({ id: "kb_seed", title: "Deploy target", content: "we deploy to fly.io", created: new Date().toISOString() }));
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("ok")) as any });
+  const deps = makeDeps({ ws, db, model });
+  const seeker = await loadAgent(ws, "seeker");
+  const res = await executeRun(deps, { agent: seeker, messages: [{ role: "user", content: "how do we deploy the app" }], triggeredBy: "user" });
+  expect(res.trace.ledger.knowledge).toContain("kb_seed");                                        // auto-recall recorded it
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect(JSON.stringify((model as any).doGenerateCalls[0].prompt)).toContain("Deploy target");    // ...and it reached the model's prompt
 });
 
 test("root create_agent tool persists a worker when approval resolves approve", async () => {

@@ -24,6 +24,7 @@ export function assemble(
     policies: PolicyNote[];
     exemplarBlock?: string;
     memoryBlock?: string;
+    knowledgeBlock?: string;
   },
 ): { system: string; sections: PromptSection[] } {
   const s: PromptSection[] = [];
@@ -58,6 +59,8 @@ export function assemble(
       text: "## Standing instructions from your captain\n" +
         opts.policies.map((p) => `- [${p.id}] WHEN ${p.when}: ${p.do}`).join("\n"),
     });
+  if (opts.knowledgeBlock)
+    s.push({ name: "knowledge", tier: "volatile", text: opts.knowledgeBlock });
   if (opts.exemplarBlock)
     s.push({ name: "exemplars", tier: "volatile", text: opts.exemplarBlock });
   // date-only: minute precision would kill prefix caching

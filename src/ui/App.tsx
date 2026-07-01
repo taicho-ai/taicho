@@ -80,6 +80,7 @@ export function App(props: {
   rootThread?: ModelMessage[];
   mcp?: McpManager;
   mcpYamlServers?: string[];
+  embed?: (text: string) => Promise<Float32Array>;
 }) {
   const { exit } = useApp();
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
@@ -168,6 +169,7 @@ export function App(props: {
     resolveModel,
     configDefaults: props.configDefaults,
     mcp: props.mcp,
+    embed: props.embed,
   });
 
   const submit = async (value: string) => {

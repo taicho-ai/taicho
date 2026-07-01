@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
+import { migrate } from "./migrate";
 
 /** Embedded store: derived state only (registry cache, embeddings, indexes).
  *  Files are canon — deleting the DB and re-indexing must always work. */
@@ -24,5 +25,6 @@ export function openDb(workspace: string): Database {
       created INTEGER DEFAULT (unixepoch())
     );
   `);
+  migrate(db); // versioned tables on top of the baseline (kb_nodes/kb_edges, meta)
   return db;
 }

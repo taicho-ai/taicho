@@ -4,6 +4,7 @@ export const CoachingLedger = z.object({
   retrieved: z.array(z.string()),          // policy ids
   applied: z.array(z.string()),
   skipped: z.array(z.object({ id: z.string(), reason: z.string() })),
+  knowledge: z.array(z.string()).default([]), // kb node ids injected into context (default keeps old traces parseable)
 });
 
 /** One file per run under runs/<agent>/. Written by agents, read by humans + coaching flow only. */

@@ -9,13 +9,11 @@ import type { AgentDef } from "../schemas/agent";
 import type { RunContext } from "./run";
 import type { McpManager } from "./mcp/manager";
 import { readMcpStore } from "../store/mcp-store";
+import { openDb } from "../store/db";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
 const fakeMcp = {
-  toolsForRef: (ref: string) =>
-    ref === "web" ? { web_search: fakeTool, web_extract: fakeTool }
-    : ref === "web/search" ? { web_search: fakeTool }
-    : {},
+  allTools: () => ({ web_search: fakeTool, web_extract: fakeTool }),
 } as unknown as McpManager;
 
 const agent = (tools: string[]): AgentDef => ({
@@ -26,19 +24,9 @@ const agent = (tools: string[]): AgentDef => ({
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ctx = {} as RunContext;
 
-test("merges all of a server's tools for mcp:<server>", () => {
-  const set = toolsForAgent(agent(["write_artifact", "mcp:web"]), ctx, fakeMcp);
+test("every agent gets all connected MCP tools (default-grant, no mcp:<server> ref needed)", () => {
+  const set = toolsForAgent(agent(["write_artifact"]), ctx, fakeMcp);
   expect(Object.keys(set).sort()).toEqual(["web_extract", "web_search", "write_artifact"]);
-});
-
-test("merges a single tool for mcp:<server>/<tool>", () => {
-  const set = toolsForAgent(agent(["mcp:web/search"]), ctx, fakeMcp);
-  expect(Object.keys(set)).toEqual(["web_search"]);
-});
-
-test("unknown mcp ref contributes nothing", () => {
-  const set = toolsForAgent(agent(["mcp:nope"]), ctx, fakeMcp);
-  expect(Object.keys(set)).toEqual([]);
 });
 
 test("without a manager, only built-ins are present", () => {
@@ -69,9 +57,9 @@ test("ask_human: returns cancelled when the captain dismisses", async () => {
 });
 
 test("an MCP tool cannot shadow a privileged built-in", () => {
-  // server "create" + tool "agent" namespaces to create_agent — must NOT replace the built-in.
-  const shadow = { toolsForRef: (ref: string) => (ref === "create" ? { create_agent: fakeTool } : {}) } as unknown as McpManager;
-  const set = toolsForAgent(agent(["create_agent", "mcp:create"]), ctx, shadow);
+  // a connected server exposing a tool that namespaces to create_agent must NOT replace the built-in.
+  const shadow = { allTools: () => ({ create_agent: fakeTool }) } as unknown as McpManager;
+  const set = toolsForAgent(agent(["create_agent"]), ctx, shadow);
   expect(set.create_agent?.description).toContain("Propose"); // the built-in, not fakeTool ("x")
 });
 
@@ -101,7 +89,7 @@ test("add_mcp_server: granted + manager present → approve connects and persist
   const ws = mkdtempSync(join(tmpdir(), "taicho-tools-"));
   const added: Array<[string, unknown]> = [];
   const mcp = {
-    toolsForRef: () => ({}),
+    allTools: () => ({}),
     addServer: async (n: string, spec: unknown) => { added.push([n, spec]); return { name: n, kind: "http", status: "connected", toolCount: 3 }; },
   } as unknown as McpManager;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -118,7 +106,7 @@ test("add_mcp_server: reject → does not connect", async () => {
   const ws = mkdtempSync(join(tmpdir(), "taicho-tools-"));
   let connected = false;
   const mcp = {
-    toolsForRef: () => ({}),
+    allTools: () => ({}),
     addServer: async () => { connected = true; return { name: "x", kind: "http", status: "connected", toolCount: 0 }; },
   } as unknown as McpManager;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -133,7 +121,7 @@ test("add_mcp_server: reject → does not connect", async () => {
 test("add_mcp_server: a failed connect is returned (not thrown) so the model can retry", async () => {
   const ws = mkdtempSync(join(tmpdir(), "taicho-tools-"));
   const mcp = {
-    toolsForRef: () => ({}),
+    allTools: () => ({}),
     addServer: async (n: string) => ({ name: n, kind: "stdio", status: "error", toolCount: 0, error: "npx: package not found" }),
   } as unknown as McpManager;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -143,4 +131,40 @@ test("add_mcp_server: a failed connect is returned (not thrown) so the model can
   const out = await (set.add_mcp_server as any).execute({ name: "bad", command: "npx", args: ["-y", "nope"] });
   expect(out).toMatchObject({ name: "bad", status: "error" });
   expect(out.error).toContain("not found");
+});
+
+test("remember/recall: present only when granted", () => {
+  const set = toolsForAgent(agent(["write_artifact"]), ctx);
+  expect("remember" in set).toBe(false);
+  expect("recall" in set).toBe(false);
+  expect("remember" in toolsForAgent(agent(["remember"]), ctx)).toBe(true);
+});
+
+test("remember + recall: agent stores a linked fact and recalls it (keyword+graph)", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-tools-kb-"));
+  const db = openDb(ws);
+  const c = { ws, db, agentId: "root", runId: "root/r1", notes: [] as string[] } as unknown as RunContext;
+  const set = toolsForAgent(agent(["remember", "recall"]), c);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const a = await (set.remember as any).execute({ title: "Deploy target", content: "we deploy to fly.io", kind: "decision" });
+  expect(a.id).toMatch(/^kb_/);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const b = await (set.remember as any).execute({ title: "Region", content: "primary region is iad", edges: [{ to: a.id, rel: "part_of" }] });
+  expect(b.edgesAdded).toBe(1);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await (set.recall as any).execute({ query: "deploy fly", k: 5, hops: 1 });
+  const ids = out.hits.map((h: { id: string }) => h.id);
+  expect(out.mode).toBe("keyword");
+  expect(ids).toContain(a.id);                 // keyword hit
+  expect(ids).toContain(b.id);                 // graph neighbor (linked to a)
+});
+
+test("remember drops dangling edge targets", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-tools-kb-"));
+  const db = openDb(ws);
+  const c = { ws, db, agentId: "a", runId: "a/1", notes: [] as string[] } as unknown as RunContext;
+  const set = toolsForAgent(agent(["remember"]), c);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await (set.remember as any).execute({ title: "x", content: "y", edges: [{ to: "kb_nope", rel: "relates_to" }] });
+  expect(out).toMatchObject({ edgesAdded: 0, edgesDropped: 1 });
 });

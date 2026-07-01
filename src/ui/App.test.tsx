@@ -35,6 +35,7 @@ function fakeMcp(over: Partial<McpManager> = {}): McpManager {
   const ok = (name: string): McpServerStatus => ({ name, kind: "stdio", status: "connected", toolCount: 0 });
   return {
     toolsForRef: () => ({}),
+    allTools: () => ({}),
     list: () => [],
     addServer: async (n) => ok(n),
     removeServer: async () => true,

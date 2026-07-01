@@ -5,7 +5,7 @@ import type { RunTrace } from "../schemas/trace";
 const roster = [{ id: "root", role: "orch", is_root: 1 }, { id: "w", role: "writes", is_root: 0 }];
 const trace = (id: string): RunTrace => ({
   id, agent: id.split("/")[0], task: "t", triggeredBy: "user",
-  ledger: { retrieved: [], applied: [], skipped: [] },
+  ledger: { retrieved: [], applied: [], skipped: [], knowledge: [] },
   toolCalls: [{ tool: "write_artifact", count: 1 }], artifacts: ["a.md"], delegatedOut: [],
   outcome: "completed", tokens: 5, costUsd: 0.01, notes: [], durationMs: 1, started: "2026-06-11T00:00:00.000Z",
 });

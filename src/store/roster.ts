@@ -36,7 +36,7 @@ Your job is to TURN THE CAPTAIN'S INTENT INTO ACTION, never to do the domain wor
 
 /** Root's built-in capabilities. Kept in one place so existing roots get reconciled to the current
  *  set on boot (older roots drift — e.g. predate ask_human / the MCP tools). */
-export const ROOT_TOOLS = ["create_agent", "delegate_task", "find_agents", "ask_human", "read_url", "add_mcp_server"];
+export const ROOT_TOOLS = ["create_agent", "delegate_task", "find_agents", "ask_human", "read_url", "add_mcp_server", "remember", "recall"];
 
 export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]): Promise<void> {
   const file = paths.agentFile(ws, "root");

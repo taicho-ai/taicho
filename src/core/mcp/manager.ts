@@ -17,6 +17,8 @@ export interface McpServerStatus { name: string; kind: "stdio" | "http"; status:
 export interface McpManager {
   /** Resolve an agent.tools ref ("server" or "server/tool") to namespaced AI-SDK tools. */
   toolsForRef(ref: string): ToolSet;
+  /** Every connected server's tools, namespaced (server_tool) — used to grant all agents all MCP tools. */
+  allTools(): ToolSet;
   list(): McpServerStatus[];
   addServer(name: string, spec: McpServerConfig): Promise<McpServerStatus>;
   removeServer(name: string): Promise<boolean>;
@@ -113,6 +115,14 @@ export async function createMcpManager(opts: McpManagerOptions): Promise<McpMana
       if (toolName) return e.set[toolName] ? { [toolKey(server, toolName)]: e.set[toolName] } : {};
       const out: ToolSet = {};
       for (const [n, t] of Object.entries(e.set)) out[toolKey(server, n)] = t;
+      return out;
+    },
+    allTools() {
+      const out: ToolSet = {};
+      for (const [name, e] of entries) {
+        if (e.status !== "connected") continue;
+        for (const [n, t] of Object.entries(e.set)) { const k = toolKey(name, n); if (!(k in out)) out[k] = t; }
+      }
       return out;
     },
     list() {

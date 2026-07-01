@@ -85,6 +85,7 @@ export const TaichoConfig = z.object({
   agents: z.record(z.string(), AgentOverride).optional(),
   auth: z.object({ chatgpt_signin: z.boolean().optional() }).optional(),
   mcp: McpConfig,
+  embeddings: z.object({ provider: z.enum(["off", "local", "openai"]).optional() }).optional(), // semantic KB backend
 }).default({});
 export type TaichoConfig = z.infer<typeof TaichoConfig>;
 
