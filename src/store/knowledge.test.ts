@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "./db";
 import { paths } from "./files";
+import { putVector } from "./vectors";
 import { KbNode } from "../schemas/knowledge";
-import { serializeNode, parseNode, writeNode, readNode, nodeExists, neighbors, reindexKnowledge, mkKbId } from "./knowledge";
+import { serializeNode, parseNode, writeNode, readNode, nodeExists, neighbors, reindexKnowledge, mkKbId, resolveNodeIds, forgetNodes } from "./knowledge";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-kb-"));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -53,4 +54,32 @@ test("reindexKnowledge rebuilds kb_nodes/kb_edges from files (files are canon)",
   reindexKnowledge(w, db);
   expect(nodeExists(db, "kb_a")).toBe(true);
   expect(count(db, "SELECT COUNT(*) c FROM kb_edges")).toBe(1);
+});
+
+test("forgetNodes cascades: removes matched nodes, their edges (both dirs), vectors, and files", () => {
+  const w = ws();
+  const db = openDb(w);
+  writeNode(w, db, mkNode({ id: "kb_keep", kind: "fact", source: "worker-y:r1" }));
+  writeNode(w, db, mkNode({ id: "kb_dec", kind: "decision", source: "worker-x:r1", edges: [{ to: "kb_keep", rel: "relates_to" }] }));
+  writeNode(w, db, mkNode({ id: "kb_ref", kind: "fact", source: "worker-y:r2", edges: [{ to: "kb_dec", rel: "depends_on" }] })); // edge INTO kb_dec
+  putVector(db, "kb_dec", "kb", new Float32Array([1, 0, 0]));
+
+  const res = forgetNodes(w, db, { kind: "decision" });
+  expect(res.removedNodes).toBe(1);
+  expect(res.removedEdges).toBe(2); // kb_dec->kb_keep (out) AND kb_ref->kb_dec (in)
+  expect(nodeExists(db, "kb_dec")).toBe(false);
+  expect(existsSync(paths.kbNodeFile(w, "kb_dec"))).toBe(false);
+  expect(nodeExists(db, "kb_keep")).toBe(true); // untouched
+  expect(count(db, "SELECT COUNT(*) c FROM embeddings WHERE ref='kb_dec'")).toBe(0);
+});
+
+test("resolveNodeIds matches by kind, ids, and sourcePrefix", () => {
+  const w = ws();
+  const db = openDb(w);
+  writeNode(w, db, mkNode({ id: "kb_1", kind: "fact", source: "sources/a.md@h1" }));
+  writeNode(w, db, mkNode({ id: "kb_2", kind: "fact", source: "worker-x:r1" }));
+  expect(resolveNodeIds(db, { kind: "fact" }).sort()).toEqual(["kb_1", "kb_2"]);
+  expect(resolveNodeIds(db, { sourcePrefix: "sources/a.md@" })).toEqual(["kb_1"]);
+  expect(resolveNodeIds(db, { ids: ["kb_2"] })).toEqual(["kb_2"]);
+  expect(resolveNodeIds(db, {})).toEqual([]); // empty filter matches nothing (safety)
 });

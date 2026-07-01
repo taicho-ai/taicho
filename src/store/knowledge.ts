@@ -3,7 +3,7 @@
  *  index. Mirrors store/policy.ts + store/roster.ts. */
 import { YAML } from "bun";
 import type { Database } from "bun:sqlite";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { KbNode } from "../schemas/knowledge";
 import { paths } from "./files";
@@ -106,4 +106,40 @@ export function neighbors(db: Database, seedIds: string[], hops: number, rels?: 
 export function reindexKnowledge(ws: string, db: Database): void {
   db.exec("DELETE FROM kb_edges; DELETE FROM kb_nodes;");
   for (const n of listNodes(ws)) indexNode(db, n);
+}
+
+export interface NodeFilter { ids?: string[]; kind?: string; sourcePrefix?: string }
+
+/** Node ids matching a filter. An EMPTY filter matches nothing (never "everything") — a safety
+ *  guard so a mis-built prune can't wipe the whole graph. Combine clauses with AND. */
+export function resolveNodeIds(db: Database, filter: NodeFilter): string[] {
+  const where: string[] = [];
+  const params: (string | number)[] = [];
+  if (filter.ids?.length) { where.push(`id IN (${filter.ids.map(() => "?").join(",")})`); params.push(...filter.ids); }
+  if (filter.kind) { where.push("kind = ?"); params.push(filter.kind); }
+  if (filter.sourcePrefix) { where.push("source LIKE ? ESCAPE '\\'"); params.push(likePrefix(filter.sourcePrefix)); }
+  if (!where.length) return [];
+  return (db.query(`SELECT id FROM kb_nodes WHERE ${where.join(" AND ")}`).all(...params) as { id: string }[]).map((r) => r.id);
+}
+
+/** Escape LIKE wildcards in a literal prefix, then append `%`. */
+function likePrefix(prefix: string): string {
+  return prefix.replace(/[\\%_]/g, (c) => "\\" + c) + "%";
+}
+
+/** Cascade delete: for the matched nodes, remove their edges (both directions), vectors, node rows,
+ *  and canonical files — atomically. The single prune path for /kb forget and source re-sync. */
+export function forgetNodes(ws: string, db: Database, filter: NodeFilter): { removedNodes: number; removedEdges: number } {
+  const ids = resolveNodeIds(db, filter);
+  if (!ids.length) return { removedNodes: 0, removedEdges: 0 };
+  const ph = ids.map(() => "?").join(",");
+  let removedEdges = 0;
+  db.transaction(() => {
+    removedEdges = (db.query(`SELECT COUNT(*) c FROM kb_edges WHERE from_id IN (${ph}) OR to_id IN (${ph})`).get(...ids, ...ids) as { c: number }).c;
+    db.query(`DELETE FROM kb_edges WHERE from_id IN (${ph}) OR to_id IN (${ph})`).run(...ids, ...ids);
+    db.query(`DELETE FROM embeddings WHERE kind = 'kb' AND ref IN (${ph})`).run(...ids);
+    db.query(`DELETE FROM kb_nodes WHERE id IN (${ph})`).run(...ids);
+  })();
+  for (const id of ids) { try { rmSync(paths.kbNodeFile(ws, id)); } catch { /* file already gone */ } }
+  return { removedNodes: ids.length, removedEdges };
 }
