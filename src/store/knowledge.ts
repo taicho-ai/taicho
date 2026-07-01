@@ -148,7 +148,7 @@ export function forgetNodes(ws: string, db: Database, filter: NodeFilter): { rem
 /** (Re)compute a vector for every kb_node from its title/summary/content. Used by /kb reindex to
  *  refresh semantic vectors after hand-edits or a blown-away embeddings table. Best-effort per node:
  *  one failure doesn't abort the pass. */
-export async function reembedAll(ws: string, db: Database, embed: (t: string) => Promise<Float32Array>): Promise<number> {
+export async function reembedAll(db: Database, embed: (t: string) => Promise<Float32Array>): Promise<number> {
   const rows = db.query("SELECT id, title, summary, content FROM kb_nodes").all() as KbRow[];
   let n = 0;
   for (const r of rows) {

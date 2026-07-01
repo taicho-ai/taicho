@@ -90,7 +90,7 @@ test("reembedAll writes a vector per node from a stubbed embedder", async () => 
   writeNode(w, db, mkNode({ id: "kb_a", title: "Alpha" }));
   writeNode(w, db, mkNode({ id: "kb_b", title: "Beta" }));
   const embed = async (t: string) => new Float32Array([t.length, 0, 0]); // deterministic stub
-  const n = await reembedAll(w, db, embed);
+  const n = await reembedAll(db, embed);
   expect(n).toBe(2);
   expect(count(db, "SELECT COUNT(*) c FROM embeddings WHERE kind='kb'")).toBe(2);
 });
