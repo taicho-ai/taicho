@@ -90,6 +90,23 @@ test("auto-injects an active skill for any agent and records it in the trace led
   expect(JSON.stringify((model as any).doGenerateCalls[0].prompt)).toContain("deploy-app");          // ...and it reached the model's prompt
 });
 
+test("injects the FULL skill inventory (with a count) even when the query matches none", async () => {
+  const { ws, db } = await boot();
+  writeSkill(ws, db, Skill.parse({ id: "skill_a", name: "write-clean-artifact", description: "produce a clean document", tags: [], status: "active", body: "x", created: new Date().toISOString() }));
+  writeSkill(ws, db, Skill.parse({ id: "skill_b", name: "delegate-well", description: "hand a goal to another agent", tags: [], status: "active", body: "y", created: new Date().toISOString() }));
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("ok")) as any });
+  const root = await loadAgent(ws, "root");
+  // A meta question with ZERO keyword overlap with either skill — the old keyword-gated inject
+  // showed nothing here, so "how many skills do we have" was unanswerable / reported 0.
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: root, messages: [{ role: "user", content: "how many skills do we have?" }], triggeredBy: "user" });
+  expect(res.trace.ledger.skills.sort()).toEqual(["skill_a", "skill_b"]); // BOTH injected, not keyword-gated
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const prompt = JSON.stringify((model as any).doGenerateCalls[0].prompt);
+  expect(prompt).toContain("write-clean-artifact");
+  expect(prompt).toContain("delegate-well");
+  expect(prompt).toContain("Your skills (2)"); // the count is stated so the agent can answer accurately
+});
+
 test("use_skill executes inside a run and the run completes", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");

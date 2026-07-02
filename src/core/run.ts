@@ -218,23 +218,29 @@ export async function executeRun(
     }
   }
 
-  // Auto-inject relevant skills (names + when-to-use) for EVERY agent; the full procedure loads via
-  // use_skill on demand. Keyword-ranked against the task, like the KB block above.
+  // Inject the agent's FULL skill toolkit (name + when-to-use) for EVERY agent, so it always knows
+  // what it has — and can answer "how many skills do I have" — the way the "Your team" roster block
+  // lists all agents. Only fall back to keyword-ranked top-K when the library is large. The full
+  // procedure loads via use_skill on demand. (Keyword-only injection hid skills for meta questions.)
   let skillsBlock: string | undefined;
   let skillIds: string[] = [];
-  {
-    const sq = opts.brief?.goal ?? lastUserText(opts.messages);
-    if (sq.trim()) {
-      try {
-        const hits = rankSkills(getActiveSkills(deps.db), sq, 5);
-        if (hits.length) {
-          skillIds = hits.map((h) => h.id);
-          skillsBlock = "## Skills available (call use_skill(name) to load the full procedure before you act)\n" +
-            hits.map((h) => `- ${h.name}: ${h.description}`).join("\n");
-        }
-      } catch (e) { console.error(`skill inject failed for ${opts.agent.id}:`, e); }
+  try {
+    const all = getActiveSkills(deps.db);
+    if (all.length) {
+      const CAP = 40;
+      let shown: { id: string; name: string; description: string }[];
+      let header: string;
+      if (all.length <= CAP) {
+        shown = all.map((s) => ({ id: s.id, name: s.name, description: s.description }));
+        header = `## Your skills (${all.length}) — call use_skill(name) to load a procedure before you act`;
+      } else {
+        shown = rankSkills(all, opts.brief?.goal ?? lastUserText(opts.messages), CAP);
+        header = `## Your skills (${all.length}, showing the ${CAP} most relevant — call find_skills to search the rest)`;
+      }
+      skillIds = shown.map((s) => s.id);
+      skillsBlock = header + "\n" + shown.map((s) => `- ${s.name}: ${s.description}`).join("\n");
     }
-  }
+  } catch (e) { console.error(`skill inject failed for ${opts.agent.id}:`, e); }
 
   const { system } = assemble(opts.agent, {
     visibleAgents: visible,
