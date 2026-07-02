@@ -20,6 +20,7 @@ import { searchKnowledge } from "../knowledge/retrieval";
 import { getActiveSkills, mkSkillId, writeSkill } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
 import { Skill } from "../schemas/skill";
+import { classifyCommand, runShell } from "./command-guard";
 
 export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
   const set: ToolSet = {};
@@ -249,6 +250,22 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         writeSkill(ctx.ws, ctx.db, skill);
         ctx.notes.push(`proposed skill ${skill.id}`);
         return { id: skill.id };
+      },
+    });
+
+  if (agent.tools.includes("run_command"))
+    set.run_command = tool({
+      description: "Run a shell command in the workspace. Commands the safety guard clears run automatically; anything it flags is sent to the captain for approval first. Returns { exitCode, stdout, stderr }.",
+      inputSchema: z.object({ command: z.string(), cwd: z.string().optional() }),
+      execute: async ({ command, cwd }) => {
+        const classify = ctx.classifyCommand ?? classifyCommand;
+        const run = ctx.runShell ?? runShell;
+        const v = classify(command);
+        if (v.decision === "block") {
+          const d = await ctx.requestApproval({ kind: "run_command", command, reason: v.reason });
+          if (d.type !== "approve") return { rejected: true };
+        }
+        return run(command, cwd ?? ctx.ws);
       },
     });
 

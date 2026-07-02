@@ -272,3 +272,42 @@ test("propose_skill: present only when granted; approve writes an active skill; 
   expect((out2 as any).rejected).toBe(true);
   expect(getActiveSkills(db).map((s) => s.name)).not.toContain("nope");
 });
+
+test("run_command: allow → runs without approval; block → asks then runs on approve; reject → no run", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-rc-"));
+  const db = openDb(w);
+  const fakeRun = () => ({ exitCode: 0, stdout: "OUTPUT", stderr: "" });
+
+  // allow → runs, no approval requested
+  const calls: unknown[] = [];
+  const allowCtx = { ws: w, db, notes: [] as string[],
+    requestApproval: async (r: unknown) => { calls.push(r); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" as const }), runShell: fakeRun } as unknown as RunContext;
+  const set = toolsForAgent(agent(["run_command"]), allowCtx);
+  expect(set.run_command).toBeDefined();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const a = await set.run_command!.execute!({ command: "echo hi" }, { toolCallId: "1", messages: [] } as any);
+  expect(a).toEqual({ exitCode: 0, stdout: "OUTPUT", stderr: "" });
+  expect(calls.length).toBe(0); // allow path never asks
+
+  // block → asks; approve → runs
+  const blockCtx = { ws: w, db, notes: [] as string[],
+    requestApproval: async (r: unknown) => { calls.push(r); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "block" as const, reason: "danger" }), runShell: fakeRun } as unknown as RunContext;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const b = await toolsForAgent(agent(["run_command"]), blockCtx).run_command!.execute!({ command: "rm x" }, { toolCallId: "2", messages: [] } as any);
+  expect(b).toEqual({ exitCode: 0, stdout: "OUTPUT", stderr: "" });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((calls[0] as any).kind).toBe("run_command");
+
+  // block → reject → does not run
+  let ran = false;
+  const rejectCtx = { ws: w, db, notes: [] as string[],
+    requestApproval: async () => ({ type: "reject" }),
+    classifyCommand: () => ({ decision: "block" as const, reason: "danger" }),
+    runShell: () => { ran = true; return { exitCode: 0, stdout: "", stderr: "" }; } } as unknown as RunContext;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const c = await toolsForAgent(agent(["run_command"]), rejectCtx).run_command!.execute!({ command: "rm x" }, { toolCallId: "3", messages: [] } as any);
+  expect(c).toEqual({ rejected: true });
+  expect(ran).toBe(false);
+});

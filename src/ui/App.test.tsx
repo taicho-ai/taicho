@@ -232,6 +232,26 @@ test("create_agent end-to-end: agent proposes, the card renders, captain approve
   await waitFor(lastFrame, "Created scout");         // approval flowed back; run resumed and replied
 });
 
+test("run_command end-to-end: agent runs a command, the guard blocks, the card renders, captain approves", async () => {
+  const runCall = {
+    content: [{ type: "tool-call", toolCallId: "c1", toolName: "run_command", input: JSON.stringify({ command: "echo taicho-e2e" }) }],
+    finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+  } as unknown as LanguageModelV3GenerateResult;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(runCall, finalText("ran it")) as any });
+  const { db, props } = await setup({ model });
+  // grant root run_command in this workspace (seedRoot reconciles built-ins, but be explicit for the test)
+  const { loadAgent } = await import("../store/roster");
+  const root = await loadAgent(props.ws, "root");
+  if (!root.tools.includes("run_command")) { /* reconciled at boot; setup seeds root so it's present */ }
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "run echo for me", ENTER);
+  await waitFor(lastFrame, "Run command");        // the approval card rendered (dcg absent → blocked)
+  expect(lastFrame()).toContain("echo taicho-e2e");
+  await send(stdin, "y");                           // captain approves
+  await waitFor(lastFrame, "ran it");               // command ran, run resumed and replied
+});
+
 test("subscription path streams the reply live: deltas assemble into the rendered response", async () => {
   const chunks = [
     { type: "stream-start", warnings: [] },
