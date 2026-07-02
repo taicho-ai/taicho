@@ -134,14 +134,15 @@ The root orchestrator has two extra, captain-gated powers:
 
 - **`propose_skill`** — root can draft a reusable skill; you approve it on a card, and on approval it's
   saved `active` and the whole squad can `use_skill` it.
-- **`run_command`** — root can run shell commands. Each command is checked by the external
-  [`dcg`](https://github.com/Dicklesworthstone/destructive_command_guard) guard: commands it clears run
-  automatically; anything it flags — or any command at all if `dcg` isn't installed — is sent to you for
-  approval first. Output is captured (capped) and returned. Install `dcg` to reduce approval prompts;
-  without it, every command asks (fail-safe).
+- **`run_command`** — root can run shell commands. This is always on: `run_command` is a built-in
+  root tool that every deck's root gets on boot, not something you enable per deck. Each command is
+  checked by the external [`dcg`](https://github.com/Dicklesworthstone/destructive_command_guard)
+  guard: commands it clears run automatically; anything it flags — or any command at all if `dcg`
+  isn't installed — is sent to you for approval first. Output is captured (capped) and returned.
+  Install `dcg` to reduce approval prompts; without it, every command asks (fail-safe).
 
-Both are root-only. There's no sandbox in this version — the guard + your approval are the guardrails,
-so only enable command execution on decks you trust.
+Both are root-only. There's no sandbox in this version — the guard, the fail-safe (when in doubt,
+ask), and your approval on every blocked command are the guardrails, not a per-deck toggle.
 
 ## Development
 
