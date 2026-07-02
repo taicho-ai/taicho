@@ -19,16 +19,20 @@ import { createCodexProvider } from "./core/providers/openai-codex";
 import { OPENAI_CODEX_AUTH } from "./core/auth/constants";
 import { createMcpManager, type McpManager } from "./core/mcp/manager";
 import { readMcpStore } from "./store/mcp-store";
+import { seedSkills } from "./store/seed-skills";
+import { reindexSkills } from "./store/skills";
 
 const ws = process.cwd();
 const config = await loadConfig(ws);
 await ensureWorkspace(ws);
 await seedRoot(ws, config.defaults);
 await seedLibrarian(ws, config.defaults);
+await seedSkills(ws);
 const db = openDb(ws);
 const idx = loadIndex(db);
 if (idx.length === 0 || !idx.some((r) => r.id === LIBRARIAN_ID)) await reindex(ws, db);
 reindexKnowledge(ws, db); // rebuild the KB graph index from kb/nodes/*.md (files are canon)
+reindexSkills(ws, db); // rebuild the skills index from skills/*.md (files are canon)
 const kbDrift = diffSources(ws, db);
 const startupNotice = (kbDrift.changed.length || kbDrift.deleted.length)
   ? `kb: ${kbDrift.changed.length} changed / ${kbDrift.deleted.length} removed source(s) — run /kb sync`
