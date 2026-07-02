@@ -116,6 +116,18 @@ You can also just ask root to "clear all X" — it delegates to the librarian, w
 `forget` under the hood. Agent-written memory (`remember`) stays write-through and immediately
 recallable; only pruning is admin-driven.
 
+## Skills (reusable procedures)
+
+Agents share a library of **skills** — reviewed, step-by-step procedures for repeatable operations,
+so the squad does common tasks the right way with fewer mistakes. Each skill is a file
+(`skills/<id>.md`, YAML frontmatter + a markdown procedure); files are canon and a SQLite table
+indexes them. Every agent can `find_skills(query)` and `use_skill(name)` (load the full procedure),
+and the most relevant skills auto-inject (name + when-to-use) into each run's prompt.
+
+Author skills by creating/editing `skills/*.md` and running `/skills reindex` (a few starters ship
+by default). Manage them with `/skills list`, `/skills show <id|name>`, `/skills remove <id>`. Set a
+skill's `status: draft` to keep it out of agents' context while you work on it.
+
 ## Development
 
 Requires [Bun](https://bun.sh).
