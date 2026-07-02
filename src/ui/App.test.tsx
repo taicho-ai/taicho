@@ -88,6 +88,15 @@ async function waitFor(frame: () => string | undefined, sub: string, timeout = 4
   }
 }
 
+async function waitForGone(frame: () => string | undefined, sub: string, timeout = 4000): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    if (!(frame() ?? "").includes(sub)) return;
+    if (Date.now() - start > timeout) throw new Error(`timed out waiting for "${sub}" to disappear.\nLast frame:\n${frame()}`);
+    await sleep(15);
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mkNode = (over: object) =>
   KbNode.parse({ id: "kb_" + Math.random().toString(36).slice(2, 8), title: "t", content: "c", created: new Date().toISOString(), ...over });
@@ -304,9 +313,10 @@ test("streaming reply renders completed markdown blocks incrementally (not snap-
   // Snap-at-end could never show block 1 formatted while block 3 is still raw — this proves incremental.
   expect(lastFrame()).not.toContain("# Plan");
   expect(lastFrame()).toContain("Plan");
-  // After the run finishes, the final block is flushed and formatted too.
-  await waitFor(lastFrame, "do the thing");
-  expect(lastFrame()).not.toContain("**the thing**");
+  // After the run finishes, the final block is flushed and formatted too — the raw markers disappear
+  // (the block's bold now applies real ANSI, so we wait for the markers to go, not a plain substring).
+  await waitForGone(lastFrame, "**the thing**");
+  expect(lastFrame()).toContain("the thing");
   expect(lastFrame()).not.toContain("# Plan");
   // The agent label is shown once per reply, not once per block. A plain substring count of "root"
   // is NOT robust here: the empty-squad startup banner ("...root is ready)...") also contains "root",
