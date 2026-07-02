@@ -17,6 +17,8 @@ import { KbNode } from "../schemas/knowledge";
 import { writeNode, mkKbId, nodeExists, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { putVector } from "../store/vectors";
 import { searchKnowledge } from "../knowledge/retrieval";
+import { getActiveSkills } from "../store/skills";
+import { rankSkills } from "../skills/retrieval";
 
 export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
   const set: ToolSet = {};
@@ -228,6 +230,24 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         return { reindexed: true, embedded };
       },
     });
+
+  // Skills are a universal agent capability (like the MCP-tools grant): every agent can discover and
+  // load reviewed procedures. Not gated by agent.tools; built-ins still win over MCP tools below.
+  set.find_skills = tool({
+    description: "Search the deck's reusable skills (reviewed procedures for repeatable operations) by what you're trying to do. Returns matching skill names + when to use them; call use_skill to load the full procedure.",
+    inputSchema: z.object({ query: z.string(), k: z.number().int().positive().max(20).default(6) }),
+    execute: async ({ query, k }) => ({ matches: rankSkills(getActiveSkills(ctx.db), query, k).map((h) => ({ id: h.id, name: h.name, description: h.description })) }),
+  });
+
+  set.use_skill = tool({
+    description: "Load the full step-by-step procedure for a skill by name, then follow it. Use this for repeatable operations so you do them the reviewed way with fewer mistakes.",
+    inputSchema: z.object({ name: z.string() }),
+    execute: async ({ name }) => {
+      const rows = getActiveSkills(ctx.db);
+      const s = rows.find((r) => r.name === name) ?? rows.find((r) => r.id === name);
+      return s ? { name: s.name, body: s.body } : { error: `no skill "${name}" — call find_skills to discover available skills` };
+    },
+  });
 
   // Every agent gets every connected MCP server's tools (global defaults like Firecrawl + any
   // deck-added server) — no per-agent opt-in for now; gatekeeping can come later. Built-ins already
