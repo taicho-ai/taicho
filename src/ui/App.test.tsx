@@ -98,6 +98,12 @@ test("boots to a banner mentioning taicho", async () => {
   expect(lastFrame()).toContain("taicho");
 });
 
+test("boot renders the ANSI-shadow figlet banner", async () => {
+  const { props } = await setup({ model: mockModel("hi") });
+  const { lastFrame } = render(<App {...props} />);
+  expect(lastFrame()).toContain("█"); // the block-glyph banner appears at the top on launch
+});
+
 test("/help lists the command grammar", async () => {
   const { props } = await setup();
   const { stdin, lastFrame } = render(<App {...props} />);
