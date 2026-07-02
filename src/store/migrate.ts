@@ -72,7 +72,6 @@ const MIGRATIONS: Migration[] = [
           tags        TEXT,
           status      TEXT NOT NULL DEFAULT 'active',
           body        TEXT NOT NULL,
-          created     INTEGER DEFAULT (unixepoch()),
           updated     INTEGER DEFAULT (unixepoch())
         );
         CREATE INDEX IF NOT EXISTS skills_status ON skills(status);

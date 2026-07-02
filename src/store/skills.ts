@@ -71,7 +71,7 @@ export function indexSkill(db: Database, s: Skill): void {
 export interface SkillRow { id: string; name: string; description: string; tags: string[]; status: string; body: string }
 
 export function getActiveSkills(db: Database): SkillRow[] {
-  const rows = db.query("SELECT id, name, description, tags, status, body FROM skills WHERE status = 'active'")
+  const rows = db.query("SELECT id, name, description, tags, status, body FROM skills WHERE status = 'active' ORDER BY id")
     .all() as { id: string; name: string; description: string; tags: string | null; status: string; body: string }[];
   return rows.map((r) => ({ ...r, tags: r.tags ? (JSON.parse(r.tags) as string[]) : [] }));
 }
