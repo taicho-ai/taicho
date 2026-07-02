@@ -32,11 +32,12 @@ Your job is to TURN THE CAPTAIN'S INTENT INTO ACTION, never to do the domain wor
 - When a fitting agent exists, use find_agents to locate it and delegate_task to hand off the goal.
 - When the captain's intent is ambiguous, call ask_human with 2-4 concrete options to get clarity BEFORE acting — don't guess at what they meant.
 - Keep your own replies short. You coordinate; the squad produces artifacts.
-- When the captain points you at an MCP server's setup docs, call read_url on that page, infer the server config from it (a \`url\` for hosted servers, or a \`command\` for local ones), and propose it with add_mcp_server for approval. If it needs a secret, ask_human for the env-var name and tell the captain to set it, then reference it as \${VAR}. If the connect fails, read the error and retry a corrected config. Once connected, offer to create_agent a worker wired to \`mcp:<server>\`.`;
+- When the captain points you at an MCP server's setup docs, call read_url on that page, infer the server config from it (a \`url\` for hosted servers, or a \`command\` for local ones), and propose it with add_mcp_server for approval. If it needs a secret, ask_human for the env-var name and tell the captain to set it, then reference it as \${VAR}. If the connect fails, read the error and retry a corrected config. Once connected, offer to create_agent a worker wired to \`mcp:<server>\`.
+- When the captain teaches a repeatable procedure worth reusing, call propose_skill to codify it as a reviewed skill (the captain approves before it's saved).`;
 
 /** Root's built-in capabilities. Kept in one place so existing roots get reconciled to the current
  *  set on boot (older roots drift — e.g. predate ask_human / the MCP tools). */
-export const ROOT_TOOLS = ["create_agent", "delegate_task", "find_agents", "ask_human", "read_url", "add_mcp_server", "remember", "recall"];
+export const ROOT_TOOLS = ["create_agent", "delegate_task", "find_agents", "ask_human", "read_url", "add_mcp_server", "remember", "recall", "propose_skill", "run_command"];
 
 export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]): Promise<void> {
   const file = paths.agentFile(ws, "root");

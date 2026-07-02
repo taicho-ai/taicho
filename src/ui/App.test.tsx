@@ -232,6 +232,26 @@ test("create_agent end-to-end: agent proposes, the card renders, captain approve
   await waitFor(lastFrame, "Created scout");         // approval flowed back; run resumed and replied
 });
 
+test("run_command end-to-end: agent runs a command, the guard blocks, the card renders, captain approves", async () => {
+  // "git reset --hard" is deterministic regardless of whether the dev machine has dcg installed:
+  // dcg's git pack blocks it, and when dcg is absent the guard's fail-safe blocks everything anyway.
+  // It's also harmless to actually run — the test workspace (ws) is a fresh tmpdir, not a git repo,
+  // so approving it just errors ("not a git repository") with no side effects.
+  const runCall = {
+    content: [{ type: "tool-call", toolCallId: "c1", toolName: "run_command", input: JSON.stringify({ command: "git reset --hard" }) }],
+    finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+  } as unknown as LanguageModelV3GenerateResult;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(runCall, finalText("ran it")) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "run git reset --hard for me", ENTER);
+  await waitFor(lastFrame, "Run command");        // the approval card rendered (blocked, deterministically)
+  expect(lastFrame()).toContain("git reset --hard");
+  await send(stdin, "y");                           // captain approves
+  await waitFor(lastFrame, "ran it");               // command ran, run resumed and replied
+});
+
 test("subscription path streams the reply live: deltas assemble into the rendered response", async () => {
   const chunks = [
     { type: "stream-start", warnings: [] },

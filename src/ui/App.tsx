@@ -67,6 +67,17 @@ function proposalView(req: Exclude<ApprovalRequest, { kind: "ask_human" }>): { t
       { label: "name", value: req.name }, { label: "transport", value: transport }, { label: "env", value: env || "—" },
     ] };
   }
+  if (req.kind === "propose_skill")
+    return { title: "New skill — approve?", fields: [
+      { label: "name", value: req.draft.name },
+      { label: "when", value: req.draft.description },
+      { label: "procedure", value: req.draft.body },
+    ] };
+  if (req.kind === "run_command")
+    return { title: "Run command — approve?", fields: [
+      { label: "command", value: req.command },
+      { label: "flagged", value: req.reason ?? "the guard flagged this command" },
+    ] };
   return { title: "New agent — approve?", fields: [
     { label: "id", value: req.draft.id }, { label: "role", value: req.draft.role }, { label: "identity", value: req.draft.identity },
   ] };

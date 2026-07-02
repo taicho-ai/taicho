@@ -17,8 +17,10 @@ import { KbNode } from "../schemas/knowledge";
 import { writeNode, mkKbId, nodeExists, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { putVector } from "../store/vectors";
 import { searchKnowledge } from "../knowledge/retrieval";
-import { getActiveSkills } from "../store/skills";
+import { getActiveSkills, mkSkillId, writeSkill } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
+import { Skill } from "../schemas/skill";
+import { classifyCommand, runShell } from "./command-guard";
 
 export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
   const set: ToolSet = {};
@@ -228,6 +230,42 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         reindexKnowledge(ctx.ws, ctx.db);
         const embedded = ctx.embed ? await reembedAll(ctx.db, ctx.embed) : 0;
         return { reindexed: true, embedded };
+      },
+    });
+
+  if (agent.tools.includes("propose_skill"))
+    set.propose_skill = tool({
+      description: "Propose a reusable skill (a reviewed step-by-step procedure for a repeatable operation) for the captain to approve. On approval it's saved and every agent can use it via use_skill.",
+      inputSchema: z.object({
+        name: z.string(),
+        description: z.string().describe("when to use this skill"),
+        body: z.string().describe("the step-by-step procedure"),
+        tags: z.array(z.string()).default([]),
+      }),
+      execute: async ({ name, description, body, tags }) => {
+        const draft = { name, description, body, tags: tags ?? [] };
+        const d = await ctx.requestApproval({ kind: "propose_skill", draft });
+        if (d.type !== "approve") return { rejected: true };
+        const skill = Skill.parse({ id: mkSkillId(), name, description, body, tags: draft.tags, status: "active", created: new Date().toISOString() });
+        writeSkill(ctx.ws, ctx.db, skill);
+        ctx.notes.push(`proposed skill ${skill.id}`);
+        return { id: skill.id };
+      },
+    });
+
+  if (agent.tools.includes("run_command"))
+    set.run_command = tool({
+      description: "Run a shell command in the workspace. Commands the safety guard clears run automatically; anything it flags is sent to the captain for approval first. Returns { exitCode, stdout, stderr }.",
+      inputSchema: z.object({ command: z.string(), cwd: z.string().optional() }),
+      execute: async ({ command, cwd }) => {
+        const classify = ctx.classifyCommand ?? classifyCommand;
+        const run = ctx.runShell ?? runShell;
+        const v = classify(command);
+        if (v.decision !== "allow") {
+          const d = await ctx.requestApproval({ kind: "run_command", command, reason: v.reason });
+          if (d.type !== "approve") return { rejected: true };
+        }
+        return run(command, cwd ?? ctx.ws);
       },
     });
 
