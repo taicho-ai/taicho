@@ -257,6 +257,33 @@ test("subscription path streams the reply live: deltas assemble into the rendere
   expect(done.length).toBeGreaterThan(0);               // the run completed via the streaming path
 });
 
+test("streaming reply renders completed markdown blocks incrementally (not snap-at-end)", async () => {
+  const chunks = [
+    { type: "stream-start", warnings: [] },
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "# Plan\n\n" },
+    { type: "text-delta", id: "1", delta: "First step done.\n\n" },
+    { type: "text-delta", id: "1", delta: "Then do **the thing**." },
+    { type: "text-end", id: "1" },
+    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+  ];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doStream: (async () => ({ stream: simulateReadableStream({ initialDelayInMs: 0, chunkDelayInMs: 30, chunks }) })) as any });
+  const { props } = await setup({ model, subscription: true });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  // Mid-stream the LAST block streams raw in the tail ("**the thing**" markers visible)…
+  await waitFor(lastFrame, "**the thing**");
+  // …while an EARLIER block has already committed as formatted markdown (heading, no "# " marker).
+  // Snap-at-end could never show block 1 formatted while block 3 is still raw — this proves incremental.
+  expect(lastFrame()).not.toContain("# Plan");
+  expect(lastFrame()).toContain("Plan");
+  // After the run finishes, the final block is flushed and formatted too.
+  await waitFor(lastFrame, "do the thing");
+  expect(lastFrame()).not.toContain("**the thing**");
+  expect(lastFrame()).not.toContain("# Plan");
+});
+
 test("no credentials: a chat message is refused without burning tokens", async () => {
   const { props } = await setup({ model: null });
   const { stdin, lastFrame } = render(<App {...props} />);

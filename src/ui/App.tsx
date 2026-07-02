@@ -16,6 +16,7 @@ import { isStdioServer } from "../store/config";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
 import { renderMarkdown } from "./markdown";
+import { splitCompletedBlocks } from "./markdown-stream";
 import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
@@ -114,6 +115,7 @@ export function App(props: {
   const streamRef = useRef("");
   const streamFromRef = useRef("");
   const streamedRef = useRef(false);
+  const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
   const [liveText, setLiveText] = useState("");
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
@@ -143,8 +145,12 @@ export function App(props: {
   // Commit the in-progress streamed text (if any) as a finalized agent line — called when a tool
   // interrupts the stream and at run end. No-op when nothing has streamed.
   const flushStream = () => {
-    if (streamRef.current) say({ kind: "agent", from: streamFromRef.current, text: streamRef.current });
-    streamRef.current = "";
+    if (streamRef.current) {
+      const { blocks, tail } = splitCompletedBlocks(streamRef.current);
+      for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: streamFromRef.current, text: b, rendered: true });
+      if (tail.trim()) say({ kind: "agent", from: streamFromRef.current, text: tail, rendered: true });
+    }
+    streamRef.current = ""; streamBlocksRef.current = 0;
     setLiveText("");
   };
 
@@ -171,7 +177,16 @@ export function App(props: {
     ws: props.ws, db: props.db, model,
     requestApproval,
     onStep: ({ tool, agent, delta }) => {
-      if (delta) { streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta; setLiveText(streamRef.current); return; }
+      if (delta) {
+        streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
+        const { blocks, tail } = splitCompletedBlocks(streamRef.current);
+        if (blocks.length > streamBlocksRef.current) {
+          for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: agent, text: b, rendered: true });
+          streamBlocksRef.current = blocks.length;
+        }
+        setLiveText(tail);
+        return;
+      }
       if (tool) { flushStream(); setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); }
     },
     pollSteer: () => steerQueue.current.shift() ?? null,
@@ -205,7 +220,7 @@ export function App(props: {
     setActivity(parsed.kind === "address" ? `${parsed.to} · thinking…` : "root · thinking…");
     steerQueue.current = [];
     aborter.current = new AbortController();
-    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; setLiveText("");
+    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0; setLiveText("");
     try {
       if (parsed.kind === "chat") {
         thread.current.push({ role: "user", content: parsed.text });
