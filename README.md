@@ -128,6 +128,21 @@ Author skills by creating/editing `skills/*.md` and running `/skills reindex` (a
 by default). Manage them with `/skills list`, `/skills show <id|name>`, `/skills remove <id>`. Set a
 skill's `status: draft` to keep it out of agents' context while you work on it.
 
+## Root: proposing skills & running commands
+
+The root orchestrator has two extra, captain-gated powers:
+
+- **`propose_skill`** — root can draft a reusable skill; you approve it on a card, and on approval it's
+  saved `active` and the whole squad can `use_skill` it.
+- **`run_command`** — root can run shell commands. Each command is checked by the external
+  [`dcg`](https://github.com/Dicklesworthstone/destructive_command_guard) guard: commands it clears run
+  automatically; anything it flags — or any command at all if `dcg` isn't installed — is sent to you for
+  approval first. Output is captured (capped) and returned. Install `dcg` to reduce approval prompts;
+  without it, every command asks (fail-safe).
+
+Both are root-only. There's no sandbox in this version — the guard + your approval are the guardrails,
+so only enable command execution on decks you trust.
+
 ## Development
 
 Requires [Bun](https://bun.sh).
