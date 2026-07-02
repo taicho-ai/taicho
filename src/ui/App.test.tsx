@@ -282,17 +282,19 @@ test("subscription path streams the reply live: deltas assemble into the rendere
   const { ws, props } = await setup({ model, subscription: true });
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "go", ENTER);
-  await waitFor(lastFrame, "streamed reply");           // assembled live from the streamed deltas
-  expect(lastFrame()).toContain("root: streamed reply");
-  // The reply renders LIVE (before the run finishes), so poll for the completed trace rather than
-  // assuming completion the instant the text appears.
+  await waitFor(lastFrame, "streamed reply");           // assembled from the streamed deltas, then rendered
+  // Rendered as a markdown block under a one-line dim `root` label — NOT the old raw inline
+  // "root: …" tail, which no longer exists (the in-progress tail is never shown raw).
+  expect(lastFrame()).not.toContain("root: streamed reply");
+  expect((lastFrame()!.match(/^root$/gm) ?? []).length).toBe(1);
+  // Poll for the completed trace rather than assuming completion the instant the text appears.
   const start = Date.now();
   let done = listTraces(ws, "root").filter((t) => t.outcome === "completed");
   while (done.length === 0 && Date.now() - start < 2000) { await sleep(20); done = listTraces(ws, "root").filter((t) => t.outcome === "completed"); }
   expect(done.length).toBeGreaterThan(0);               // the run completed via the streaming path
 });
 
-test("streaming reply renders completed markdown blocks incrementally (not snap-at-end)", async () => {
+test("streaming renders completed markdown blocks incrementally and never shows a raw tail", async () => {
   const chunks = [
     { type: "stream-start", warnings: [] },
     { type: "text-start", id: "1" },
@@ -307,22 +309,21 @@ test("streaming reply renders completed markdown blocks incrementally (not snap-
   const { props } = await setup({ model, subscription: true });
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "go", ENTER);
-  // Mid-stream the LAST block streams raw in the tail ("**the thing**" markers visible)…
-  await waitFor(lastFrame, "**the thing**");
-  // …while an EARLIER block has already committed as formatted markdown (heading, no "# " marker).
-  // Snap-at-end could never show block 1 formatted while block 3 is still raw — this proves incremental.
-  expect(lastFrame()).not.toContain("# Plan");
+  // Completed blocks appear as FORMATTED markdown while later blocks are still streaming — the
+  // heading renders with its "# " marker stripped (snap-at-end could never show block 1 formatted
+  // before the reply finished). The still-growing last block is held back, never shown raw.
+  await waitFor(lastFrame, "First step done");
   expect(lastFrame()).toContain("Plan");
-  // After the run finishes, the final block is flushed and formatted too — the raw markers disappear
-  // (the block's bold now applies real ANSI, so we wait for the markers to go, not a plain substring).
-  await waitForGone(lastFrame, "**the thing**");
-  expect(lastFrame()).toContain("the thing");
+  expect(lastFrame()).not.toContain("# Plan");          // block 1 is rendered, not raw
+  expect(lastFrame()).not.toContain("**");              // no raw markdown markers on screen, ever
+  // After the run finishes, the final block flushes and renders too — bold applied, no "**" markers.
+  await waitFor(lastFrame, "the thing");
+  await waitForGone(lastFrame, "**the thing**");        // markers are stripped by the markdown render
   expect(lastFrame()).not.toContain("# Plan");
   // The agent label is shown once per reply, not once per block. A plain substring count of "root"
   // is NOT robust here: the empty-squad startup banner ("...root is ready)...") also contains "root",
   // so a bare /root/g count is 2 even after the fix. Match the label as its OWN terminal-row line
   // instead (the dim `from` label renders alone on its line; no other line is ever exactly "root").
-  // Pre-fix this line-anchored count is 3 (one per streamed block); post-fix it's 1.
   expect((lastFrame()!.match(/^root$/gm) ?? []).length).toBe(1);
 });
 

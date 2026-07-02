@@ -122,14 +122,16 @@ export function App(props: {
   // The active approval/question card publishes its key handler here (during its render). App's one
   // boot-registered useInput forwards to it while a card is up — see the useInput below.
   const cardKeyRef = useRef<CardKeyHandler | null>(null);
-  // Live streaming: text deltas accumulate in streamRef (authoritative, dodges stale closures) and
-  // mirror into liveText (re-renders the in-progress agent line). streamedRef records whether ANY
-  // delta arrived this run, so we only fall back to res.text for non-streaming (env-key) providers.
+  // Live streaming: text deltas accumulate in streamRef (authoritative, dodges stale closures). As
+  // whole markdown blocks close they commit as rendered (white) lines; the still-growing tail is
+  // held back — never shown raw — until it closes into a block (or the run ends and flushStream
+  // renders it). The spinner (RunStatus) is the "working" signal while a block is mid-stream.
+  // streamedRef records whether ANY delta arrived this run, so we only fall back to res.text for
+  // non-streaming (env-key) providers.
   const streamRef = useRef("");
   const streamFromRef = useRef("");
   const streamedRef = useRef(false);
   const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
-  const [liveText, setLiveText] = useState("");
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
@@ -164,7 +166,6 @@ export function App(props: {
       if (tail.trim()) say({ kind: "agent", from: streamFromRef.current, text: tail, rendered: true });
     }
     streamRef.current = ""; streamBlocksRef.current = 0;
-    setLiveText("");
   };
 
   // Run the highlighted command now (no arg) or fill `/<cmd> ` so the captain can type its argument.
@@ -192,12 +193,11 @@ export function App(props: {
     onStep: ({ tool, agent, delta }) => {
       if (delta) {
         streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
-        const { blocks, tail } = splitCompletedBlocks(streamRef.current);
+        const { blocks } = splitCompletedBlocks(streamRef.current);
         if (blocks.length > streamBlocksRef.current) {
           for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: agent, text: b, rendered: true });
           streamBlocksRef.current = blocks.length;
         }
-        setLiveText(tail);
         return;
       }
       if (tool) { flushStream(); setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); }
@@ -233,7 +233,7 @@ export function App(props: {
     setActivity(parsed.kind === "address" ? `${parsed.to} · thinking…` : "root · thinking…");
     steerQueue.current = [];
     aborter.current = new AbortController();
-    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0; setLiveText("");
+    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
     try {
       if (parsed.kind === "chat") {
         thread.current.push({ role: "user", content: parsed.text });
@@ -461,9 +461,6 @@ export function App(props: {
           </Text>
         );
       })}
-      {liveText !== "" && (
-        <Text color="green">{streamFromRef.current ? `${streamFromRef.current}: ` : ""}{liveText}</Text>
-      )}
       {pending && (() => {
         if (pending.req.kind === "ask_human") {
           return (
