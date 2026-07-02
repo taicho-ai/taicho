@@ -33,3 +33,21 @@ test("assemble includes a skills block in the volatile tier when provided", () =
   expect(system).toContain("deploy: ship to prod");
   expect(sections.find((s) => s.name === "skills")?.tier).toBe("volatile");
 });
+
+test("root gets the Operating taicho context block (workspace + commands + CLI), in the stable tier", () => {
+  const { system, sections } = assemble(agent, { visibleAgents: [], policies: [] });
+  expect(system).toContain("## Operating taicho");
+  expect(system).toContain("kb/sources");          // workspace layout
+  expect(system).toContain("/kb sync");            // command surface
+  expect(system).toContain("run_command");         // CLI usage
+  const op = sections.find((s) => s.name === "operating");
+  expect(op?.tier).toBe("stable");                 // stable → doesn't churn the prefix cache
+});
+
+test("a non-root agent does NOT carry the Operating taicho block (root-only orientation)", () => {
+  const worker: AgentDef = { ...agent, id: "researcher", role: "researches", isRoot: false };
+  const { system, sections } = assemble(worker, { visibleAgents: [], policies: [] });
+  expect(system).not.toContain("## Operating taicho");
+  expect(system).not.toContain("run_command");
+  expect(sections.find((s) => s.name === "operating")).toBeUndefined();
+});
