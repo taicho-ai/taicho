@@ -7,4 +7,6 @@ dist/
 agents/
 runs/
 artifacts/
+kb/
+skills/
 .tui-test/
