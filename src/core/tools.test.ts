@@ -13,7 +13,7 @@ import { openDb } from "../store/db";
 import { readNode, writeNode } from "../store/knowledge";
 import { paths } from "../store/files";
 import { KbNode } from "../schemas/knowledge";
-import { writeSkill } from "../store/skills";
+import { writeSkill, getActiveSkills } from "../store/skills";
 import { Skill } from "../schemas/skill";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
@@ -248,4 +248,27 @@ test("find_skills + use_skill are granted to every agent and read active skills"
   const miss = await set.use_skill!.execute!({ name: "nope" }, { toolCallId: "3", messages: [] } as any);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   expect((miss as any).error).toBeDefined();
+});
+
+test("propose_skill: present only when granted; approve writes an active skill; reject writes nothing", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-ps-"));
+  const db = openDb(w);
+  const approve = { requestApproval: async () => ({ type: "approve" }) } as unknown as RunContext;
+  const ctx = { ...approve, ws: w, db, notes: [] as string[] } as unknown as RunContext;
+  expect(toolsForAgent(agent(["write_artifact"]), ctx).propose_skill).toBeUndefined();
+
+  const set = toolsForAgent(agent(["propose_skill"]), ctx);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await set.propose_skill!.execute!({ name: "deploy", description: "how to deploy", body: "1. build\n2. ship", tags: ["ops"] }, { toolCallId: "1", messages: [] } as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((out as any).id).toMatch(/^skill_/);
+  expect(getActiveSkills(db).map((s) => s.name)).toContain("deploy");
+
+  const rejectCtx = { requestApproval: async () => ({ type: "reject" }), ws: w, db, notes: [] as string[] } as unknown as RunContext;
+  const set2 = toolsForAgent(agent(["propose_skill"]), rejectCtx);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out2 = await set2.propose_skill!.execute!({ name: "nope", description: "x", body: "y", tags: [] }, { toolCallId: "2", messages: [] } as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((out2 as any).rejected).toBe(true);
+  expect(getActiveSkills(db).map((s) => s.name)).not.toContain("nope");
 });
