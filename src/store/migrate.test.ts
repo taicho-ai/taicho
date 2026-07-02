@@ -31,9 +31,16 @@ test("ensureEmbedSpace wipes kb vectors when the model/dim changes, and no-ops w
   expect(count(db, "SELECT COUNT(*) c FROM embeddings WHERE kind='kb'")).toBe(0);
 });
 
-test("v3 creates kb_sources and bumps SCHEMA_VERSION to 3", () => {
+test("v3 creates kb_sources (still exists in v4)", () => {
   const db = openDb(ws());
-  expect(SCHEMA_VERSION).toBe(3);
-  expect(getMeta(db, "schema_version")).toBe("3");
+  expect(SCHEMA_VERSION).toBe(4);
+  expect(getMeta(db, "schema_version")).toBe("4");
   expect(() => db.query("SELECT path, hash, updated FROM kb_sources").all()).not.toThrow();
+});
+
+test("v4 creates the skills table and bumps SCHEMA_VERSION to 4", () => {
+  const db = openDb(ws());
+  expect(SCHEMA_VERSION).toBe(4);
+  expect(getMeta(db, "schema_version")).toBe("4");
+  expect(() => db.query("SELECT id, name, description, tags, status, body FROM skills").all()).not.toThrow();
 });

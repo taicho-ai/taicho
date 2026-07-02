@@ -5,6 +5,7 @@ export const CoachingLedger = z.object({
   applied: z.array(z.string()),
   skipped: z.array(z.object({ id: z.string(), reason: z.string() })),
   knowledge: z.array(z.string()).default([]), // kb node ids injected into context (default keeps old traces parseable)
+  skills: z.array(z.string()).default([]), // skill ids injected into context (default keeps old traces parseable)
 });
 
 /** One file per run under runs/<agent>/. Written by agents, read by humans + coaching flow only. */

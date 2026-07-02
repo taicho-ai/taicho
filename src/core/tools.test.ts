@@ -13,6 +13,8 @@ import { openDb } from "../store/db";
 import { readNode, writeNode } from "../store/knowledge";
 import { paths } from "../store/files";
 import { KbNode } from "../schemas/knowledge";
+import { writeSkill } from "../store/skills";
+import { Skill } from "../schemas/skill";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
 const fakeMcp = {
@@ -29,12 +31,12 @@ const ctx = {} as RunContext;
 
 test("every agent gets all connected MCP tools (default-grant, no mcp:<server> ref needed)", () => {
   const set = toolsForAgent(agent(["write_artifact"]), ctx, fakeMcp);
-  expect(Object.keys(set).sort()).toEqual(["web_extract", "web_search", "write_artifact"]);
+  expect(Object.keys(set).sort()).toEqual(["find_skills", "use_skill", "web_extract", "web_search", "write_artifact"]);
 });
 
 test("without a manager, only built-ins are present", () => {
   const set = toolsForAgent(agent(["write_artifact", "mcp:web"]), ctx);
-  expect(Object.keys(set)).toEqual(["write_artifact"]);
+  expect(Object.keys(set).sort()).toEqual(["find_skills", "use_skill", "write_artifact"]);
 });
 
 test("ask_human: present only when granted; calls requestApproval and returns the chosen answer", async () => {
@@ -223,4 +225,27 @@ test("forget tool cascades and rejects an empty filter", async () => {
   const empty = await set.forget!.execute!({}, { toolCallId: "2", messages: [] } as any);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   expect((empty as any).error).toBeDefined();
+});
+
+test("find_skills + use_skill are granted to every agent and read active skills", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-sk-"));
+  const db = openDb(w);
+  writeSkill(w, db, Skill.parse({ id: "skill_dep", name: "deploy", description: "ship to prod", body: "1. build\n2. ship", created: new Date().toISOString() }));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sctx = { db } as any as RunContext;
+  const set = toolsForAgent(agent(["write_artifact"]), sctx); // NOT granted skills explicitly → still present
+  expect(set.find_skills).toBeDefined();
+  expect(set.use_skill).toBeDefined();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const found = await set.find_skills!.execute!({ query: "how do I deploy", k: 6 }, { toolCallId: "1", messages: [] } as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((found as any).matches.map((m: any) => m.name)).toContain("deploy");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const used = await set.use_skill!.execute!({ name: "deploy" }, { toolCallId: "2", messages: [] } as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((used as any).body).toContain("1. build");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const miss = await set.use_skill!.execute!({ name: "nope" }, { toolCallId: "3", messages: [] } as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((miss as any).error).toBeDefined();
 });

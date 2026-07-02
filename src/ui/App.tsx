@@ -19,9 +19,10 @@ import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
 import { addMcpServer, removeMcpServer } from "../store/mcp-store";
-import { parseMcpCommand, formatMcpStatus, parseKbCommand } from "./slash";
+import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand } from "./slash";
 import { syncKnowledgeSources } from "../knowledge/sync";
 import { listNodeRows, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
+import { listSkills, readSkill, deleteSkill, reindexSkills } from "../store/skills";
 
 type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
 
@@ -367,6 +368,32 @@ export function App(props: {
       } catch (e) {
         say({ kind: "system", text: `  sync failed: ${e instanceof Error ? e.message : String(e)}` });
       } finally { setBusy(false); }
+      return;
+    }
+    if (cmd === "skills") {
+      const parsed = parseSkillCommand(arg);
+      if (parsed.kind === "error") { say({ kind: "system", text: `  ${parsed.message}` }); return; }
+      if (parsed.kind === "list") {
+        const skills = listSkills(props.ws);
+        if (!skills.length) { say({ kind: "system", text: "  (no skills)" }); return; }
+        skills.forEach((s) => say({ kind: "system", text: `  [${s.id}] ${s.name} (${s.status}) — ${s.description}` }));
+        return;
+      }
+      if (parsed.kind === "show") {
+        const all = listSkills(props.ws);
+        const s = all.find((x) => x.name === parsed.arg) ?? readSkill(props.ws, parsed.arg);
+        if (!s) { say({ kind: "system", text: `  no skill "${parsed.arg}"` }); return; }
+        say({ kind: "system", text: `  [${s.id}] ${s.name} (${s.status}) — ${s.description}` });
+        s.body.split("\n").forEach((ln) => say({ kind: "system", text: `  ${ln}` }));
+        return;
+      }
+      if (parsed.kind === "remove") {
+        say({ kind: "system", text: deleteSkill(props.ws, props.db, parsed.id) ? `  removed ${parsed.id}` : `  no skill "${parsed.id}"` });
+        return;
+      }
+      // reindex
+      reindexSkills(props.ws, props.db);
+      say({ kind: "system", text: `  reindexed ${listSkills(props.ws).length} skill(s) from files` });
       return;
     }
     runSlashPure(cmd, arg, {

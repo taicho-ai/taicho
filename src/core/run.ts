@@ -10,6 +10,8 @@ import { canDelegate, visibleToRows } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
 import { searchKnowledge } from "../knowledge/retrieval";
+import { getActiveSkills } from "../store/skills";
+import { rankSkills } from "../skills/retrieval";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
 import { reserveRunId, writeTrace } from "../store/trace";
 import type { ProposalDraft } from "../coaching/proposal";
@@ -211,12 +213,31 @@ export async function executeRun(
     }
   }
 
+  // Auto-inject relevant skills (names + when-to-use) for EVERY agent; the full procedure loads via
+  // use_skill on demand. Keyword-ranked against the task, like the KB block above.
+  let skillsBlock: string | undefined;
+  let skillIds: string[] = [];
+  {
+    const sq = opts.brief?.goal ?? lastUserText(opts.messages);
+    if (sq.trim()) {
+      try {
+        const hits = rankSkills(getActiveSkills(deps.db), sq, 5);
+        if (hits.length) {
+          skillIds = hits.map((h) => h.id);
+          skillsBlock = "## Skills available (call use_skill(name) to load the full procedure before you act)\n" +
+            hits.map((h) => `- ${h.name}: ${h.description}`).join("\n");
+        }
+      } catch (e) { console.error(`skill inject failed for ${opts.agent.id}:`, e); }
+    }
+  }
+
   const { system } = assemble(opts.agent, {
     visibleAgents: visible,
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
     policies: applied,
     memoryBlock,
     knowledgeBlock,
+    skillsBlock,
   });
   const tools = toolsForAgent(opts.agent, ctx, deps.mcp);
 
@@ -240,7 +261,7 @@ export async function executeRun(
 
   const trace: RunTrace = {
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,
-    ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [], knowledge: knowledgeIds },
+    ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [], knowledge: knowledgeIds, skills: skillIds },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, outcome,
     tokens: result.tokens, costUsd: subscription ? null : result.costUsd,

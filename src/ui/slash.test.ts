@@ -6,7 +6,7 @@ import type { RunTrace } from "../schemas/trace";
 const roster = [{ id: "root", role: "orch", is_root: 1 }, { id: "w", role: "writes", is_root: 0 }];
 const trace = (id: string): RunTrace => ({
   id, agent: id.split("/")[0], task: "t", triggeredBy: "user",
-  ledger: { retrieved: [], applied: [], skipped: [], knowledge: [] },
+  ledger: { retrieved: [], applied: [], skipped: [], knowledge: [], skills: [] },
   toolCalls: [{ tool: "write_artifact", count: 1 }], artifacts: ["a.md"], delegatedOut: [],
   outcome: "completed", tokens: 5, costUsd: 0.01, notes: [], durationMs: 1, started: "2026-06-11T00:00:00.000Z",
 });
@@ -124,4 +124,16 @@ test("parseKbCommand parses subcommands and filters", () => {
   expect(parseKbCommand("list")).toEqual({ kind: "list", filter: {} });
   expect(parseKbCommand("forget").kind).toBe("error");   // refuse an empty forget filter
   expect(parseKbCommand("wat").kind).toBe("error");
+});
+
+import { parseSkillCommand } from "./slash";
+
+test("parseSkillCommand parses subcommands", () => {
+  expect(parseSkillCommand("list")).toEqual({ kind: "list" });
+  expect(parseSkillCommand("")).toEqual({ kind: "list" }); // bare /skills → list
+  expect(parseSkillCommand("reindex")).toEqual({ kind: "reindex" });
+  expect(parseSkillCommand("show deploy")).toEqual({ kind: "show", arg: "deploy" });
+  expect(parseSkillCommand("remove skill_a")).toEqual({ kind: "remove", id: "skill_a" });
+  expect(parseSkillCommand("show").kind).toBe("error");   // needs an arg
+  expect(parseSkillCommand("wat").kind).toBe("error");
 });

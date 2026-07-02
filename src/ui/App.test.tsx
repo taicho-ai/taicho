@@ -348,3 +348,16 @@ test("/kb sync drives the librarian to ingest a source doc (mocked model, real w
   await waitFor(lastFrame, "1 doc(s) ingested", 8000);
   expect(resolveNodeIds(db, { sourcePrefix: "sources/deploy.md@" }).length).toBeGreaterThan(0);
 });
+
+test("/skills list and /skills show render seeded skills", async () => {
+  const { db, props } = await setup();
+  const { writeSkill } = await import("../store/skills");
+  const { Skill } = await import("../schemas/skill");
+  writeSkill(props.ws, db, Skill.parse({ id: "skill_dep", name: "deploy", description: "ship to prod", body: "1. build\n2. ship", created: new Date().toISOString() }));
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/skills list", ENTER);
+  await waitFor(lastFrame, "deploy");
+  expect(lastFrame()).toContain("ship to prod");
+  await send(stdin, "/skills show deploy", ENTER);
+  await waitFor(lastFrame, "1. build");
+});
