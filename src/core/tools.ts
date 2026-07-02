@@ -261,7 +261,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         const classify = ctx.classifyCommand ?? classifyCommand;
         const run = ctx.runShell ?? runShell;
         const v = classify(command);
-        if (v.decision === "block") {
+        if (v.decision !== "allow") {
           const d = await ctx.requestApproval({ kind: "run_command", command, reason: v.reason });
           if (d.type !== "approve") return { rejected: true };
         }

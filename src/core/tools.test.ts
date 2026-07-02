@@ -276,7 +276,8 @@ test("propose_skill: present only when granted; approve writes an active skill; 
 test("run_command: allow → runs without approval; block → asks then runs on approve; reject → no run", async () => {
   const w = mkdtempSync(join(tmpdir(), "taicho-rc-"));
   const db = openDb(w);
-  const fakeRun = () => ({ exitCode: 0, stdout: "OUTPUT", stderr: "" });
+  const runCalls: Array<{ command: string; cwd: string }> = [];
+  const fakeRun = (command: string, cwd: string) => { runCalls.push({ command, cwd }); return { exitCode: 0, stdout: "OUTPUT", stderr: "" }; };
 
   // allow → runs, no approval requested
   const calls: unknown[] = [];
@@ -289,6 +290,7 @@ test("run_command: allow → runs without approval; block → asks then runs on 
   const a = await set.run_command!.execute!({ command: "echo hi" }, { toolCallId: "1", messages: [] } as any);
   expect(a).toEqual({ exitCode: 0, stdout: "OUTPUT", stderr: "" });
   expect(calls.length).toBe(0); // allow path never asks
+  expect(runCalls[0]).toEqual({ command: "echo hi", cwd: w }); // no cwd passed in → defaults to ctx.ws
 
   // block → asks; approve → runs
   const blockCtx = { ws: w, db, notes: [] as string[],
