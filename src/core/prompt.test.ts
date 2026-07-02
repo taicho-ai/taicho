@@ -26,3 +26,10 @@ test("assemble renders a memoryBlock in the context tier when provided", () => {
   const { system } = assemble(agent, { visibleAgents: [], policies: [], memoryBlock: "## Your recent runs\n- did x" });
   expect(system).toContain("Your recent runs");
 });
+
+test("assemble includes a skills block in the volatile tier when provided", () => {
+  const { system, sections } = assemble(agent, { visibleAgents: [], policies: [], skillsBlock: "## Skills available (call use_skill(name)…)\n- deploy: ship to prod" });
+  expect(system).toContain("Skills available");
+  expect(system).toContain("deploy: ship to prod");
+  expect(sections.find((s) => s.name === "skills")?.tier).toBe("volatile");
+});

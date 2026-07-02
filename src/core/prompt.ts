@@ -25,6 +25,7 @@ export function assemble(
     exemplarBlock?: string;
     memoryBlock?: string;
     knowledgeBlock?: string;
+    skillsBlock?: string;
   },
 ): { system: string; sections: PromptSection[] } {
   const s: PromptSection[] = [];
@@ -61,6 +62,8 @@ export function assemble(
     });
   if (opts.knowledgeBlock)
     s.push({ name: "knowledge", tier: "volatile", text: opts.knowledgeBlock });
+  if (opts.skillsBlock)
+    s.push({ name: "skills", tier: "volatile", text: opts.skillsBlock });
   if (opts.exemplarBlock)
     s.push({ name: "exemplars", tier: "volatile", text: opts.exemplarBlock });
   // date-only: minute precision would kill prefix caching
