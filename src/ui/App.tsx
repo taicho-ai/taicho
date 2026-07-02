@@ -5,6 +5,7 @@ import type { Database } from "bun:sqlite";
 import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCard";
 import { QuestionCard } from "./QuestionCard";
 import { parseInput } from "./input";
+import { BANNER } from "./banner";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
@@ -436,6 +437,7 @@ export function App(props: {
 
   return (
     <Box flexDirection="column">
+      <Text color="cyan">{BANNER}</Text>
       {lines.map((l, i) => {
         if (l.rendered) {
           // Streaming commits each completed markdown block as its own rendered line. Show the dim
