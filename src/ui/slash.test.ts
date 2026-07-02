@@ -125,3 +125,15 @@ test("parseKbCommand parses subcommands and filters", () => {
   expect(parseKbCommand("forget").kind).toBe("error");   // refuse an empty forget filter
   expect(parseKbCommand("wat").kind).toBe("error");
 });
+
+import { parseSkillCommand } from "./slash";
+
+test("parseSkillCommand parses subcommands", () => {
+  expect(parseSkillCommand("list")).toEqual({ kind: "list" });
+  expect(parseSkillCommand("")).toEqual({ kind: "list" }); // bare /skills → list
+  expect(parseSkillCommand("reindex")).toEqual({ kind: "reindex" });
+  expect(parseSkillCommand("show deploy")).toEqual({ kind: "show", arg: "deploy" });
+  expect(parseSkillCommand("remove skill_a")).toEqual({ kind: "remove", id: "skill_a" });
+  expect(parseSkillCommand("show").kind).toBe("error");   // needs an arg
+  expect(parseSkillCommand("wat").kind).toBe("error");
+});

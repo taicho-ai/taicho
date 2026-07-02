@@ -20,6 +20,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>", requiresArg: true },
   { name: "mcp", summary: "manage MCP servers", usage: "[list|add|remove|login] …" },
   { name: "kb", summary: "manage the knowledgebase", usage: "sync | list [filter] | forget <filter> | reindex" },
+  { name: "skills", summary: "manage agent skills", usage: "list | show <id|name> | remove <id> | reindex" },
   { name: "status", summary: "show the auth source" },
   { name: "login", summary: "sign in with a ChatGPT subscription", usage: "openai" },
   { name: "logout", summary: "sign out", usage: "openai" },
@@ -210,4 +211,23 @@ export function parseKbCommand(arg: string): KbCommand {
     return { kind: "forget", filter };
   }
   return { kind: "error", message: `unknown /kb subcommand "${sub ?? ""}" (try sync, list, forget, reindex)` };
+}
+
+// ---- /skills parsing (pure; the async handler lives in App.tsx) -----------------------------------
+
+export type SkillCommand =
+  | { kind: "list" }
+  | { kind: "reindex" }
+  | { kind: "show"; arg: string }
+  | { kind: "remove"; id: string }
+  | { kind: "error"; message: string };
+
+export function parseSkillCommand(arg: string): SkillCommand {
+  const parts = arg.trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0];
+  if (!sub || sub === "list") return { kind: "list" };
+  if (sub === "reindex") return { kind: "reindex" };
+  if (sub === "show") return parts[1] ? { kind: "show", arg: parts[1] } : { kind: "error", message: "usage: /skills show <id|name>" };
+  if (sub === "remove") return parts[1] ? { kind: "remove", id: parts[1] } : { kind: "error", message: "usage: /skills remove <id>" };
+  return { kind: "error", message: `unknown /skills subcommand "${sub}" (try list, show, remove, reindex)` };
 }
