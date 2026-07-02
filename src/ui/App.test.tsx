@@ -282,6 +282,12 @@ test("streaming reply renders completed markdown blocks incrementally (not snap-
   await waitFor(lastFrame, "do the thing");
   expect(lastFrame()).not.toContain("**the thing**");
   expect(lastFrame()).not.toContain("# Plan");
+  // The agent label is shown once per reply, not once per block. A plain substring count of "root"
+  // is NOT robust here: the empty-squad startup banner ("...root is ready)...") also contains "root",
+  // so a bare /root/g count is 2 even after the fix. Match the label as its OWN terminal-row line
+  // instead (the dim `from` label renders alone on its line; no other line is ever exactly "root").
+  // Pre-fix this line-anchored count is 3 (one per streamed block); post-fix it's 1.
+  expect((lastFrame()!.match(/^root$/gm) ?? []).length).toBe(1);
 });
 
 test("no credentials: a chat message is refused without burning tokens", async () => {

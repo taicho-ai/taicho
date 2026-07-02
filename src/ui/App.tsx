@@ -147,7 +147,7 @@ export function App(props: {
   const flushStream = () => {
     if (streamRef.current) {
       const { blocks, tail } = splitCompletedBlocks(streamRef.current);
-      for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: streamFromRef.current, text: b, rendered: true });
+      if (blocks.length > streamBlocksRef.current) for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: streamFromRef.current, text: b, rendered: true });
       if (tail.trim()) say({ kind: "agent", from: streamFromRef.current, text: tail, rendered: true });
     }
     streamRef.current = ""; streamBlocksRef.current = 0;
@@ -398,20 +398,29 @@ export function App(props: {
 
   return (
     <Box flexDirection="column">
-      {lines.map((l, i) =>
-        l.rendered ? (
-          <Box key={i} flexDirection="column">
-            {l.from && <Text dimColor>{l.from}</Text>}
-            {renderMarkdown(l.text, mdWidth).split("\n").map((ln, j) => (
-              <Text key={j}>{ln}</Text>
-            ))}
-          </Box>
-        ) : (
+      {lines.map((l, i) => {
+        if (l.rendered) {
+          // Streaming commits each completed markdown block as its own rendered line. Show the dim
+          // `from` label only once per reply — i.e. when the previous line isn't a rendered agent
+          // line from the same speaker — and add vertical spacing between consecutive same-agent
+          // blocks so they read as one reply instead of a repeated-label wall of text.
+          const prev = lines[i - 1];
+          const sameAgent = !!prev && prev.rendered === true && prev.kind === "agent" && prev.from === l.from;
+          return (
+            <Box key={i} flexDirection="column" marginTop={sameAgent ? 1 : 0}>
+              {!sameAgent && l.from && <Text dimColor>{l.from}</Text>}
+              {renderMarkdown(l.text, mdWidth).split("\n").map((ln, j) => (
+                <Text key={j}>{ln}</Text>
+              ))}
+            </Box>
+          );
+        }
+        return (
           <Text key={i} color={l.kind === "user" ? "white" : l.kind === "system" ? "gray" : "green"}>
             {l.kind === "user" ? "> " : l.from ? `${l.from}: ` : ""}{l.text}
           </Text>
-        ),
-      )}
+        );
+      })}
       {liveText !== "" && (
         <Text color="green">{streamFromRef.current ? `${streamFromRef.current}: ` : ""}{liveText}</Text>
       )}
