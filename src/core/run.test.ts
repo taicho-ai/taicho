@@ -14,6 +14,8 @@ import { writePolicy } from "../store/policy";
 import { PolicyNote } from "../schemas/policy";
 import { writeNode } from "../store/knowledge";
 import { KbNode } from "../schemas/knowledge";
+import { writeSkill } from "../store/skills";
+import { Skill } from "../schemas/skill";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -70,6 +72,39 @@ test("auto-injects deck knowledge for an agent with `recall` and records it in t
   expect(res.trace.ledger.knowledge).toContain("kb_seed");                                        // auto-recall recorded it
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   expect(JSON.stringify((model as any).doGenerateCalls[0].prompt)).toContain("Deploy target");    // ...and it reached the model's prompt
+});
+
+test("auto-injects an active skill for any agent and records it in the trace ledger", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  writeSkill(ws, db, Skill.parse({
+    id: "skill_deploy", name: "deploy-app", description: "how to deploy the app to production",
+    tags: ["ops"], status: "active", body: "1. build\n2. push", created: new Date().toISOString(),
+  }));
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("ok")) as any });
+  const deps = makeDeps({ ws, db, model });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "how do we deploy the app" }], triggeredBy: "user" });
+  expect(res.trace.ledger.skills).toContain("skill_deploy");                                         // auto-inject recorded it
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect(JSON.stringify((model as any).doGenerateCalls[0].prompt)).toContain("deploy-app");          // ...and it reached the model's prompt
+});
+
+test("use_skill executes inside a run and the run completes", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  writeSkill(ws, db, Skill.parse({
+    id: "skill_deploy", name: "deploy-app", description: "how to deploy the app to production",
+    tags: ["ops"], status: "active", body: "1. build\n2. push", created: new Date().toISOString(),
+  }));
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("use_skill", { name: "deploy-app" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "deploy the app" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("completed");                                     // the loop continued past the tool call to a final turn
+  expect(res.trace.toolCalls.some((t) => t.tool === "use_skill")).toBe(true);      // and use_skill actually executed in the loop
 });
 
 test("root create_agent tool persists a worker when approval resolves approve", async () => {
