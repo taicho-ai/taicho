@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Box, Text, useInput, useApp, type Key } from "ink";
+import { Box, Text, useInput, useApp, useStdout, type Key } from "ink";
 import TextInput from "ink-text-input";
 import type { Database } from "bun:sqlite";
 import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCard";
@@ -15,6 +15,7 @@ import type { AuthSource, TaichoConfig } from "../store/config";
 import { isStdioServer } from "../store/config";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
+import { renderMarkdown } from "./markdown";
 import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
@@ -86,6 +87,8 @@ export function App(props: {
   startupNotice?: string;
 }) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const mdWidth = (stdout?.columns ?? 80) - 2; // small margin so wrapping never hugs the edge
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
   const [input, setInput] = useState("");
   const [selected, setSelected] = useState(0);
@@ -209,7 +212,7 @@ export function App(props: {
         const root = await loadAgent(props.ws, "root");
         const res = await executeRun(deps(activeModel), { agent: root, messages: [...thread.current], triggeredBy: "user" });
         flushStream(); // commit the final streamed turn; only fall back to res.text if nothing streamed
-        if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text });
+        if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text, rendered: true });
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
           if (shouldPersistTurn(res.trace.outcome)) {
@@ -227,7 +230,7 @@ export function App(props: {
         if (!target) { say({ kind: "system", text: `No agent "${parsed.to}". Try /agents, or describe one to root.` }); return; }
         const res = await executeRun(deps(activeModel), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
         flushStream();
-        if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text });
+        if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text, rendered: true });
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
       }
@@ -380,11 +383,20 @@ export function App(props: {
 
   return (
     <Box flexDirection="column">
-      {lines.map((l, i) => (
-        <Text key={i} color={l.kind === "user" ? "white" : l.kind === "system" ? "gray" : "green"}>
-          {l.kind === "user" ? "> " : l.from ? `${l.from}: ` : ""}{l.text}
-        </Text>
-      ))}
+      {lines.map((l, i) =>
+        l.rendered ? (
+          <Box key={i} flexDirection="column">
+            {l.from && <Text dimColor>{l.from}</Text>}
+            {renderMarkdown(l.text, mdWidth).split("\n").map((ln, j) => (
+              <Text key={j}>{ln}</Text>
+            ))}
+          </Box>
+        ) : (
+          <Text key={i} color={l.kind === "user" ? "white" : l.kind === "system" ? "gray" : "green"}>
+            {l.kind === "user" ? "> " : l.from ? `${l.from}: ` : ""}{l.text}
+          </Text>
+        ),
+      )}
       {liveText !== "" && (
         <Text color="green">{streamFromRef.current ? `${streamFromRef.current}: ` : ""}{liveText}</Text>
       )}

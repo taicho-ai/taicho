@@ -174,7 +174,7 @@ test("a chat message runs end-to-end: renders the reply and persists a completed
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "say hi", ENTER);
   await waitFor(lastFrame, "hello from root");
-  expect(lastFrame()).toContain("root: hello from root");           // rendered as an agent line
+  expect(lastFrame()).toMatch(/root\nhello from root/);             // dim "from" label above the rendered text
   const done = listTraces(ws, "root").filter((t) => t.outcome === "completed");
   expect(done.length).toBeGreaterThan(0);                            // the run actually executed…
   expect(done.at(-1)!.tokens).toBeGreaterThan(0);                    // …and metered tokens
@@ -347,4 +347,13 @@ test("/kb sync drives the librarian to ingest a source doc (mocked model, real w
   await send(stdin, "/kb sync", ENTER);
   await waitFor(lastFrame, "1 doc(s) ingested", 8000);
   expect(resolveNodeIds(db, { sourcePrefix: "sources/deploy.md@" }).length).toBeGreaterThan(0);
+});
+
+test("a non-streaming agent reply renders markdown (bold stripped of ** markers)", async () => {
+  const { props } = await setup({ model: mockModel("Here is **bold** and a `code` word.") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "hi", ENTER);
+  await waitFor(lastFrame, "bold");
+  expect(lastFrame()).toContain("bold");
+  expect(lastFrame()).not.toContain("**bold**"); // markdown was rendered, not shown raw
 });
