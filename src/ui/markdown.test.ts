@@ -1,5 +1,15 @@
-import { test, expect } from "bun:test";
+import { test, expect, beforeAll, afterAll } from "bun:test";
+import chalk from "chalk";
 import { renderMarkdown } from "./markdown";
+
+let prevLevel: typeof chalk.level;
+beforeAll(() => {
+  prevLevel = chalk.level;
+  chalk.level = 3;
+});
+afterAll(() => {
+  chalk.level = prevLevel;
+});
 
 test("bold: strips ** markers, keeps the word", () => {
   const out = renderMarkdown("**bold**");

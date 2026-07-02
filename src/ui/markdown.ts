@@ -1,16 +1,10 @@
 /** Markdown → ANSI for the terminal REPL. A thin, owned wrapper over marked + marked-terminal
  *  (we don't use the dormant ink-markdown package). Pure + synchronous + memoized, so it's cheap to
  *  call from render. One Marked instance per width (marked-terminal wraps to a fixed width). */
-import chalk from "chalk";
 import { Marked } from "marked";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 // @ts-ignore marked-terminal has no types, but the API is stable
 import { markedTerminal } from "marked-terminal";
-
-// Enable ANSI colors for chalk (for terminal output and tests).
-if (chalk.level === 0) {
-  chalk.level = 3;
-}
 
 const byWidth = new Map<number, Marked>();
 function mdFor(width: number): Marked {
