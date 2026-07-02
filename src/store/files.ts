@@ -13,6 +13,8 @@ export const paths = {
   kbNodeFile: (ws: string, id: string) => join(ws, "kb", "nodes", `${id}.md`),
   kbSourceDir: (ws: string) => join(ws, "kb", "sources"),
   kbSourceFile: (ws: string, name: string) => join(ws, "kb", "sources", name),
+  skillsDir: (ws: string) => join(ws, "skills"),
+  skillFile: (ws: string, id: string) => join(ws, "skills", `${id}.md`),
 };
 
 export async function ensureWorkspace(ws: string) {
@@ -21,6 +23,7 @@ export async function ensureWorkspace(ws: string) {
   await mkdir(join(ws, "runs"), { recursive: true });
   await mkdir(join(ws, "kb", "nodes"), { recursive: true });
   await mkdir(join(ws, "kb", "sources"), { recursive: true });
+  await mkdir(join(ws, "skills"), { recursive: true });
 }
 
 /** Artifacts are immutable: new file per run, never overwrite. */

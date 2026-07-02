@@ -240,7 +240,7 @@ export async function executeRun(
 
   const trace: RunTrace = {
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,
-    ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [], knowledge: knowledgeIds },
+    ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [], knowledge: knowledgeIds, skills: [] },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, outcome,
     tokens: result.tokens, costUsd: subscription ? null : result.costUsd,

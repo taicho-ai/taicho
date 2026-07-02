@@ -60,6 +60,24 @@ const MIGRATIONS: Migration[] = [
         );
       `),
   },
+  // v4: agent skills — reusable procedure documents. Files (skills/*.md) are canon; this is the index.
+  {
+    version: 4,
+    up: (db) =>
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skills (
+          id          TEXT PRIMARY KEY,
+          name        TEXT NOT NULL,
+          description TEXT NOT NULL,
+          tags        TEXT,
+          status      TEXT NOT NULL DEFAULT 'active',
+          body        TEXT NOT NULL,
+          created     INTEGER DEFAULT (unixepoch()),
+          updated     INTEGER DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS skills_status ON skills(status);
+      `),
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
