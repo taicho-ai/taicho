@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Box, Text, useInput, useApp, type Key } from "ink";
+import { Box, Text, useInput, useApp, useStdout, type Key } from "ink";
 import TextInput from "ink-text-input";
 import type { Database } from "bun:sqlite";
 import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCard";
@@ -15,6 +15,8 @@ import type { AuthSource, TaichoConfig } from "../store/config";
 import { isStdioServer } from "../store/config";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
+import { renderMarkdown } from "./markdown";
+import { splitCompletedBlocks } from "./markdown-stream";
 import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
@@ -87,6 +89,8 @@ export function App(props: {
   startupNotice?: string;
 }) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const mdWidth = (stdout?.columns ?? 80) - 2; // small margin so wrapping never hugs the edge
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
   const [input, setInput] = useState("");
   const [selected, setSelected] = useState(0);
@@ -112,6 +116,7 @@ export function App(props: {
   const streamRef = useRef("");
   const streamFromRef = useRef("");
   const streamedRef = useRef(false);
+  const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
   const [liveText, setLiveText] = useState("");
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
@@ -141,8 +146,12 @@ export function App(props: {
   // Commit the in-progress streamed text (if any) as a finalized agent line — called when a tool
   // interrupts the stream and at run end. No-op when nothing has streamed.
   const flushStream = () => {
-    if (streamRef.current) say({ kind: "agent", from: streamFromRef.current, text: streamRef.current });
-    streamRef.current = "";
+    if (streamRef.current) {
+      const { blocks, tail } = splitCompletedBlocks(streamRef.current);
+      if (blocks.length > streamBlocksRef.current) for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: streamFromRef.current, text: b, rendered: true });
+      if (tail.trim()) say({ kind: "agent", from: streamFromRef.current, text: tail, rendered: true });
+    }
+    streamRef.current = ""; streamBlocksRef.current = 0;
     setLiveText("");
   };
 
@@ -169,7 +178,16 @@ export function App(props: {
     ws: props.ws, db: props.db, model,
     requestApproval,
     onStep: ({ tool, agent, delta }) => {
-      if (delta) { streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta; setLiveText(streamRef.current); return; }
+      if (delta) {
+        streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
+        const { blocks, tail } = splitCompletedBlocks(streamRef.current);
+        if (blocks.length > streamBlocksRef.current) {
+          for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: agent, text: b, rendered: true });
+          streamBlocksRef.current = blocks.length;
+        }
+        setLiveText(tail);
+        return;
+      }
       if (tool) { flushStream(); setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); }
     },
     pollSteer: () => steerQueue.current.shift() ?? null,
@@ -203,14 +221,14 @@ export function App(props: {
     setActivity(parsed.kind === "address" ? `${parsed.to} · thinking…` : "root · thinking…");
     steerQueue.current = [];
     aborter.current = new AbortController();
-    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; setLiveText("");
+    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0; setLiveText("");
     try {
       if (parsed.kind === "chat") {
         thread.current.push({ role: "user", content: parsed.text });
         const root = await loadAgent(props.ws, "root");
         const res = await executeRun(deps(activeModel), { agent: root, messages: [...thread.current], triggeredBy: "user" });
         flushStream(); // commit the final streamed turn; only fall back to res.text if nothing streamed
-        if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text });
+        if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text, rendered: true });
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
           if (shouldPersistTurn(res.trace.outcome)) {
@@ -228,7 +246,7 @@ export function App(props: {
         if (!target) { say({ kind: "system", text: `No agent "${parsed.to}". Try /agents, or describe one to root.` }); return; }
         const res = await executeRun(deps(activeModel), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
         flushStream();
-        if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text });
+        if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text, rendered: true });
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
       }
@@ -407,11 +425,29 @@ export function App(props: {
 
   return (
     <Box flexDirection="column">
-      {lines.map((l, i) => (
-        <Text key={i} color={l.kind === "user" ? "white" : l.kind === "system" ? "gray" : "green"}>
-          {l.kind === "user" ? "> " : l.from ? `${l.from}: ` : ""}{l.text}
-        </Text>
-      ))}
+      {lines.map((l, i) => {
+        if (l.rendered) {
+          // Streaming commits each completed markdown block as its own rendered line. Show the dim
+          // `from` label only once per reply — i.e. when the previous line isn't a rendered agent
+          // line from the same speaker — and add vertical spacing between consecutive same-agent
+          // blocks so they read as one reply instead of a repeated-label wall of text.
+          const prev = lines[i - 1];
+          const sameAgent = !!prev && prev.rendered === true && prev.kind === "agent" && prev.from === l.from;
+          return (
+            <Box key={i} flexDirection="column" marginTop={sameAgent ? 1 : 0}>
+              {!sameAgent && l.from && <Text dimColor>{l.from}</Text>}
+              {renderMarkdown(l.text, mdWidth).split("\n").map((ln, j) => (
+                <Text key={j}>{ln}</Text>
+              ))}
+            </Box>
+          );
+        }
+        return (
+          <Text key={i} color={l.kind === "user" ? "white" : l.kind === "system" ? "gray" : "green"}>
+            {l.kind === "user" ? "> " : l.from ? `${l.from}: ` : ""}{l.text}
+          </Text>
+        );
+      })}
       {liveText !== "" && (
         <Text color="green">{streamFromRef.current ? `${streamFromRef.current}: ` : ""}{liveText}</Text>
       )}

@@ -174,7 +174,7 @@ test("a chat message runs end-to-end: renders the reply and persists a completed
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "say hi", ENTER);
   await waitFor(lastFrame, "hello from root");
-  expect(lastFrame()).toContain("root: hello from root");           // rendered as an agent line
+  expect(lastFrame()).toMatch(/root\nhello from root/);             // dim "from" label above the rendered text
   const done = listTraces(ws, "root").filter((t) => t.outcome === "completed");
   expect(done.length).toBeGreaterThan(0);                            // the run actually executed…
   expect(done.at(-1)!.tokens).toBeGreaterThan(0);                    // …and metered tokens
@@ -255,6 +255,39 @@ test("subscription path streams the reply live: deltas assemble into the rendere
   let done = listTraces(ws, "root").filter((t) => t.outcome === "completed");
   while (done.length === 0 && Date.now() - start < 2000) { await sleep(20); done = listTraces(ws, "root").filter((t) => t.outcome === "completed"); }
   expect(done.length).toBeGreaterThan(0);               // the run completed via the streaming path
+});
+
+test("streaming reply renders completed markdown blocks incrementally (not snap-at-end)", async () => {
+  const chunks = [
+    { type: "stream-start", warnings: [] },
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "# Plan\n\n" },
+    { type: "text-delta", id: "1", delta: "First step done.\n\n" },
+    { type: "text-delta", id: "1", delta: "Then do **the thing**." },
+    { type: "text-end", id: "1" },
+    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+  ];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doStream: (async () => ({ stream: simulateReadableStream({ initialDelayInMs: 0, chunkDelayInMs: 30, chunks }) })) as any });
+  const { props } = await setup({ model, subscription: true });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  // Mid-stream the LAST block streams raw in the tail ("**the thing**" markers visible)…
+  await waitFor(lastFrame, "**the thing**");
+  // …while an EARLIER block has already committed as formatted markdown (heading, no "# " marker).
+  // Snap-at-end could never show block 1 formatted while block 3 is still raw — this proves incremental.
+  expect(lastFrame()).not.toContain("# Plan");
+  expect(lastFrame()).toContain("Plan");
+  // After the run finishes, the final block is flushed and formatted too.
+  await waitFor(lastFrame, "do the thing");
+  expect(lastFrame()).not.toContain("**the thing**");
+  expect(lastFrame()).not.toContain("# Plan");
+  // The agent label is shown once per reply, not once per block. A plain substring count of "root"
+  // is NOT robust here: the empty-squad startup banner ("...root is ready)...") also contains "root",
+  // so a bare /root/g count is 2 even after the fix. Match the label as its OWN terminal-row line
+  // instead (the dim `from` label renders alone on its line; no other line is ever exactly "root").
+  // Pre-fix this line-anchored count is 3 (one per streamed block); post-fix it's 1.
+  expect((lastFrame()!.match(/^root$/gm) ?? []).length).toBe(1);
 });
 
 test("no credentials: a chat message is refused without burning tokens", async () => {
@@ -360,4 +393,13 @@ test("/skills list and /skills show render seeded skills", async () => {
   expect(lastFrame()).toContain("ship to prod");
   await send(stdin, "/skills show deploy", ENTER);
   await waitFor(lastFrame, "1. build");
+});
+
+test("a non-streaming agent reply renders markdown (bold stripped of ** markers)", async () => {
+  const { props } = await setup({ model: mockModel("Here is **bold** and a `code` word.") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "hi", ENTER);
+  await waitFor(lastFrame, "bold");
+  expect(lastFrame()).toContain("bold");
+  expect(lastFrame()).not.toContain("**bold**"); // markdown was rendered, not shown raw
 });

@@ -5,7 +5,7 @@ import type { PolicyNote } from "../schemas/policy";
 import { McpServerConfig } from "../store/config";
 import type { McpServerStatus } from "../core/mcp/manager";
 
-export type Line = { kind: "user" | "agent" | "system"; from?: string; text: string };
+export type Line = { kind: "user" | "agent" | "system"; from?: string; text: string; rendered?: boolean };
 
 export interface SlashCommand { name: string; summary: string; usage?: string; requiresArg?: boolean; }
 
