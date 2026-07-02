@@ -22,6 +22,7 @@ import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
+import type { Verdict } from "./command-guard";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -45,7 +46,9 @@ export type ApprovalRequest =
   | { kind: "create_agent"; draft: NewAgentDraft }
   | { kind: "propose_coaching"; draft: ProposalDraft }
   | { kind: "ask_human"; question: string; options: string[] }
-  | { kind: "add_mcp"; name: string; spec: McpServerConfig };
+  | { kind: "add_mcp"; name: string; spec: McpServerConfig }
+  | { kind: "propose_skill"; draft: { name: string; description: string; body: string; tags: string[] } }
+  | { kind: "run_command"; command: string; reason?: string };
 export type ApprovalDecision =
   | { type: "approve" }
   | { type: "reject" }
@@ -60,6 +63,8 @@ export interface RunContext {
   runId: string;
   agentId: string;
   embed?: (text: string) => Promise<Float32Array>; // present only when an embedder is configured (semantic KB)
+  classifyCommand?: (command: string) => Verdict;                                             // test seam
+  runShell?: (command: string, cwd: string) => { exitCode: number; stdout: string; stderr: string }; // test seam
   ingestSource?: string; // when set (a source-ingestion run), remember stamps this instead of agentId:runId
   artifacts: string[];
   delegatedOut: string[];
