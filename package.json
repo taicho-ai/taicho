@@ -17,6 +17,7 @@
     "@ai-sdk/anthropic": "3.0.82",
     "@ai-sdk/openai": "3.0.69",
     "@huggingface/transformers": "^4.2.0",
+    "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@openrouter/ai-sdk-provider": "2.10.0",
     "ai": "6.0.199",

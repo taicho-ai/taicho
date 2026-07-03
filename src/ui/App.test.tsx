@@ -147,6 +147,34 @@ test("suggester: ↓ moves the › highlight and Enter runs the highlighted no-a
   await waitFor(lastFrame, "* root");
 });
 
+test("suggester highlight STAYS put across re-renders (uncontrolled @inkjs/ui onChange must not reset it)", async () => {
+  // Regression: @inkjs/ui TextInput fires onChange from an effect keyed on the onChange ref, and its
+  // previousValue lags a keystroke — a fresh inline onChange re-fired every render and snapped the
+  // highlight back to row 0. With a stable onChange, ↓↓ lands on row 2 and holds.
+  const { props } = await setup();
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/");
+  await waitFor(lastFrame, "/help");
+  await send(stdin, DOWN);
+  await waitFor(lastFrame, "› /agents");           // row 1
+  await send(stdin, DOWN);
+  await waitFor(lastFrame, "› /runs");             // row 2 — proves it advanced twice, not reset
+  await sleep(60);                                  // let any stray re-render/onChange fire
+  expect(lastFrame()).toContain("› /runs");        // still on row 2, not snapped back to /help
+});
+
+test("the input clears after submitting a message (uncontrolled TextInput remounts on submit)", async () => {
+  const { props } = await setup({ model: mockModel("ok") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "hello there", ENTER);
+  await waitFor(lastFrame, "ok");                    // the run completed and root replied
+  await sleep(60);
+  // "hello there" must appear exactly ONCE — as the echoed user line. If the uncontrolled input
+  // hadn't cleared on submit it would still hold the typed text too, giving two occurrences.
+  const occurrences = (lastFrame() ?? "").split("hello there").length - 1;
+  expect(occurrences).toBe(1);
+});
+
 test("/mcp list renders the manager's servers", async () => {
   const mcp = fakeMcp({ list: () => [{ name: "web", kind: "stdio", status: "connected", toolCount: 3 }] });
   const { props } = await setup({ mcp });

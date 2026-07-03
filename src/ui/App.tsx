@@ -1,6 +1,6 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Box, Text, useInput, useApp, useStdout, type Key } from "ink";
-import TextInput from "ink-text-input";
+import { TextInput, Spinner } from "@inkjs/ui";
 import type { Database } from "bun:sqlite";
 import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCard";
 import { QuestionCard } from "./QuestionCard";
@@ -33,22 +33,20 @@ type ResolveModelFn = (agentId: string) => { model: Model; modelId: string; subs
 type PriceFn = (u: { inputTokens: number; outputTokens: number }) => number;
 interface BuiltAuth { model: Model | null; resolveModel?: ResolveModelFn; priceUsd?: PriceFn }
 
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/** Animated run indicator: a braille spinner + the live activity (which agent is doing what) +
- *  elapsed seconds + the controls hint. Owns its own ticker so only this line repaints. */
+/** Animated run indicator: @inkjs/ui Spinner (owns its own glyph animation) + the live activity
+ *  (which agent is doing what) + elapsed seconds + the controls hint. A light ticker re-renders only
+ *  to advance the elapsed-seconds readout. */
 function RunStatus({ activity }: { activity: string }) {
-  const [frame, setFrame] = useState(0);
+  const [, setTick] = useState(0);
   const started = useRef(Date.now());
   useEffect(() => {
-    const t = setInterval(() => setFrame((f) => (f + 1) % SPINNER.length), 80);
+    const t = setInterval(() => setTick((n) => n + 1), 200);
     return () => clearInterval(t);
   }, []);
   const secs = ((Date.now() - started.current) / 1000).toFixed(1);
   return (
     <Box>
-      <Text color="cyan">{SPINNER[frame]} </Text>
-      <Text color="yellow">{activity}</Text>
+      <Spinner label={activity} />
       <Text color="gray">{`  ${secs}s  `}</Text>
       <Text dimColor>esc to cancel · type to steer</Text>
     </Box>
@@ -105,6 +103,17 @@ export function App(props: {
   const mdWidth = (stdout?.columns ?? 80) - 2; // small margin so wrapping never hugs the edge
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
   const [input, setInput] = useState("");
+  // @inkjs/ui TextInput is uncontrolled (defaultValue only, no `value`). To set its text
+  // programmatically — clear after submit, seed "/cmd " on suggestion-accept — we remount it via a
+  // bumped `key` with a fresh seed. onChange keeps `input` in sync for live suggestion matching, so
+  // routine typing never remounts (only the deliberate programmatic sets below do).
+  const [inputKey, setInputKey] = useState(0);
+  const [inputSeed, setInputSeed] = useState("");
+  const setInputValue = (v: string) => { setInput(v); setInputSeed(v); setInputKey((k) => k + 1); };
+  // MUST be a stable reference: @inkjs/ui TextInput fires onChange from an effect whose deps include
+  // `onChange` itself, and its `previousValue` lags one keystroke — so a fresh inline handler re-fires
+  // onChange on every App re-render, which would reset `selected` and freeze the suggester highlight.
+  const onInputChange = useCallback((v: string) => { setInput(v); setSelected(0); }, []);
   const [selected, setSelected] = useState(0);
   const [activity, setActivity] = useState("working…"); // live status shown by the run spinner
   const [busy, setBusy] = useState(false);
@@ -173,8 +182,8 @@ export function App(props: {
     const cmd = list[Math.min(selected, list.length - 1)];
     if (!cmd) return;
     setSelected(0);
-    if (cmd.requiresArg) { setInput(`/${cmd.name} `); return; }
-    setInput("");
+    if (cmd.requiresArg) { setInputValue(`/${cmd.name} `); return; }
+    setInputValue("");
     say({ kind: "user", text: `/${cmd.name}` });
     void runSlash(cmd.name, "");
   };
@@ -214,11 +223,11 @@ export function App(props: {
   const submit = async (value: string) => {
     if (!value.trim()) return;
 
-    if (busy) { setInput(""); steerQueue.current.push(value); say({ kind: "user", text: `(steer) ${value}` }); return; }
+    if (busy) { setInputValue(""); steerQueue.current.push(value); say({ kind: "user", text: `(steer) ${value}` }); return; }
 
     const matches = suggestCommands(value);
     if (matches.length > 0) { acceptSuggestion(matches); return; } // Enter selects the highlighted command
-    setInput("");
+    setInputValue("");
 
     const parsed = parseInput(value);
     say({ kind: "user", text: value });
@@ -487,7 +496,13 @@ export function App(props: {
           {busy && <RunStatus activity={activity} />}
           <Box>
             <Text color={busy ? "gray" : "cyan"}>{busy ? "❯ " : "> "}</Text>
-            <TextInput value={input} onChange={(v) => { setInput(v); setSelected(0); }} onSubmit={submit} />
+            <TextInput
+              key={inputKey}
+              defaultValue={inputSeed}
+              placeholder="message root, or / for commands"
+              onChange={onInputChange}
+              onSubmit={submit}
+            />
           </Box>
           {!pending && sugg.length > 0 && (
             <Box flexDirection="column">
