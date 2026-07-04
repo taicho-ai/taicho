@@ -39,21 +39,21 @@ returning the child's full text into the parent's context. That is the pollution
 - [x] **Feedback scope for v1:** include versioning + annotations now, or ship read/hand-off first and layer feedback after. *Decided (2026-07-04): read + hand-off first, feedback next.*
 
 ### Phase 1 — Artifact model & store
-- [ ] Define an `Artifact` zod schema in `src/schemas/` (id, title, type, producer agent, runId, version, parents[], summary, location, created). **Payload-agnostic** (see reference §5b): body is opaque bytes, `type` is a free-form tag, and `location` is local-file *or* external-ref (MCP-fronted systems) — never assume text.
-- [ ] Add `src/store/artifacts.ts`: addressable, versioned, **immutable-per-version** store over `artifacts/`, with a manifest/index for lookup by id.
-- [ ] Keep back-compat: `trace.artifacts` continues to record references (ids/paths).
+- [x] Define an `Artifact` zod schema in `src/schemas/` (id, title, type, producer agent, runId, version, parents[], summary, location, created). **Payload-agnostic** (see reference §5b): body is opaque bytes, `type` is a free-form tag, and `location` is local-file *or* external-ref (MCP-fronted systems) — never assume text.
+- [x] Add `src/store/artifacts.ts`: addressable, versioned, **immutable-per-version** store over `artifacts/`, with a manifest/index for lookup by id.
+- [x] Keep back-compat: `trace.artifacts` continues to record references (ids/paths).
 
 ### Phase 2 — Tools (the missing read half)
-- [ ] `save_artifact` — structured write; pulls provenance from `ctx` (agentId, runId, parent artifacts). Replaces/wraps today's `write_artifact`.
-- [ ] `read_artifact` — fetch an artifact by id. **This is the missing pickup.**
-- [ ] `read_artifact` must be **size-capped, summary-first** (metadata + summary by default; body by explicit ask, truncated with a marker) — an uncapped read re-creates the context pollution this plan exists to kill.
-- [ ] `list_artifacts` — discover artifacts; filter by producer / type / tag.
-- [ ] Wire into `toolsForAgent`, default agent tool grants (`roster.ts`), `prompt.ts` guidance, and a seed skill.
+- [x] `save_artifact` — structured write; pulls provenance from `ctx` (agentId, runId, parent artifacts). Replaces/wraps today's `write_artifact`.
+- [x] `read_artifact` — fetch an artifact by id. **This is the missing pickup.**
+- [x] `read_artifact` must be **size-capped, summary-first** (metadata + summary by default; body by explicit ask, truncated with a marker) — an uncapped read re-creates the context pollution this plan exists to kill.
+- [x] `list_artifacts` — discover artifacts; filter by producer / type / tag.
+- [x] Wire into `toolsForAgent`, default agent tool grants (`roster.ts`), `prompt.ts` guidance, and a seed skill.
 
 ### Phase 3 — Hand-off by reference
-- [ ] `delegate_task`: add `inputArtifacts: string[]` — resolve and pass handles to the child instead of inlining content.
-- [ ] Child return shape: `outputArtifacts + summary` instead of a full-text payload; parent context receives **handles + summary**, not the body.
-- [ ] Extend `RunTrace` to record `inputArtifacts` / `outputArtifacts` → builds the hand-off graph (mirrors `delegatedOut`).
+- [x] `delegate_task`: add `inputArtifacts: string[]` — resolve and pass handles to the child instead of inlining content.
+- [x] Child return shape: `outputArtifacts + summary` instead of a full-text payload; parent context receives **handles + summary**, not the body.
+- [x] Extend `RunTrace` to record `inputArtifacts` / `outputArtifacts` → builds the hand-off graph (mirrors `delegatedOut`).
 
 ### Phase 4 — Feedback & revision
 - [ ] Versioning: a `save_artifact` revision creates a new version linked to its parent.
@@ -75,10 +75,10 @@ returning the child's full text into the parent's context. That is the pollution
 - [ ] Make replayed context carry artifact handles, not payloads (this is where the two halves meet).
 
 ### Phase 6 — Tests & docs
-- [ ] Unit tests for the artifact store: immutability, versioning, provenance/lineage.
-- [ ] Layer-1 `App.test.tsx` coverage for save/read/list + a delegation hand-off.
+- [x] Unit tests for the artifact store: immutability, versioning, provenance/lineage.
+- [x] Layer-1 `App.test.tsx` coverage for save/read/list + a delegation hand-off.
 - [ ] Real-binary e2e (tui-test): agent A produces an artifact, agent B consumes it **by reference**, parent context stays thin.
-- [ ] Update `TESTING.md`, `CLAUDE.md`, `prompt.ts` workspace-layout notes.
+- [ ] Update `TESTING.md`, `CLAUDE.md`, `prompt.ts` workspace-layout notes. *(partial: `prompt.ts` root workspace-layout note updated for the artifact store; `TESTING.md`/`CLAUDE.md` deferred.)*
 
 ---
 

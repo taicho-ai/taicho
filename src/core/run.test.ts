@@ -16,6 +16,7 @@ import { writeNode } from "../store/knowledge";
 import { KbNode } from "../schemas/knowledge";
 import { writeSkill } from "../store/skills";
 import { Skill } from "../schemas/skill";
+import { saveArtifact, readArtifact } from "../store/artifacts";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -493,6 +494,71 @@ test("a global-scope note authored on one agent reaches another agent's run", as
   const res = await executeRun(makeDeps({ ws, db, model }), { agent: b, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
   expect(JSON.stringify((model as { doGenerateCalls: unknown[] }).doGenerateCalls[0])).toContain("be concise globally");
   expect(res.trace.ledger.applied).toContain("pol_g");
+});
+
+// ---------------------------------------------------------------------------
+// Plan 01 Phase 3: hand-off by reference (delegate_task inputArtifacts / outputArtifacts)
+// ---------------------------------------------------------------------------
+
+test("delegate_task passes input artifacts to the child BY REFERENCE (handles+summary in prompt, body NOT inlined)", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  // a pre-existing artifact the root will hand down
+  saveArtifact(ws, { id: "research-foo", title: "Foo dossier", type: "dossier", summary: "the short summary of foo", body: "THE ENORMOUS RESEARCH BODY", producer: "root", runId: "root/seed" });
+  const childModel = new MockLanguageModelV3({ doGenerate: (async () => text("wrote it")) as any });
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "writer", goal: "write from the dossier", inputArtifacts: ["research-foo"] }),
+    text("root done"),
+  ) as any });
+  // route the child to its own model so we can inspect the child's prompt
+  const deps = makeDeps({ ws, db, model: rootModel, resolveModel: (id) => id === "writer" ? { model: childModel, modelId: "m" } : { model: rootModel, modelId: "m" } });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "make it" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut.length).toBe(1);
+  expect(res.trace.inputArtifacts).toEqual(["research-foo"]); // hand-off graph: handle sent down
+  // the CHILD's prompt carries the handle + summary, but NOT the enormous body (that's the whole point)
+  const childPrompt = JSON.stringify((childModel as any).doGenerateCalls[0].prompt);
+  expect(childPrompt).toContain("research-foo@v1");
+  expect(childPrompt).toContain("the short summary of foo");
+  expect(childPrompt).not.toContain("THE ENORMOUS RESEARCH BODY");
+});
+
+test("a child's produced artifacts flow back to the parent as outputArtifacts (handles, not the body)", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write.", tools: ["save_artifact"] }, "root");
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "writer", goal: "produce a script" }),          // root
+    call("save_artifact", { title: "Script", type: "script", summary: "a 30s script", body: "SCENE 1..." }), // child
+    text("saved the script"),                                                   // child
+    text("root done"),                                                          // root
+  ) as any });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "make a script" }], triggeredBy: "user" });
+  // parent trace records the hand-off graph
+  expect(res.trace.outputArtifacts).toEqual(["script@v1"]);
+  const child = readTrace(ws, res.trace.delegatedOut[0]);
+  expect(child.artifacts).toEqual(["script@v1"]);              // child produced it (handle)
+  expect(child.outputArtifacts).toEqual([]);                   // child delegated to no one
+  // the artifact really exists in the store with the child's provenance
+  const art = readArtifact(ws, "script@v1")!;
+  expect(art.producer).toBe("writer");
+  expect(art.type).toBe("script");
+});
+
+test("delegate_task drops an unknown input artifact handle with a note (never passes a dead ref)", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "writer", goal: "x", inputArtifacts: ["ghost@v1"] }),
+    text("root done"),
+  ) as any });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut.length).toBe(1);               // delegation still happens
+  expect(res.trace.inputArtifacts).toEqual([]);                // the dead ref was dropped, not passed
+  expect(res.trace.notes.some((n) => /dropped unknown input artifact/i.test(n))).toBe(true);
 });
 
 test("create_agent honors an edited identity, not just role", async () => {

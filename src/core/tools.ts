@@ -3,12 +3,14 @@
  *  which is how create_agent awaits captain approval and delegate_task spawns child runs. */
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
-import { writeFile, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import type { AgentDef } from "../schemas/agent";
 import type { RunContext } from "./run";
 import type { McpManager } from "./mcp/manager";
-import { artifactPath, paths } from "../store/files";
+import { paths } from "../store/files";
+import { saveArtifact, readArtifact, readArtifactBody, listArtifacts } from "../store/artifacts";
+import { artifactHandle } from "../schemas/artifact";
 import { mergeDraft } from "./draft";
 import { scrapeUrl } from "./firecrawl";
 import { McpServerConfig } from "../store/config";
@@ -22,22 +24,111 @@ import { rankSkills } from "../skills/retrieval";
 import { Skill } from "../schemas/skill";
 import { classifyCommand, runShell } from "./command-guard";
 
+// read_artifact body cap: default returns metadata + summary only; a body read is capped so an
+// uncapped read can't funnel a large payload back into context (the pollution this plan exists to kill).
+const READ_ARTIFACT_CAP = 4000;
+const READ_ARTIFACT_HARD_MAX = 20000;
+
 export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
   const set: ToolSet = {};
 
+  // Legacy simple-markdown write, kept as a back-compat wrapper over the structured store (per the
+  // plan: save_artifact "replaces/wraps" it). Prefer save_artifact for provenance + hand-off.
   if (agent.tools.includes("write_artifact"))
     set.write_artifact = tool({
-      description: "Write an immutable artifact file (new file per run) and return its path.",
+      description: "Write a simple markdown artifact and return its path. Prefer save_artifact for structured, versioned, provenance-tracked outputs you hand off by reference.",
       inputSchema: z.object({
         topicSlug: z.string().regex(/^[a-z0-9-]+$/, "lowercase, digits, hyphens only"),
         markdown: z.string(),
       }),
       execute: async ({ topicSlug, markdown }) => {
-        const path = artifactPath(ctx.ws, topicSlug, ctx.runId);
-        await writeFile(path, markdown);
+        const a = saveArtifact(ctx.ws, {
+          id: topicSlug, title: topicSlug, type: "document", role: "output",
+          producer: ctx.agentId, runId: ctx.runId, body: markdown,
+        });
+        const path = a.location.kind === "file" ? a.location.path : artifactHandle(a);
         ctx.artifacts.push(path);
         return { path };
       },
+    });
+
+  if (agent.tools.includes("save_artifact"))
+    set.save_artifact = tool({
+      description: "Save a work product to the shared artifact store as a structured, versioned, addressable artifact — the way to hand work to other agents (and the human) BY REFERENCE instead of dumping it into the conversation. Your identity + this run are recorded as provenance automatically. Give a `body` (local content) OR an `external` locator (a URI/ref into a system an MCP server fronts). Reusing an existing `id` saves a NEW immutable version. Returns the handle (id@vN) — pass it in delegate_task's inputArtifacts to hand it off.",
+      inputSchema: z.object({
+        title: z.string(),
+        id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "lowercase, digits, hyphens").optional().describe("stable logical id/slug; omit to derive from the title; reuse an existing id to save a new version"),
+        type: z.string().default("document").describe("free-form tag (e.g. dossier, script, dataset, notion-page) — NOT an enforced taxonomy"),
+        role: z.enum(["output", "input", "resource"]).default("output").describe("output = you produced it; input/resource = human- or ingest-provided"),
+        summary: z.string().optional().describe("a short summary of what this artifact is; readers see it before they pull the body"),
+        body: z.string().optional().describe("the artifact's local content (stored as bytes on disk)"),
+        external: z.string().optional().describe("a locator (URI/ref) when the work product lives in an external system; use INSTEAD of body"),
+        ext: z.string().optional().describe("file extension for the body (default md)"),
+        parents: z.array(z.string()).default([]).describe("handles of artifacts this one derives from (lineage)"),
+      }),
+      execute: async ({ title, id, type, role, summary, body, external, ext, parents }) => {
+        if (body === undefined && !external) return { error: "provide a `body` (local content) or an `external` locator" };
+        try {
+          const a = saveArtifact(ctx.ws, { id, title, type, role, summary, body, external, ext, parents, producer: ctx.agentId, runId: ctx.runId });
+          const handle = artifactHandle(a);
+          ctx.artifacts.push(handle);
+          ctx.notes.push(`saved artifact ${handle}`);
+          return { id: a.id, version: a.version, handle, location: a.location };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
+  if (agent.tools.includes("read_artifact"))
+    set.read_artifact = tool({
+      description: "Fetch an artifact by handle ('id' for the latest version, or 'id@vN'). Returns metadata + summary by DEFAULT (cheap — keeps context thin). Pass includeBody:true to pull the body, which is size-capped and truncated with a marker; never dump a whole large artifact into context.",
+      inputSchema: z.object({
+        id: z.string().describe("artifact handle: 'id' (latest) or 'id@vN'"),
+        includeBody: z.boolean().default(false).describe("pull the body too (size-capped) — off by default"),
+        maxBytes: z.number().int().positive().max(READ_ARTIFACT_HARD_MAX).default(READ_ARTIFACT_CAP).describe(`body cap in chars (max ${READ_ARTIFACT_HARD_MAX})`),
+      }),
+      execute: async ({ id, includeBody, maxBytes }) => {
+        const a = readArtifact(ctx.ws, id);
+        if (!a) return { error: `no artifact "${id}"` };
+        const meta = {
+          id: a.id, version: a.version, handle: artifactHandle(a), title: a.title,
+          type: a.type, role: a.role, producer: a.producer, runId: a.runId,
+          parents: a.parents, summary: a.summary ?? null, location: a.location,
+        };
+        if (!includeBody) return { ...meta, bodyOmitted: true };
+        if (a.location.kind === "external")
+          return { ...meta, external: a.location.uri, note: "external artifact — its body lives in the fronting system; use that system's tools to fetch it" };
+        const buf = readArtifactBody(ctx.ws, id);
+        if (!buf) return { ...meta, error: "body bytes missing" };
+        const cap = Math.min(maxBytes, READ_ARTIFACT_HARD_MAX);
+        const text = buf.toString("utf8");
+        const truncated = text.length > cap;
+        return {
+          ...meta, bytes: buf.length, truncated,
+          body: truncated
+            ? text.slice(0, cap) + `\n…[truncated ${text.length - cap} of ${text.length} chars — raise maxBytes up to ${READ_ARTIFACT_HARD_MAX} or read a narrower artifact]`
+            : text,
+        };
+      },
+    });
+
+  if (agent.tools.includes("list_artifacts"))
+    set.list_artifacts = tool({
+      description: "Discover artifacts in the shared store (the latest version of each). Filter by producer (agent id), type (free-form tag), role (output|input|resource), or q (substring over id/title/summary). Returns handles + summaries — read one with read_artifact.",
+      inputSchema: z.object({
+        producer: z.string().optional(),
+        type: z.string().optional(),
+        role: z.enum(["output", "input", "resource"]).optional(),
+        q: z.string().optional().describe("substring over id/title/summary"),
+        k: z.number().int().positive().max(50).default(20),
+      }),
+      execute: async ({ producer, type, role, q, k }) => ({
+        artifacts: listArtifacts(ctx.ws, { producer, type, role, q }).slice(0, k).map((a) => ({
+          handle: artifactHandle(a), id: a.id, version: a.version, title: a.title,
+          type: a.type, role: a.role, producer: a.producer, summary: a.summary ?? null,
+        })),
+      }),
     });
 
   if (agent.tools.includes("create_agent"))
@@ -64,9 +155,14 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
 
   if (agent.tools.includes("delegate_task"))
     set.delegate_task = tool({
-      description: "Delegate a goal to another agent by id and receive its result.",
-      inputSchema: z.object({ to: z.string(), goal: z.string(), context: z.string().optional() }),
-      execute: async ({ to, goal, context }) => {
+      description: "Delegate a goal to another agent by id. Hand work over BY REFERENCE via inputArtifacts (artifact handles the child reads with read_artifact) rather than pasting content into `context`. You get back the child's output artifact handles + a short summary — not its full text.",
+      inputSchema: z.object({
+        to: z.string(),
+        goal: z.string(),
+        context: z.string().optional(),
+        inputArtifacts: z.array(z.string()).optional().describe("artifact handles ('id' or 'id@vN') to hand to the child by reference"),
+      }),
+      execute: async ({ to, goal, context, inputArtifacts }) => {
         ctx.workItems.n += 1;
         if (ctx.workItems.n > agent.budgets.maxWorkItemsPerRequest) {
           const msg = `work item budget (${agent.budgets.maxWorkItemsPerRequest}) exhausted`;
@@ -75,14 +171,21 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         }
         const guard = ctx.delegationGuard(to);
         if (!guard.ok) { ctx.notes.push(`delegate refused: ${guard.error}`); return { error: guard.error }; }
+        // resolve input handles; drop (and note) any that don't exist rather than passing a dead ref.
+        const resolved: string[] = [], dropped: string[] = [];
+        for (const h of inputArtifacts ?? []) (readArtifact(ctx.ws, h) ? resolved : dropped).push(h);
+        if (dropped.length) ctx.notes.push(`delegate: dropped unknown input artifact(s) ${dropped.join(", ")}`);
         try {
-          const child = await ctx.runChild({ to, goal, context });
+          const child = await ctx.runChild({ to, goal, context, inputArtifacts: resolved });
           ctx.delegatedOut.push(child.runId);
           ctx.childTraces.push(child.trace);
+          ctx.inputArtifacts.push(...resolved);              // hand-off graph: handles I sent down
+          ctx.outputArtifacts.push(...child.trace.artifacts); // hand-off graph: handles the child produced
           const childAgg = child.trace.aggregate ?? { tokens: child.trace.tokens, costUsd: child.trace.costUsd };
           ctx.childSpend.tokens += childAgg.tokens;
           ctx.childSpend.costUsd += childAgg.costUsd ?? 0;
-          return { to, runId: child.runId, result: child.text };
+          // Parent context gets handles + a summary, NOT the child's full body (the pollution vector).
+          return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           ctx.notes.push(`delegate failed: ${msg}`);
