@@ -23,7 +23,7 @@ import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { loadContext, loadLedger } from "../store/conversation";
 import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
-import { listSchedules } from "../store/schedules";
+import { listSchedules, createSchedule } from "../store/schedules";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { getViewMode } from "../store/prefs";
@@ -680,6 +680,27 @@ test("/schedules add persists a durable schedule, /schedules list shows it, /sch
   await send(stdin, "/schedules remove aud", ENTER);
   await waitFor(lastFrame, "removed schedule aud");
   expect(listSchedules(ws).length).toBe(0);
+});
+
+// ── Fix 2: /schedules run routes through the runner's inFlight-guarded fireNow (not the raw closure) ──
+
+test("/schedules run goes through the runner guard — an on-disk schedule NOT armed in this session is refused, not fired", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  // A synchronous (non-busy) slash command first proves the app is mounted and the boot arming effect
+  // has flushed over an EMPTY schedule set — so the schedule we write next is NOT armed this session.
+  await send(stdin, "/schedules list", ENTER);
+  await waitFor(lastFrame, "no schedules");
+
+  // Put a schedule on disk WITHOUT arming it (bypass `/schedules add`, which calls schedRunner.add).
+  // Pre-fix, `/schedules run` fired the raw fire closure regardless of the runner (bypassing the
+  // inFlight guard); post-fix it routes through fireNow, which refuses an id not armed this session.
+  createSchedule(ws, { id: "ext", goal: "audit", trigger: { kind: "interval", everyMs: 3600_000 } });
+
+  await send(stdin, "/schedules run ext", ENTER);
+  await waitFor(lastFrame, "not armed in this session"); // fireNow refused it (the guarded path)
+  expect(lastFrame()).not.toContain("firing →");          // it did NOT bypass the guard and fire
 });
 
 test("delegation with acceptance criteria: a twice-failed verdict is surfaced to the captain and recorded (Plan 06)", async () => {

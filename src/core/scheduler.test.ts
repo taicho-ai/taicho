@@ -222,3 +222,126 @@ test("an unattended scheduled run drives runHeadless and auto-rejects a privileg
 
   expect(loadIndex(db).some((r) => r.id === "ghost")).toBe(false); // the create_agent approval was rejected
 });
+
+// ── Fix 1: per-entry tick isolation — a poison cron never starves its siblings ──
+
+test("a poison cron (next match beyond the year-long scan) is disabled + logged, not silently starving a sibling", async () => {
+  const fired: string[] = [];
+  const logs: string[] = [];
+  const patches: { id: string; patch: Record<string, unknown> }[] = [];
+  // Arm at 2028-02-01: the next Feb-29 (2028-02-29) is within the year, so `0 0 29 2 *` arms OK …
+  let clock = Date.UTC(2028, 1, 1, 0, 0);
+  const runner = new SchedulerRunner({
+    now: () => clock,
+    fire: (s) => { fired.push(s.id); },
+    persist: (id, patch) => patches.push({ id, patch }),
+    log: (m) => logs.push(m),
+  });
+  // Insertion order matters: the POISON is armed FIRST, the healthy sibling SECOND. Pre-fix, the
+  // poison's fire-time throw unwinds tick() and the sibling after it is never evaluated.
+  runner.add(mkSchedule({ id: "poison", trigger: { kind: "cron", expr: "0 0 29 2 *" } }));
+  runner.add(mkSchedule({ id: "ok", trigger: { kind: "interval", everyMs: 1000 } }));
+
+  // … but at the 2028 Feb-29 fire time, the NEXT match (2032) is >366 days out, so nextCronAfter throws.
+  clock = Date.UTC(2028, 1, 29, 0, 0); runner.tick(); await flush();
+
+  expect(fired).toContain("ok");                                                 // sibling NOT starved
+  expect(logs.some((l) => /poison/.test(l) && /disabled/.test(l))).toBe(true);   // surfaced, not silent
+  expect(patches.some((p) => p.id === "poison" && p.patch.enabled === false)).toBe(true); // disabled + persisted
+  expect(runner.has("poison")).toBe(true);                                       // still held (re-enableable)
+
+  // Disabled ⇒ skipped before evaluation, so the poison never re-throws / re-fires on later ticks
+  // (the healthy interval sibling keeps firing whenever due — that's expected).
+  fired.length = 0;
+  clock = Date.UTC(2028, 1, 29, 0, 1); runner.tick(); await flush();
+  expect(fired).not.toContain("poison");
+});
+
+// ── Fix 2: manual fireNow shares the inFlight guard (no concurrent second run) ──
+
+test("fireNow returns false while a fire is in flight and starts no concurrent second run of the same schedule", async () => {
+  let clock = 0;
+  const fired: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const runner = new SchedulerRunner({ now: () => clock, fire: (s) => { fired.push(s.id); return gate; } });
+  runner.add(mkSchedule({ id: "s1", trigger: { kind: "interval", everyMs: 1000 } }));
+
+  clock = 1000; runner.tick(); await flush();
+  expect(fired).toEqual(["s1"]);             // cadence fire is in flight (gate unresolved)
+
+  // A manual `/schedules run` of the SAME schedule while it's in flight must be refused, not run twice.
+  expect(runner.fireNow("s1")).toBe(false);
+  await flush();
+  expect(fired).toEqual(["s1"]);             // still just the one — the inFlight guard held
+
+  release(); await flush();                   // the run settles → the guard clears
+  expect(runner.fireNow("s1")).toBe(true);   // now a manual run is allowed
+  await flush();
+  expect(fired).toEqual(["s1", "s1"]);
+});
+
+test("fireNow returns false for an id that isn't armed", () => {
+  const runner = new SchedulerRunner({ now: () => 0, fire: () => {} });
+  expect(runner.fireNow("nope")).toBe(false);
+});
+
+// ── Fix 3: interval cadence resumes from the PERSISTED nextDueAt (survives a restart) ──
+
+test("an interval schedule resumes from the persisted nextDueAt on re-arm (a restart doesn't reset cadence)", async () => {
+  let clock = 1000;
+  const fired: string[] = [];
+  const runner = new SchedulerRunner({ now: () => clock, fire: (s) => { fired.push(s.id); } });
+  // Persisted next-due is at 5000 — in the FUTURE relative to the re-arm clock (1000). If arm() reset
+  // the cadence it would be now+everyMs = 11000 and nothing would fire at 5000.
+  runner.add(mkSchedule({ id: "s1", trigger: { kind: "interval", everyMs: 10_000 }, nextDueAt: new Date(5000).toISOString() }));
+
+  clock = 4999; runner.tick(); await flush();
+  expect(fired).toEqual([]);                 // not yet the persisted due time
+  clock = 5000; runner.tick(); await flush();
+  expect(fired).toEqual(["s1"]);             // resumed from persisted 5000 (NOT reset to 11000)
+});
+
+test("a persisted interval nextDueAt in the PAST fires exactly once on re-arm, then resumes cadence (no boot storm)", async () => {
+  let clock = 10_000;
+  const fired: string[] = [];
+  const runner = new SchedulerRunner({ now: () => clock, fire: (s) => { fired.push(s.id); } });
+  // Persisted due is far in the PAST (many windows missed while down): must collapse to ONE catch-up.
+  runner.add(mkSchedule({ id: "s2", trigger: { kind: "interval", everyMs: 1000 }, nextDueAt: new Date(3000).toISOString() }));
+
+  clock = 10_000; runner.tick(); await flush();
+  expect(fired).toEqual(["s2"]);             // single catch-up fire for all missed windows
+  clock = 10_000; runner.tick(); await flush();
+  expect(fired).toEqual(["s2"]);             // same tick → not again (advanced to now+everyMs = 11000)
+  clock = 11_000; runner.tick(); await flush();
+  expect(fired).toEqual(["s2", "s2"]);       // normal cadence resumes
+});
+
+// ── Fix 5: a watch run's own writes don't self-trigger (mtime re-baselined after settle) ──
+
+test("a watch run's own writes to the watched path do NOT re-trigger it (mtime re-baselined after the run settles)", async () => {
+  let clock = 0;
+  let mtime = 100;                            // arm baseline
+  const fired: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const runner = new SchedulerRunner({
+    now: () => clock,
+    statMtimeMs: () => mtime,
+    fire: (s) => { fired.push(s.id); mtime = 500; return gate; }, // the run itself writes → mtime moves
+  });
+  runner.add(mkSchedule({ id: "w1", trigger: { kind: "watch", path: "/some/file" } }));
+
+  mtime = 200; clock = 1; runner.tick(); await flush();
+  expect(fired).toEqual(["w1"]);             // external change → fire (run bumps mtime to 500 in-flight)
+
+  clock = 2; runner.tick(); await flush();
+  expect(fired).toEqual(["w1"]);             // still in flight → inFlight guard skips it
+
+  release(); await flush();                   // run settles → mtime (500) is re-baselined AFTER settle
+  clock = 3; runner.tick(); await flush();
+  expect(fired).toEqual(["w1"]);             // the run's OWN write does NOT self-trigger (pre-fix: fires)
+
+  mtime = 900; clock = 4; runner.tick(); await flush();
+  expect(fired).toEqual(["w1", "w1"]);       // a genuine EXTERNAL change after settle still fires
+});

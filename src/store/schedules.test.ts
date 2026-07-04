@@ -1,9 +1,10 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureWorkspace } from "./files";
+import { ensureWorkspace, paths } from "./files";
 import { createSchedule, readSchedule, listSchedules, updateSchedule, removeSchedule } from "./schedules";
+import { configureLogger } from "../core/logger";
 
 async function ws() {
   const dir = mkdtempSync(join(tmpdir(), "taicho-sched-store-"));
@@ -72,4 +73,32 @@ test("an explicit id is sanitized to be filesystem-safe", async () => {
   const s = createSchedule(dir, { id: "weird id/../x", goal: "g", trigger: { kind: "interval", everyMs: 1000 } });
   expect(s.id).not.toContain("/");
   expect(readSchedule(dir, s.id)?.goal).toBe("g");
+});
+
+// ── Nit 4: atomic write + a SURFACED (logged) skip of an unparseable file ──
+
+test("write() is atomic — temp+rename leaves no half-file or .tmp behind", async () => {
+  const dir = await ws();
+  const s = createSchedule(dir, { id: "atomic", goal: "g", trigger: { kind: "interval", everyMs: 1000 } });
+  updateSchedule(dir, s.id, { runCount: 2 }); // a second write() through the same atomic path
+  const files = readdirSync(paths.scheduleDir(dir));
+  expect(files).toContain("atomic.json");
+  expect(files.some((f) => f.endsWith(".tmp"))).toBe(false); // the temp was renamed away, none left behind
+  expect(readSchedule(dir, "atomic")?.runCount).toBe(2);
+});
+
+test("listSchedules skips an unparseable/partial schedule file (valid ones survive) AND logs a warning", async () => {
+  const dir = await ws();
+  createSchedule(dir, { id: "good", goal: "g", trigger: { kind: "interval", everyMs: 1000 } });
+  // Simulate a crash mid-write: a corrupt/half-written <id>.json alongside the valid one.
+  writeFileSync(join(paths.scheduleDir(dir), "corrupt.json"), "{ this is not valid json");
+
+  // Capture the default logger via our own sink so the assertion is robust regardless of prior state.
+  const captured: string[] = [];
+  configureLogger({ level: "warn", sink: (l) => captured.push(l) });
+  const ids = listSchedules(dir).map((s) => s.id);
+  configureLogger({ level: "info", sink: () => {} }); // restore to a noop sink (don't pollute other tests)
+
+  expect(ids).toEqual(["good"]);             // the valid schedule survives; the corrupt one is skipped
+  expect(captured.some((l) => /skipped unparseable schedule file corrupt\.json/.test(l))).toBe(true);
 });

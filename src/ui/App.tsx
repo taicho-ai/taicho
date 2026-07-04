@@ -904,10 +904,15 @@ export function App(props: {
         say({ kind: "system", text: ok ? `  removed schedule ${parsed.id}` : `  no schedule "${parsed.id}"` });
         return;
       }
-      // run — fire once now through the same unattended headless path.
-      const s = readSchedule(props.ws, parsed.id);
-      if (!s) { say({ kind: "system", text: `  no schedule "${parsed.id}"` }); return; }
-      void fireScheduleRef.current(s);
+      // run — fire once now through the runner's inFlight-guarded fireNow (NOT the raw fire closure),
+      // so a manual run SHARES the cadence guard and can't run concurrently with a cadence fire of the
+      // same schedule (the documented "≤1 in-flight per schedule"). fireNow returns false when the id
+      // isn't armed in this session or is already running — report which.
+      if (!readSchedule(props.ws, parsed.id)) { say({ kind: "system", text: `  no schedule "${parsed.id}"` }); return; }
+      if (!schedRunner.fireNow(parsed.id)) {
+        const why = schedRunner.has(parsed.id) ? "already running" : "not armed in this session";
+        say({ kind: "system", text: `  schedule ${parsed.id} — ${why}` });
+      }
       return;
     }
     if (cmd === "trace") {
