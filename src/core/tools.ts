@@ -734,7 +734,7 @@ function instrument(set: ToolSet, ctx: RunContext, untrustedSources?: Set<string
       const callId: string = options?.toolCallId ?? `${name}#${++seq}`;
       const preview = argsPreview(name, input);
       ctx.spanEvents?.push({ ts: new Date().toISOString(), kind: "tool_start", data: { tool: name, callId, argsPreview: preview, args: capJson(input) } });
-      ctx.emitStep?.({ phase: "tool_start", tool: name, argsPreview: preview });
+      ctx.emitStep?.({ phase: "tool_start", tool: name, argsPreview: preview, callId });
       let result: unknown, err: string | undefined;
       try {
         result = await orig(input, options);
@@ -754,7 +754,7 @@ function instrument(set: ToolSet, ctx: RunContext, untrustedSources?: Set<string
             ? (result as { runId: string }).runId
             : undefined;
         ctx.spanEvents?.push({ ts: new Date().toISOString(), kind: "tool_end", data: { tool: name, callId, ok: !err, error: err, childRunId, result: capJson(result) } });
-        ctx.emitStep?.({ phase: "tool_end", tool: name, ok: !err });
+        ctx.emitStep?.({ phase: "tool_end", tool: name, ok: !err, callId });
       }
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -7,10 +7,12 @@ import { QuestionCard } from "./QuestionCard";
 import { StatusBar } from "./StatusBar";
 import { SquadPanes, resolveLayout, type PaneEntry, type PaneFeedMap } from "./SquadPanes";
 import { TraceInspector } from "./TraceInspector";
+import { LiveWaterfall } from "./LiveWaterfall";
 import { parseInput } from "./input";
 import { BANNER } from "./banner";
 import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
-import { deriveTrace, type Span } from "../core/trace-tree";
+import { deriveTrace, deriveTaskTrace, type Span } from "../core/trace-tree";
+import { emptyLiveTrace, liveRunStart, liveStep, liveRunEnd, liveSpans, type LiveTraceState } from "../core/live-trace";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
@@ -228,6 +230,19 @@ export function App(props: {
   const [statuses, setStatuses] = useState<AgentStatus[]>([]);
   const [inspect, setInspect] = useState<{ rootId: string; spans: Span[] } | null>(null);
   const clearStatuses = () => { statusRef.current = new Map(); setStatuses([]); };
+  // Plan 02 Phase 6 (live waterfall): liveTraceRef is the authoritative partial span tree (dodges the
+  // rapid onStep stream's stale closures, like statusRef); `liveTraceSpans` is the rendered snapshot
+  // the LiveWaterfall redraws from. Both fold the SAME event stream the status map does.
+  const liveTraceRef = useRef<LiveTraceState>(emptyLiveTrace());
+  const [liveTraceSpans, setLiveTraceSpans] = useState<Span[]>([]);
+  // The accumulator is folded on EVERY run (cheap ref mutation), but the snapshot state — the only
+  // part that re-renders the App — is pushed only when the live waterfall is the active surface, so
+  // the default bar/panes/both modes pay nothing extra per engine event. viewModeRef tracks the live
+  // mode for the onStep closure (which captures viewMode at run start and would otherwise go stale).
+  const viewModeRef = useRef(viewMode);
+  viewModeRef.current = viewMode;
+  const pushLiveTrace = () => { if (viewModeRef.current === "waterfall") setLiveTraceSpans(liveSpans(liveTraceRef.current)); };
+  const clearLiveTrace = () => { liveTraceRef.current = emptyLiveTrace(); setLiveTraceSpans([]); };
   // Plan 10 Phase 4: per-run activity feed for the split-pane view (recent tool lines + the live
   // streamed/final text), built off the SAME event stream the status map is. Reset at each new turn.
   const PANE_FEED_LINES = 4;
@@ -445,8 +460,12 @@ export function App(props: {
       // Plan 10: fold every phase-tagged event into the live status map (drives the StatusBar) and
       // the per-run pane feed (drives SquadPanes). Both read the one event stream; nothing invented.
       if (phase && ev.runId) {
-        statusRef.current = statusReducer(statusRef.current, ev, Date.now());
+        const now = Date.now();
+        statusRef.current = statusReducer(statusRef.current, ev, now);
         setStatuses(statusList(statusRef.current));
+        // Plan 02 Phase 6: fold the same phase event into the live waterfall's partial span tree.
+        liveStep(liveTraceRef.current, ev, now);
+        pushLiveTrace();
         // The pane feed carries tool activity only (the streamed/final reply stays in the scrollback
         // reply channel — duplicating it in the pane raced that channel; see SquadPanes PaneEntry).
         if (phase === "tool_start" && tool)
@@ -486,11 +505,17 @@ export function App(props: {
     // engine seam (recordUserTurn in executeRun, guarded by triggeredBy === "user") — Plan 01 Ph5.
     onRunStart: ({ runId, agent, triggeredBy }) => {
       activeRuns.current.set(runId, { agent, triggeredBy });
+      // Plan 02 Phase 6: open the run's span in the live waterfall (parent linkage comes from triggeredBy).
+      liveRunStart(liveTraceRef.current, { runId, agent, triggeredBy }, Date.now());
+      pushLiveTrace();
       if (triggeredBy === "user" && !foregroundRootRef.current) foregroundRootRef.current = runId;
     },
-    onRunEnd: ({ runId }) => {
+    onRunEnd: ({ runId, agent, triggeredBy, outcome }) => {
       activeRuns.current.delete(runId);
       steerRoutes.current.delete(runId);
+      // Plan 02 Phase 6: settle the run's span (and any still-open child spans) in the live waterfall.
+      liveRunEnd(liveTraceRef.current, { runId, agent, triggeredBy, outcome }, Date.now());
+      pushLiveTrace();
       if (foregroundRootRef.current === runId) foregroundRootRef.current = null;
     },
   });
@@ -565,6 +590,7 @@ export function App(props: {
     streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
     clearStatuses();
     clearPaneFeed();
+    clearLiveTrace();
     try {
       if (parsed.kind === "chat") {
         // In-memory conversation for THIS session. The durable audit (ledger + task) and the derived
@@ -595,7 +621,7 @@ export function App(props: {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
       // explicit-model guard for a misconfigured OpenRouter agent. Surface it instead of crashing Ink.
       say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
-    } finally { setBusy(false); clearStatuses(); }
+    } finally { setBusy(false); clearStatuses(); clearLiveTrace(); }
   };
 
   const runSlash = async (cmd: string, arg: string) => {
@@ -868,8 +894,20 @@ export function App(props: {
       return;
     }
     if (cmd === "trace") {
+      // Plan 02 Phase 6: a task id (or `task:<id>`) roots the waterfall at a TASK — grouping all of
+      // the task's runs across turns into one inspectable trace — instead of a single user-run.
+      const raw = arg.trim();
+      if (raw.startsWith("task:") || raw.startsWith("task_")) {
+        const taskId = raw.replace(/^task:/, "");
+        let taskSpans: Span[];
+        try { taskSpans = deriveTaskTrace(props.ws, taskId); }
+        catch (e) { say({ kind: "system", text: `  no such task: ${taskId} (${e instanceof Error ? e.message : String(e)})` }); return; }
+        if (!taskSpans.length) { say({ kind: "system", text: `  no runs for task: ${taskId}` }); return; }
+        setInspect({ rootId: `task ${taskId}`, spans: taskSpans });
+        return;
+      }
       // No arg → the latest user-triggered run (the "what just happened" case); <id> → that run.
-      const id = arg.trim() || latestUserRunId(props.ws);
+      const id = raw || latestUserRunId(props.ws);
       if (!id) { say({ kind: "system", text: "  (no runs yet)" }); return; }
       let spans: Span[];
       try { spans = deriveTrace(props.ws, id); }
@@ -965,6 +1003,12 @@ export function App(props: {
           (bar/panes/both) and terminal size decide what shows; too small ⇒ degrade to bar-only. */}
       {!inspect && layout.showPanes && (
         <SquadPanes statuses={statuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
+      )}
+      {/* Plan 02 Phase 6: the live waterfall — a redrawing span tree of the in-flight run, in place of
+          the panes when /view waterfall is active. The ↳ breadcrumbs still land in scrollback as the
+          record; this is the live reader. */}
+      {!inspect && layout.showWaterfall && liveTraceSpans.length > 0 && (
+        <LiveWaterfall spans={liveTraceSpans} width={termSize.columns} maxRows={Math.max(6, termSize.rows - 8)} />
       )}
       {!inspect && !pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}

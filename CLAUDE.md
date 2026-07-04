@@ -145,6 +145,18 @@ native to the terminal, **no external service**.
   `requestApproval` wrapper (the **same seam Plan 10's live status uses**). Approval waits are **core**
   spans, not optional: human latency dominates wall-clock here, so a waterfall without them would
   misattribute the wait.
+- **Live mode (Phase 6).** `/view waterfall` streams spans into a **redrawing** waterfall as the run
+  executes — the live counterpart to the post-hoc inspector. `src/core/live-trace.ts` folds the
+  **same** live event stream the status bar/panes consume (`onRunStart`/`onStep`/`onRunEnd`) into a
+  partial `Span` tree, incrementally (no disk reads, no re-derive per frame); `LiveWaterfall.tsx`
+  renders it through the **same** `trace-layout`, with running bars growing to `now`. The flat `↳`
+  breadcrumbs stay in scrollback as the record. `callId` was added to the live step event so live tool
+  spans pair start↔end exactly like the persisted ones.
+- **Task-level traces (Phase 6).** `/trace task_<id>` roots the waterfall at a **Task** (Plan 04's
+  persistent task) rather than a single user-run: `deriveTaskTrace(ws, taskId)` gathers **all** of the
+  task's top-level runs (its `rootRunId` + every run whose `triggeredBy` is the task id — the grouping
+  key for a task spanning multiple turns/runs) and nests each run's subtree under one synthetic
+  task-root span, reusing the same walker + layout as `deriveTrace`.
 
 ## Models, providers & auth
 
