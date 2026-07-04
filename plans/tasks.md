@@ -239,20 +239,20 @@ first for the cross-turn half.
 - [x] **Threshold:** per-model window table + `defaults.compactAt` override, default ~70%. *Decided (2026-07-04): yes.*
 
 ### Phase 1 — Measure
-- [ ] Cheap token estimate (chars/4) over assembled system + messages; record `contextTokens` on the trace; surface in the waterfall LLM-span detail (Plan 02).
+- [x] Cheap token estimate (chars/4) over assembled system + messages; record `contextTokens` on the trace; surface in the waterfall LLM-span detail (Plan 02). *Done: `core/compaction.ts` estimator; `loop.ts` records peak → `trace.contextTokens`; `trace-tree.ts` + `TraceInspector.tsx` show it on the LLM span.*
 
 ### Phase 2 — In-run compaction
-- [ ] When next-call estimate crosses the threshold: fold oldest tool round-trips into one compact summary message; keep system, original brief, and recent N iterations verbatim.
-- [ ] Emit a `compaction` event to `transcript.jsonl` — compaction must be visible in the trace.
+- [x] When next-call estimate crosses the threshold: fold oldest tool round-trips into one compact summary message; keep system, original brief, and recent N iterations verbatim. *Done: deterministic `compactMessages` (keepHead + `compactKeepRecent` tail verbatim); threshold = per-model window × `defaults.compactAt` (config-disposed).*
+- [x] Emit a `compaction` event to `transcript.jsonl` — compaction must be visible in the trace. *Done: `loop.ts` emits `compaction` (before/after estimate, folded counts, tools, summary); `events.ts` formats it for the tail.*
 
-### Phase 3 — Cross-turn compaction
-- [ ] Boot replay = rolling summary + recent-K-turns tail; older turns collapse into a persistent conversation summary.
-- [ ] Write the summary through the same `recordTurnOutcome` seam (ledger stays append-only truth; compaction changes what *replays*, never what is *recorded*).
+### Phase 3 — Cross-turn compaction — **DEFERRED (blocked on Plan 01 Phase 5)**
+- [ ] Boot replay = rolling summary + recent-K-turns tail; older turns collapse into a persistent conversation summary. *Deferred: depends on Plan 01 Phase 5's `recordTurnOutcome` single write seam, which is not yet built. Not faked — see reference §3c ("depends on Plan 01 Phase 5 landing that seam first").*
+- [ ] Write the summary through the same `recordTurnOutcome` seam (ledger stays append-only truth; compaction changes what *replays*, never what is *recorded*). *Deferred with the above.*
 
 ### Phase 4 — Tests & docs
-- [ ] Unit: estimator; fold correctness (kept-verbatim window, summary content); threshold trigger.
-- [ ] Loop test: long tool-heavy run compacts instead of exhausting; transcript records it.
-- [ ] Update `TESTING.md`, `CLAUDE.md`.
+- [x] Unit: estimator; fold correctness (kept-verbatim window, summary content); threshold trigger. *Done: `core/compaction.test.ts`.*
+- [x] Loop test: long tool-heavy run compacts instead of exhausting; transcript records it. *Done: two Plan 05 tests in `core/loop.test.ts`.*
+- [x] Update `TESTING.md`, `CLAUDE.md`. *Done.*
 
 ---
 

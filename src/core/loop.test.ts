@@ -291,20 +291,68 @@ test("checkpoint is called once per iteration with the loop's message array (the
   expect(snaps[1].msgCount).toBeGreaterThan(snaps[0].msgCount); // the message array grew across the round-trip
 });
 
+// ── Plan 05: in-run compaction ──────────────────────────────────────────────────────────────────
+test("measures contextTokens every run even when compaction is off (no threshold passed)", async () => {
+  const model = new MockLanguageModelV3({ doStream: streamOf(finalChunks) });
+  const res = await runLoop({ model, agent, system: "SYSTEM", messages: [{ role: "user", content: "go" }], tools });
+  expect(res.contextTokens).toBeGreaterThan(0); // Phase 1 measure is unconditional
+  expect(res.compactions).toBe(0);              // no threshold ⇒ never folds
+});
+
+test("folds oldest round-trips into a compaction summary once the estimate crosses the threshold", async () => {
+  // A tool that returns a chunky result so the message array grows fast; a tiny threshold so a couple
+  // round-trips trigger the fold. The model tool-calls five times, then returns final text.
+  const bigTool: ToolSet = {
+    noop: tool({ description: "n", inputSchema: z.object({}), execute: async () => ({ blob: "X".repeat(600) }) }),
+  };
+  const longAgent: AgentDef = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 12 } };
+  const model = new MockLanguageModelV3({
+    // Plan 07: the loop streams for every provider, so drive the mock via doStream. Five tool-call
+    // turns (message array grows past the tiny threshold) then a final-text turn.
+    doStream: streamSeq(toolCallChunks, toolCallChunks, toolCallChunks, toolCallChunks, toolCallChunks, finalChunks),
+  });
+  const events: { kind: string; data?: unknown }[] = [];
+  const res = await runLoop({
+    model, agent: longAgent, system: "S", messages: [{ role: "user", content: "ORIGINAL_BRIEF go" }], tools: bigTool,
+    compactThresholdTokens: 60, compactKeepRecent: 2,
+    onEvent: (e) => events.push({ kind: e.kind, data: e.data }),
+  });
+
+  expect(res.text).toBe("all done");                       // the run completes instead of exhausting
+  expect(res.compactions).toBeGreaterThan(0);
+  expect(res.contextTokens).toBeGreaterThan(0);
+
+  // the fold is VISIBLE in the transcript (never invisible)
+  const comp = events.find((e) => e.kind === "compaction");
+  expect(comp).toBeDefined();
+  const cd = comp!.data as { foldedRoundTrips: number; before: number; after: number };
+  expect(cd.foldedRoundTrips).toBeGreaterThan(0);
+  expect(cd.after).toBeLessThan(cd.before);                // folding shrank the estimate
+
+  // a later model call carries the summary AND still the original brief (head kept verbatim)
+  const laterPrompt = JSON.stringify((model as any).doStreamCalls.at(-1).prompt);
+  expect(laterPrompt).toContain("[CONTEXT COMPACTION]");
+  expect(laterPrompt).toContain("ORIGINAL_BRIEF");
+});
+
 test("does NOT time out a streaming call that keeps making progress (idle timer resets per chunk)", async () => {
-  // ~8 chunks at 20ms each ≈ 160ms total > the 100ms idle window, but each text-delta resets the
-  // idle timer, so a steadily-progressing response is never falsely killed.
+  // What this asserts: each chunk resets the idle window, so a steadily-progressing response is never
+  // falsely killed. For that to be a *real* test, the WHOLE stream must outlast the idle window — a
+  // watchdog that did NOT reset would fire at the window and truncate this healthy stream, failing the
+  // assertion below. So we keep total-time > window while making each gap tiny relative to the window:
+  //   20 chunks × 50ms ≈ 950ms total  >  500ms idle window   (a non-resetting watchdog fires at ~500ms)
+  //   per-chunk gap 50ms  ≪  500ms window                      (~450ms cushion per gap)
+  // That ~450ms absolute cushion (vs the old 20ms-gap / 100ms-window's ~80ms) means ordinary GC/CPU
+  // jitter under load can't make a single scheduled gap slip past the window and falsely fire.
+  const text = "abcdefghijklmnop"; // 16 progress deltas
   const model = new MockLanguageModelV3({
     doStream: (async () => ({
       stream: simulateReadableStream({
-        initialDelayInMs: 0, chunkDelayInMs: 20,
+        initialDelayInMs: 0, chunkDelayInMs: 50,
         chunks: [
           { type: "stream-start", warnings: [] },
           { type: "text-start", id: "1" },
-          { type: "text-delta", id: "1", delta: "a" },
-          { type: "text-delta", id: "1", delta: "b" },
-          { type: "text-delta", id: "1", delta: "c" },
-          { type: "text-delta", id: "1", delta: "d" },
+          ...[...text].map((delta) => ({ type: "text-delta", id: "1", delta })),
           { type: "text-end", id: "1" },
           { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
         ],
@@ -312,6 +360,6 @@ test("does NOT time out a streaming call that keeps making progress (idle timer 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     })) as any,
   });
-  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, modelCallTimeoutMs: 100 });
-  expect(res.text).toBe("abcd");
-}, 3000);
+  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, modelCallTimeoutMs: 500 });
+  expect(res.text).toBe(text);
+}, 5000);

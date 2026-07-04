@@ -5,6 +5,11 @@ import { generateText, streamText, type ModelMessage, type ToolSet } from "ai";
 import type { AgentDef } from "../schemas/agent";
 import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
+import { compactMessages, estimateContextTokens, type CompactionSummary } from "./compaction";
+
+/** Plan 05: how many recent tool round-trips the compaction fold keeps VERBATIM (the system prompt +
+ *  the original brief are kept separately). The oldest round-trips beyond this window are folded. */
+const DEFAULT_COMPACT_KEEP_RECENT = 3;
 
 const DEFAULT_MODEL_IDLE_TIMEOUT_MS = 120_000;
 /** After abort, how long a call may keep running to settle cleanly before we abandon it. Lets a call
@@ -62,6 +67,12 @@ export interface LoopResult {
   exhausted: boolean;
   aborted: boolean;
   error?: string;
+  /** Plan 05: the high-water-mark estimated context size (system + messages, chars/4) actually sent
+   *  to the model across the run — post-compaction, so it reflects what was really in each call. */
+  contextTokens: number;
+  /** Plan 05: how many times the loop folded oldest round-trips this run (0 ⇒ never crossed the
+   *  threshold). Advisory; the per-iteration `compaction` transcript events are the full record. */
+  compactions: number;
 }
 
 export async function runLoop(opts: {
@@ -86,6 +97,12 @@ export async function runLoop(opts: {
    *  abandoned and the run fails. Guards against a backend/stream that wedges without erroring,
    *  closing, or honoring abort — which would otherwise hang the loop forever. Default 120s. */
   modelCallTimeoutMs?: number;
+  /** Plan 05: the estimated-token threshold at which the loop folds the oldest tool round-trips into
+   *  one compact summary (config-disposed — computed from the per-model window table + defaults.compactAt
+   *  by run.ts). Undefined ⇒ compaction is off (the context size is still measured + recorded). */
+  compactThresholdTokens?: number;
+  /** Plan 05: how many recent round-trips the fold keeps verbatim. Default DEFAULT_COMPACT_KEEP_RECENT. */
+  compactKeepRecent?: number;
   /** Plan 04 Phase 5: called for EACH transcript event as it happens, so evidence flushes
    *  incrementally (a crash mid-run leaves a legible transcript.jsonl) instead of only at run end.
    *  Also feeds Plan 02's live-mode waterfall. */
@@ -103,12 +120,19 @@ export async function runLoop(opts: {
     opts.onEvent?.(event);
   };
   let tokens = 0, inputTokens = 0, outputTokens = 0, costUsd = 0, iterations = 0;
-  const messages = [...opts.messages];
+  // Plan 05: `messages` is reassigned when compaction folds it, so it is `let`, not `const`. The
+  // original input (the brief / prior conversation) is kept VERBATIM as the fold's head — capture its
+  // length up front so a later fold never touches it.
+  let messages = [...opts.messages];
+  const keepHead = messages.length;
+  const keepRecent = opts.compactKeepRecent ?? DEFAULT_COMPACT_KEEP_RECENT;
+  let contextTokens = 0; // high-water mark of the estimated context actually sent to the model
+  let compactions = 0;
   const cap = opts.agent.budgets;
 
   const done = (over: Partial<LoopResult> & { text: string }): LoopResult => ({
     toolCalls: counts, transcript, tokens, inputTokens, outputTokens, costUsd, iterations,
-    exhausted: false, aborted: false, ...over,
+    exhausted: false, aborted: false, contextTokens, compactions, ...over,
   });
 
   for (; iterations < cap.maxIterationsPerRun; iterations++) {
@@ -118,6 +142,33 @@ export async function runLoop(opts: {
 
     const steer = opts.pollSteer?.();
     if (steer) messages.push({ role: "user", content: steerMarker(steer) });
+
+    // Plan 05: MEASURE then (config-permitting) COMPACT before the call. Estimate the next call's
+    // context (system + messages, chars/4); if it crosses the config threshold, deterministically fold
+    // the oldest tool round-trips into one summary — the system prompt, the original brief (keepHead),
+    // and the most recent keepRecent round-trips stay verbatim. The fold is emitted as a `compaction`
+    // event so it is never invisible in the trace. No model call: predictable, free, testable.
+    let ctxTokens = estimateContextTokens(opts.system, messages);
+    let compactedThisIter: CompactionSummary | undefined;
+    if (opts.compactThresholdTokens != null && ctxTokens > opts.compactThresholdTokens) {
+      const folded = compactMessages({ messages, keepHead, keepTailRoundTrips: keepRecent });
+      if (folded) {
+        messages = folded.messages;
+        compactions += 1;
+        compactedThisIter = folded.summary;
+        const after = estimateContextTokens(opts.system, messages);
+        emit({
+          ts: new Date().toISOString(), kind: "compaction", iteration: iterations + 1,
+          data: {
+            before: ctxTokens, after, threshold: opts.compactThresholdTokens,
+            foldedRoundTrips: folded.summary.foldedRoundTrips, foldedMessages: folded.summary.foldedMessages,
+            tools: folded.summary.tools, summary: folded.text,
+          },
+        });
+        ctxTokens = after;
+      }
+    }
+    contextTokens = Math.max(contextTokens, ctxTokens);
 
     // Checkpoint the message array before this iteration's call — the resume point if we die here.
     opts.checkpoint?.({ iteration: iterations + 1, messages });
@@ -136,7 +187,7 @@ export async function runLoop(opts: {
     try {
       // emit() (Plan 04) flushes the transcript event live via onEvent; onStep model_start (Plan 02/10)
       // drives the live "thinking" status. Keep both.
-      emit({ ts: new Date().toISOString(), kind: "model_request", iteration: iterations + 1, data: { messageCount: messages.length } });
+      emit({ ts: new Date().toISOString(), kind: "model_request", iteration: iterations + 1, data: { messageCount: messages.length, contextTokens: ctxTokens, compacted: compactedThisIter != null } });
       opts.onStep?.({ phase: "model_start" }); // → "thinking" until a delta or the response arrives
       // guardModelCall wraps the call so a wedged stream (no bytes/close/error, abort ignored) can't
       // hang the loop: it returns on completion, on abort, OR after an idle timeout. onChunk pings the

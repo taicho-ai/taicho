@@ -23,6 +23,7 @@ import type { ProposalDraft } from "../coaching/proposal";
 import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
 import { recentRunsDigest } from "./memory";
+import { compactionThreshold } from "./compaction";
 import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
@@ -432,6 +433,10 @@ export async function executeRun(
     priceUsd,
     codexBackend: subscription, // subscription:true ⇒ Codex backend ⇒ system goes in `instructions`
     captureProviderCost: picked?.captureCost, // OpenRouter reports real cost in providerMetadata
+    // Plan 05: config disposes the compaction threshold — per-model window table × defaults.compactAt
+    // (default ~70%). The loop MEASURES context every iteration and FOLDS the oldest round-trips once
+    // this estimate is crossed (system + original brief + recent N kept verbatim).
+    compactThresholdTokens: compactionThreshold(picked?.modelId, deps.configDefaults?.compactAt),
     // Phase 5 recovery: flush each transcript event live + checkpoint the message array per iteration,
     // so a crash mid-run leaves legible evidence and a resume point instead of nothing.
     onEvent: (e) => appendRunTranscript(deps.ws, runId, e),
@@ -447,7 +452,7 @@ export async function executeRun(
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, inputArtifacts: ctx.inputArtifacts, outputArtifacts: ctx.outputArtifacts,
     delegatedOut: ctx.delegatedOut, verification: ctx.verifications, outcome,
-    tokens: result.tokens, costUsd: subscription ? null : result.costUsd,
+    tokens: result.tokens, contextTokens: result.contextTokens, costUsd: subscription ? null : result.costUsd,
     costNote: subscription ? "subscription" : undefined,
     // aggregate = this run's own loop + child RUNS + this run's delegation-checker calls. All three
     // are real model spend this run caused; verifier spend is 0 for subscription (costUsd stays null).
