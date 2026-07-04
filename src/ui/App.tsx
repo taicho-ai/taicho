@@ -15,9 +15,7 @@ import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDe
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy, approvePolicy } from "../store/policy";
-import { appendTurn, shouldPersistTurn } from "../store/thread";
-import { appendLedgerTurn, newTurnId, recordContextDecision } from "../store/conversation";
-import { createTaskState, taskIdForRun, updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
+import { updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
 import { TaskScheduler } from "../core/tasks";
 import { SchedulerRunner, parseScheduleCommand, describeTrigger, formatScheduleLine } from "../core/scheduler";
 import { runHeadless } from "../core/headless";
@@ -223,7 +221,6 @@ export function App(props: {
   const streamFromRef = useRef("");
   const streamedRef = useRef(false);
   const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
-  const pendingAuditRef = useRef<{ agent: string; text: string; userTurnId?: string; runId?: string; taskId?: string } | null>(null);
   // Plan 10 live status: statusRef is the authoritative per-run status map (dodges stale closures in
   // the rapid onStep stream); `statuses` is the rendered snapshot. Plan 02: `inspect` holds the
   // derived span tree while the waterfall inspector is open (it owns the keyboard via cardKeyRef).
@@ -485,25 +482,11 @@ export function App(props: {
     deckLedger: props.deckLedger, // Plan 09: deck-wide ceilings enforced in the loop, shared by all runs
     dispatch,
     awaitTask,
+    // Live-run bookkeeping only. The per-turn AUDIT (ledger user turn + task open) now lives in the
+    // engine seam (recordUserTurn in executeRun, guarded by triggeredBy === "user") — Plan 01 Ph5.
     onRunStart: ({ runId, agent, triggeredBy }) => {
       activeRuns.current.set(runId, { agent, triggeredBy });
       if (triggeredBy === "user" && !foregroundRootRef.current) foregroundRootRef.current = runId;
-      const pendingAudit = pendingAuditRef.current;
-      if (!pendingAudit || triggeredBy !== "user" || agent !== pendingAudit.agent) return;
-      const userTurnId = newTurnId(agent, runId, "user");
-      pendingAudit.userTurnId = userTurnId;
-      pendingAudit.runId = runId;
-      pendingAudit.taskId = taskIdForRun(runId);
-      appendLedgerTurn(props.ws, agent, {
-        turnId: userTurnId,
-        runId,
-        timestamp: new Date().toISOString(),
-        agent,
-        role: "user",
-        content: pendingAudit.text,
-        status: "submitted",
-      });
-      createTaskState(props.ws, { runId, title: pendingAudit.text, userTurnId }, props.db);
     },
     onRunEnd: ({ runId }) => {
       activeRuns.current.delete(runId);
@@ -557,26 +540,6 @@ export function App(props: {
     say({ kind: "user", text: `(steer) ${value}` });
   };
 
-  // One seam for the per-turn audit both the chat and @agent branches share (Plan 01 Ph5, closing
-  // context-hygiene tension #3 — the two ~30-line blocks were near-identical). Appends the assistant
-  // turn to the ledger, records the include/exclude context decision for the user + assistant turns,
-  // and folds the run into its task record. A completed run is safe to replay as context; any other
-  // outcome is recorded but excluded. (The user turn + task record are opened at onRunStart.)
-  const recordTurnOutcome = (agent: string, res: RunResult) => {
-    const assistantTurnId = newTurnId(agent, res.runId, "assistant");
-    appendLedgerTurn(props.ws, agent, {
-      turnId: assistantTurnId, runId: res.runId, timestamp: new Date().toISOString(),
-      agent, role: "assistant", content: res.text, status: res.trace.outcome, // outcome ⊂ LedgerStatus (was statusFromOutcome, an identity)
-    });
-    const audit = pendingAuditRef.current;
-    if (!audit?.userTurnId) return;
-    const include = res.trace.outcome === "completed";
-    const reason = include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`;
-    recordContextDecision(props.ws, agent, { include, turnId: audit.userTurnId, runId: res.runId, reason });
-    recordContextDecision(props.ws, agent, { include, turnId: assistantTurnId, runId: res.runId, reason });
-    updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)), props.db);
-  };
-
   const submit = async (value: string) => {
     if (!value.trim()) return;
 
@@ -604,19 +567,15 @@ export function App(props: {
     clearPaneFeed();
     try {
       if (parsed.kind === "chat") {
-        pendingAuditRef.current = { agent: "root", text: parsed.text };
+        // In-memory conversation for THIS session. The durable audit (ledger + task) and the derived
+        // boot-replay cache (thread.jsonl, compacted per Plan 05 Ph3) are written by the engine seam.
         thread.current.push({ role: "user", content: parsed.text });
         const root = await loadAgent(props.ws, "root");
         const res = await executeRun(deps(activeModel), { agent: root, messages: [...thread.current], triggeredBy: "user" });
         flushStream(); // commit the final streamed turn; only fall back to res.text if nothing streamed
         if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text, rendered: true });
-        recordTurnOutcome("root", res);
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
-          if (shouldPersistTurn(res.trace.outcome)) {
-            appendTurn(props.ws, "root", { role: "user", content: parsed.text });
-            appendTurn(props.ws, "root", { role: "assistant", content: res.text });
-          }
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
           maybeSayAuthExpired(res.text);
@@ -624,13 +583,11 @@ export function App(props: {
         }
         setRoster(loadIndex(props.db)); // create_agent may have grown the squad
       } else {
-        pendingAuditRef.current = { agent: parsed.to, text: parsed.text };
         const target = await loadAgent(props.ws, parsed.to).catch(() => null);
         if (!target) { say({ kind: "system", text: `No agent "${parsed.to}". Try /agents, or describe one to root.` }); return; }
         const res = await executeRun(deps(activeModel), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
         flushStream();
         if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text, rendered: true });
-        recordTurnOutcome(target.id, res);
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s)) · /trace to inspect` });
       }
@@ -638,7 +595,7 @@ export function App(props: {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
       // explicit-model guard for a misconfigured OpenRouter agent. Surface it instead of crashing Ink.
       say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
-    } finally { pendingAuditRef.current = null; setBusy(false); clearStatuses(); }
+    } finally { setBusy(false); clearStatuses(); }
   };
 
   const runSlash = async (cmd: string, arg: string) => {

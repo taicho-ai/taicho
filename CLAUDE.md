@@ -44,6 +44,19 @@ issues tsc won't).
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.
   - `run.ts` — orchestrates ONE run: assemble prompt → build tools → `runLoop` → write trace.
     `RunDeps` are the seams; `executeRun` recurses for delegation (depth/cycle/run caps).
+  - `turn-audit.ts` — the per-turn audit **engine seam** (Plan 01 Ph5). `executeRun` calls
+    `recordUserTurn` (run start) + `recordTurnOutcome` (run end), guarded to a user CONVERSATION turn
+    (`triggeredBy === "user" && !ingestSource`), so every caller (REPL, headless, tests) gets identical
+    ledger + task + boot-replay audit — not just the Ink UI. The ledger (`conversations/<id>/ledger.jsonl`)
+    is append-only TRUTH; `context.json` is the include/exclude decision log; `thread.jsonl` is a
+    DERIVED, compacted boot-replay cache. Was an App-local closure (PR #17) — moved here.
+  - `conversation-replay.ts` — Plan 05 Ph3 cross-turn (boot-replay) compaction + the replay cache.
+    `rebuildReplayCache` rewrites `thread.jsonl` from the ledger's INCLUDED turns each completed turn:
+    `compactReplay` keeps the recent `defaults.replayKeepTurns` turns (default 6) VERBATIM and folds
+    older turns into ONE deterministic `[CONVERSATION COMPACTION]` rolling summary. Replay carries
+    artifact HANDLES + summaries (resolved via `readArtifact` — envelope only, never the body), never
+    payloads — where Plan 01's two halves meet. Deterministic (no LLM call); reuses `compaction.ts`'s
+    `estimateTokens` + marker-summary shape. Compaction changes what REPLAYS, never what is RECORDED.
   - `tasks.ts` — Plan 04 async/parallel. `TaskScheduler` is a per-agent concurrency semaphore over
     **detached** background runs (`dispatch_task` → `{taskId}` immediately; cascade runs off-turn via
     the same `executeRun`, `triggeredBy: taskId`). `budgets.maxConcurrentRuns` caps how many of an
@@ -65,8 +78,8 @@ issues tsc won't).
     loop folds the OLDEST tool round-trips into ONE `user` summary message — keeping the system prompt,
     the original brief (`keepHead`), and the most recent `compactKeepRecent` round-trips VERBATIM — and
     emits a `compaction` transcript event (never invisible). Peak estimate is recorded as
-    `trace.contextTokens` and surfaced in the waterfall LLM-span detail. **Cross-turn (boot-replay)
-    compaction is deferred** — it depends on Plan 01 Phase 5's `recordTurnOutcome` seam (not yet built).
+    `trace.contextTokens` and surfaced in the waterfall LLM-span detail. Cross-turn (boot-replay)
+    compaction is `conversation-replay.ts` (Plan 05 Ph3) — it hooks the `turn-audit.ts` seam.
   - `scheduler.ts` — Plan 04 Phase 6 scheduled/triggered runs. A PURE engine (clock, file-stat, and the
     fire action are all INJECTED — deterministic + unit-tested with no real timers): cron eval (5-field,
     **UTC**) + `SchedulerRunner`, which on each `tick(now)` fires the due schedules through the headless

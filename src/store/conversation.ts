@@ -15,6 +15,9 @@ export interface ConversationLedgerTurn {
   content: unknown;
   status: LedgerStatus;
   parentRunId?: string;
+  /** Plan 01 Ph5: artifact HANDLES (id@vN) this turn produced. Carried by REFERENCE into replay —
+   *  the replay cache resolves each to its summary (never the body); the ledger just records the ids. */
+  artifacts?: string[];
 }
 
 export interface ContextDecision {
