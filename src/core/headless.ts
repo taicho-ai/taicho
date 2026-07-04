@@ -92,9 +92,16 @@ export function makeApprovalChannel(
   }
 
   // prompt: one line of stdin per request. On EOF / no TTY, degrade to reject (never hang unattended).
+  // `rl` is created once and reused across requests. A readline interface can't be reopened after its
+  // input hits EOF (which fires 'close'), so once closed every subsequent `ask` must short-circuit to
+  // "" (→ reject) rather than call `rl.question` on a closed interface — that throws ERR_USE_AFTER_CLOSE
+  // and would turn the documented "degrade to reject" into a headless crash on the 2nd+ request.
   const out = io?.out ?? ((l: string) => process.stdout.write(l + "\n"));
   const rl = createInterface({ input: io?.input ?? process.stdin });
+  let closed = false;
+  rl.once("close", () => { closed = true; });
   const ask = (q: string) => new Promise<string>((resolve) => {
+    if (closed) { resolve(""); return; } // already EOF'd → degrade to reject; don't touch the closed rl
     let settled = false;
     const done = (v: string) => { if (!settled) { settled = true; resolve(v); } };
     rl.question(q, done);
