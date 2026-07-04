@@ -18,7 +18,7 @@ const cost = (c: number | null | undefined): string => (c == null ? "subscriptio
 /** The one-line summary of the selected span (pinned at the bottom). */
 function selectionLine(span: Span): string {
   if (span.detail.kind === "tool") return `[${span.name}] ${span.detail.argsPreview ?? ""}${span.detail.error ? " ✗ " + span.detail.error : ""}`.trim();
-  if (span.detail.kind === "llm") return `[${span.name}] ${span.detail.finishReason ?? ""}${span.detail.tokens != null ? " · " + span.detail.tokens + " tok" : ""}${span.detail.error ? " ✗ " + span.detail.error : ""}`.trim();
+  if (span.detail.kind === "llm") return `[${span.name}] ${span.detail.finishReason ?? ""}${span.detail.tokens != null ? " · " + span.detail.tokens + " tok" : ""}${span.detail.contextTokens != null ? " · ctx ~" + span.detail.contextTokens : ""}${span.detail.compacted ? " · compacted" : ""}${span.detail.error ? " ✗ " + span.detail.error : ""}`.trim();
   if (span.detail.kind === "approval") return `[approval] ${span.detail.label}`;
   return `[${span.name}] ${span.detail.outcome} · ${span.detail.tokens} tok · ${cost(span.detail.costUsd)}`;
 }
@@ -52,6 +52,7 @@ function detailLines(span: Span): string[] {
       `iteration: ${d.iteration}`,
       `finish: ${d.finishReason ?? (d.error ? "error" : "—")}`,
       `tokens: ${d.tokens ?? "—"}`,
+      `context: ${d.contextTokens != null ? `~${d.contextTokens} tok (est.)` : "—"}${d.compacted ? " · compacted before this call" : ""}`,
       ...(d.error ? ["", `error: ${d.error}`] : []),
       "", "response:",
       (d.responseText ?? "(none)").slice(0, 1200),

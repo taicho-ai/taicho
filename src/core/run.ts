@@ -23,6 +23,7 @@ import type { ProposalDraft } from "../coaching/proposal";
 import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
 import { recentRunsDigest } from "./memory";
+import { compactionThreshold } from "./compaction";
 import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
@@ -87,6 +88,13 @@ export interface RunContext {
   embed?: (text: string) => Promise<Float32Array>; // present only when an embedder is configured (semantic KB)
   classifyCommand?: (command: string) => Verdict;                                             // test seam
   runShell?: (command: string, cwd: string) => { exitCode: number; stdout: string; stderr: string }; // test seam
+  runSandboxed?: (command: string, cwd: string) => { exitCode: number; stdout: string; stderr: string; enforced: boolean }; // test seam (Plan 08 sandbox)
+  /** Plan 08 injection guard: flipped to `entered: true` (recording the source tool names) the moment
+   *  read_url OR any granted MCP tool returns — attacker-influenceable content that has entered this
+   *  run. Once set, run_command forces the captain's approval (a dcg `allow` no longer auto-runs it):
+   *  ingest-untrusted-then-execute is the classic prompt-injection→execution chain. Set by the
+   *  instrument() seam in tools.ts. */
+  untrusted: { entered: boolean; sources: string[] };
   ingestSource?: string; // when set (a source-ingestion run), remember stamps this instead of agentId:runId
   artifacts: string[];
   inputArtifacts: string[];   // artifact handles this run handed DOWN to children (hand-off graph)
@@ -261,6 +269,7 @@ export async function executeRun(
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
     ingestSource: opts.ingestSource,
     artifacts: [], inputArtifacts: [], outputArtifacts: [], delegatedOut: [],
+    untrusted: { entered: false, sources: [] }, // Plan 08 injection guard — armed by read_url / MCP results
     spanEvents, emitStep,
     requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
@@ -425,6 +434,10 @@ export async function executeRun(
     priceUsd,
     codexBackend: subscription, // subscription:true ⇒ Codex backend ⇒ system goes in `instructions`
     captureProviderCost: picked?.captureCost, // OpenRouter reports real cost in providerMetadata
+    // Plan 05: config disposes the compaction threshold — per-model window table × defaults.compactAt
+    // (default ~70%). The loop MEASURES context every iteration and FOLDS the oldest round-trips once
+    // this estimate is crossed (system + original brief + recent N kept verbatim).
+    compactThresholdTokens: compactionThreshold(picked?.modelId, deps.configDefaults?.compactAt),
     // Phase 5 recovery: flush each transcript event live + checkpoint the message array per iteration,
     // so a crash mid-run leaves legible evidence and a resume point instead of nothing.
     onEvent: (e) => appendRunTranscript(deps.ws, runId, e),
@@ -443,7 +456,7 @@ export async function executeRun(
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, inputArtifacts: ctx.inputArtifacts, outputArtifacts: ctx.outputArtifacts,
     delegatedOut: ctx.delegatedOut, verification: ctx.verifications, outcome,
-    tokens: result.tokens, costUsd: subscription ? null : result.costUsd,
+    tokens: result.tokens, contextTokens: result.contextTokens, costUsd: subscription ? null : result.costUsd,
     costNote: subscription ? "subscription" : undefined,
     // This run's own delegation-checker spend (Plan 06), surfaced separately from the primary loop so
     // /costs can add it to this run's own-spend total (the checker creates no child trace, so it's

@@ -86,6 +86,11 @@ PRs are reviewed **against the plan + reference doc**, not just for code quality
 3. No workspace/secret hazards (nothing writes to the repo-root live workspace; no tokens
    logged; `.envt`-class files never committed).
 4. Checkbox updates in `plans/tasks.md` match what actually shipped.
+5. **Combined-tree verification when main moved since the branch was cut**: GitHub's MERGEABLE
+   is textual, not semantic — a green branch + green main can still produce a broken merge (seen
+   live: #10/#11 were MERGEABLE after #12 rewrote the loop tests, yet the combined tree failed
+   typecheck). The reviewer verifies a local test-merge with current main (typecheck + suite +
+   evidence) before merging; parallel PRs touching the same hotspots get serialized rebase orders.
 
 Merge is the captain's call (or the reviewer's, when the captain has said to ship).
 

@@ -18,6 +18,7 @@ function trace(over: Partial<RunTrace>): RunTrace {
     verification: [],
     outcome: "completed",
     tokens: 0,
+    contextTokens: 0,
     costUsd: 0,
     verifierTokens: 0,
     verifierCostUsd: 0,

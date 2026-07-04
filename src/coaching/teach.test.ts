@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
+import { MockLanguageModelV3, simulateReadableStream } from "../core/mock-model"; // Plan 07: auto-streaming mock (re-exports simulateReadableStream for the direct-doStream Codex case)
 import { draftPolicy, persistApprovedPolicy } from "./teach";
 import { readPolicy } from "../store/policy";
 import type { DeckLedger } from "../store/deck-budget";
