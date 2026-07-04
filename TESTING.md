@@ -112,6 +112,7 @@ the binary produced.
 ```bash
 bun scripts/e2e-evidence.ts agent-flow        # → evidence/agent-flow/{session.mp4, *.png, manifest.json}
 bun scripts/e2e-evidence.ts artifact-handoff   # Plan 01 — A produces, B consumes BY REFERENCE, parent stays thin
+bun scripts/e2e-evidence.ts squad-panes        # Plan 10 — two agents live in split panes + bar during a delegation
 ```
 
 A **scenario** (`e2e/scenarios/<name>.ts`) = a VHS tape (drives the flow, waits gated on on-screen
@@ -193,6 +194,20 @@ complete summary.
     **only while panes are up** (`hasPanes` gate) — an always-on interval re-rendered the whole App
     at rest and pushed that same test over its per-test timeout. A left-accent rule (`▎`) is the
     pane-only marker the Layer-1 tests key on.
+- **Layer 4 (VHS evidence)** — `bun scripts/e2e-evidence.ts squad-panes` (Plan 10 Phase 5) is the
+  recorded proof that two agents render **live in split panes + the bar during a delegation**. The
+  blocker was timing: the `agent-flow` delegation returns sub-second, so a child's pane "flashes
+  faster than a recorded frame." The scenario therefore uses a **slow-mode e2e model**
+  (`src/core/e2e-model.ts` `squad-panes` mode) that **holds the child's model call in-flight ~4s**
+  (fixed delay, overridable via `TAICHO_E2E_SLOW_MS`; the loop's 120s idle watchdog dwarfs it). The
+  hold is in the **model, never the tape** — during the window root is `delegating` (its delegate_task
+  tool blocks on the child) and proof-agent is `thinking` (its held call runs), so both strings appear
+  only on the live surfaces (bar + panes), never in the scrollback breadcrumb. The tape's two gates —
+  `Wait+Screen /root delegating/` then `Wait+Screen /proof-agent thinking/` — require **both** live
+  panes on screen at once before `Screenshot panes.png`, which is the two-agents-in-panes+bar proof;
+  file assertions (the delegation trace exists + the child completed) decide pass/fail. `Set Height
+  1000` gives the panes vertical room (they degrade to bar-only below `MIN_PANE_ROWS`). Ran twice, no
+  flake; `agent-flow` stays 7/7.
 
 ## Adding a dependency (testing-adjacent gotcha)
 

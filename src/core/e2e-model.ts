@@ -12,22 +12,28 @@ import type { Model } from "./model";
 // the SDK normalizes it to the user-facing `{ inputTokens, outputTokens }` the loop meters.
 const usage = { inputTokens: { total: 3 }, outputTokens: { total: 2 } } as const;
 
-// A doStream result: the given LanguageModelV3 stream parts, emitted with no artificial delay.
+// A doStream result: the given LanguageModelV3 stream parts. `initialDelayInMs` holds the FIRST
+// chunk back (the whole call stays in-flight that long) — used by the slow-mode scenarios below to
+// keep an agent visibly live long enough for VHS to freeze-frame its pane + bar segment.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function stream(chunks: unknown[]): any {
+function stream(chunks: unknown[], initialDelayInMs = 0): any {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return { stream: simulateReadableStream({ initialDelayInMs: 0, chunkDelayInMs: 0, chunks: chunks as any }) };
+  return { stream: simulateReadableStream({ initialDelayInMs, chunkDelayInMs: 0, chunks: chunks as any }) };
 }
 
 // Streamed text response: start → one delta carrying the whole text → end → finish(stop).
-function text(t: string) {
+// `delayMs` (default 0) holds the model call in-flight before ANY output — the loop has already
+// emitted `model_start` (→ live "thinking" status) by then, so the agent renders as a live pane +
+// bar segment for the whole delay. The idle watchdog (120s, reset per chunk) dwarfs it, so
+// guardModelCall never abandons the call. Deterministic (fixed delay, no network).
+function text(t: string, delayMs = 0) {
   return stream([
     { type: "stream-start", warnings: [] },
     { type: "text-start", id: "t" },
     { type: "text-delta", id: "t", delta: t },
     { type: "text-end", id: "t" },
     { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
-  ]);
+  ], delayMs);
 }
 
 // Streamed tool call: a single tool-call part → finish(tool-calls). The loop drains it, counts the
@@ -152,9 +158,50 @@ function artifactHandoffModel(): Model {
   }) as unknown as Model;
 }
 
+/** How long (ms) the squad-panes child holds its model call in-flight so its live pane + bar segment
+ *  are on screen long enough for VHS to `Wait+Screen` + screenshot. Fixed default, overridable via
+ *  TAICHO_E2E_SLOW_MS (deterministic — a duration, never a race). ~4s dwarfs VHS's poll interval and
+ *  sits far under the loop's 120s idle watchdog. */
+const SQUAD_PANES_SLOW_MS = Number(process.env.TAICHO_E2E_SLOW_MS ?? 4000);
+
+/** squad-panes (Plan 10 Phase 5): the SLOW-MODE delegation that makes the split-pane view provable.
+ *  Same shape as agent-flow (create proof-agent → approve → delegate → roll the proof up), but the
+ *  child's single model call is HELD in-flight for SQUAD_PANES_SLOW_MS. During that window two agents
+ *  are live at once — root `delegating` (its delegate_task tool is blocked on the child) and
+ *  proof-agent `thinking` (its model call is running) — so taicho renders a pane + bar segment for
+ *  each, long enough for VHS to freeze-frame the two-agents-in-panes+bar state before it completes.
+ *  Without the hold the child returns sub-second and the pane flashes faster than a recorded frame. */
+function squadPanesModel(): Model {
+  let n = 0;
+  return new MockLanguageModelV3({
+    provider: "taicho-e2e",
+    modelId: "squad-panes",
+    doStream: async () => {
+      n += 1;
+      // root run 1 — create proof-agent
+      if (n === 1) return call("create_agent", {
+        id: "proof-agent",
+        role: "Proof worker",
+        identity: "You are proof-agent. Complete delegated work with a concise proof message.",
+      });
+      if (n === 2) return text("Created proof-agent.");
+      // root run 2 — delegate (root stays `delegating`, blocked on the child below)
+      if (n === 3) return call("delegate_task", {
+        to: "proof-agent",
+        goal: "Produce proof that the created agent was used.",
+      });
+      // the child's only model call — SLOW: proof-agent stays visibly `thinking` while root delegates
+      if (n === 4) return text("proof-agent completed delegated work", SQUAD_PANES_SLOW_MS);
+      // root rolls the child's proof back up
+      return text("Root used proof-agent: proof-agent completed delegated work");
+    },
+  }) as unknown as Model;
+}
+
 export function createE2eModel(mode: string | undefined): Model | null {
   if (mode === "agent-flow") return agentFlowModel();
   if (mode === "conversation-audit") return conversationAuditModel();
   if (mode === "artifact-handoff") return artifactHandoffModel();
+  if (mode === "squad-panes") return squadPanesModel();
   return null;
 }

@@ -413,9 +413,9 @@ background tasks stay visible.
 - [x] Layer-1 `App.test.tsx`: pane appears on delegation, streams tool lines with argsPreview, collapses on completion; `/view` toggles + persists; degradation below min size. Plus pure units in `ui/SquadPanes.test.tsx` + `store/prefs.test.ts`.
 
 ### Phase 5 — Tests & docs
-- [ ] Real-binary e2e (tui-test): delegation run shows both agents in panes + both statuses in the bar; `/view` toggles work. *(deferred — Layer 2/4 harness work, out of this unit's scope.)*
-- [ ] Evidence scenario (Plan 11): tape showing two agents live in panes + bar during a delegation. *(deferred — bespoke tape; the existing `agent-flow` mp4 now shows a child pane + bar during its delegation, but a dedicated two-panes tape is a stretch.)*
-- [x] Update `TESTING.md`, `CLAUDE.md`. *(Squad UI section in TESTING.md; `src/ui/` line in CLAUDE.md.)*
+- [x] Real-binary e2e (tui-test): delegation run shows both agents in panes + both statuses in the bar; `/view` toggles work. *(delivered as the Layer-4 VHS evidence scenario below — `squad-panes` drives the compiled binary through `/view both` + a slow delegation, gates on both live panes, and screenshots the two-agents-in-panes+bar state; supersedes the deferred tui-test.)*
+- [x] Evidence scenario (Plan 11): tape showing two agents live in panes + bar during a delegation. *(`e2e/scenarios/squad-panes.ts` + the `squad-panes` slow-mode e2e model (`src/core/e2e-model.ts`): the child's model call is HELD in-flight ~4s (fixed delay, `TAICHO_E2E_SLOW_MS`-overridable, dwarfed by the loop's 120s idle watchdog) so during the delegation root is `delegating` and proof-agent is `thinking` at once — both render a live pane + bar segment long enough for VHS to freeze-frame. Deterministic screen-gating (never a load-bearing Sleep — the SLOW is in the model): the panes.png screenshot is gated on BOTH `Wait+Screen /root delegating/` and `Wait+Screen /proof-agent thinking/` (strings that appear ONLY on the live bar/panes, never the scrollback breadcrumb), so the gates PROVE both panes rendered; `Set Height 1000` gives pane vertical room. 7 file assertions (delegation trace exists + child completed) decide pass/fail. Ran twice PASS 7/7, no flake; `agent-flow` stays 7/7; panes.png visually confirmed to show two panes + the bar.)*
+- [x] Update `TESTING.md`, `CLAUDE.md`. *(Squad UI section in TESTING.md; `src/ui/` line in CLAUDE.md. Phase 5 tail: TESTING.md's Squad UI section + Layer-4 list document the slow-mode model + `squad-panes` scenario; CLAUDE.md's SquadPanes line notes it.)*
 
 ---
 
