@@ -79,7 +79,8 @@ export function assemble(
     s.push({
       name: "brief", tier: "context",
       text: `## Delegated task (from ${opts.brief.from})\nGOAL: ${opts.brief.goal}` +
-        (opts.brief.context ? `\nCONTEXT: ${opts.brief.context}` : ""),
+        (opts.brief.context ? `\nCONTEXT: ${opts.brief.context}` : "") +
+        (opts.brief.criteria ? `\nCRITERIA (your output is checked against these before it is accepted): ${opts.brief.criteria}` : ""),
     });
   if (opts.inputArtifactsBlock)
     s.push({ name: "input-artifacts", tier: "context", text: opts.inputArtifactsBlock });

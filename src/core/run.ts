@@ -3,9 +3,10 @@
 import type { Database } from "bun:sqlite";
 import { generateText, type ModelMessage } from "ai";
 import type { AgentDef } from "../schemas/agent";
-import type { RunTrace } from "../schemas/trace";
+import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schemas/trace";
 import { assemble } from "./prompt";
 import { runLoop } from "./loop";
+import { runChecker } from "./verification";
 import { canDelegate, visibleToRows } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
@@ -76,14 +77,26 @@ export interface RunContext {
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   createAgent: (draft: NewAgentDraft) => Promise<AgentDef>;
   canDelegate: (toId: string) => boolean;
-  runChild: (brief: { to: string; goal: string; context?: string; inputArtifacts?: string[] }) => Promise<RunResult>;
+  runChild: (brief: { to: string; goal: string; context?: string; criteria?: string; inputArtifacts?: string[] }) => Promise<RunResult>;
   findAgents: (query: string, k: number) => AgentHit[];
   agentExists: (id: string) => boolean;
   notes: string[];
   workItems: { n: number };
   childSpend: { tokens: number; costUsd: number };
+  /** Spend from THIS run's own delegation-checker calls (Plan 06). Kept separate from childSpend
+   *  (which is child RUNS) but folded into trace.aggregate the same way — the checker makes real,
+   *  metered model calls this run caused, so the aggregate must include them to stay honest. costUsd
+   *  is 0 for subscription runs (unpriced), and aggregate.costUsd is null there anyway. */
+  verifierSpend: { tokens: number; costUsd: number };
   childTraces: RunTrace[];
   delegationGuard: (to: string) => { ok: true } | { ok: false; error: string };
+  /** Criteria→verdict records for this run's delegations; written to trace.verification + transcript. */
+  verifications: VerificationRecord[];
+  /** The independent delegation checker: child output + criteria → verdict, via the delegating
+   *  agent's own resolved model (same plumbing the loop uses). */
+  checkCriteria: (p: { goal: string; criteria: string; output: string }) => Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string }>;
+  /** Surface a one-line breadcrumb to the captain (e.g. a failed verification), routed via onStep. */
+  emit?: (info: { note: string }) => void;
 }
 
 export interface RunDeps {
@@ -91,7 +104,7 @@ export interface RunDeps {
   db: Database;
   model: Model;
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
-  onStep?: (info: { text?: string; tool?: string; delta?: string; agent: string }) => void;
+  onStep?: (info: { text?: string; tool?: string; delta?: string; note?: string; agent: string }) => void;
   pollSteer?: () => string | null;
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
@@ -135,7 +148,7 @@ export function makeDeps(opts: {
 
 export async function executeRun(
   deps: RunDeps,
-  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; fromRun: string }; inputArtifacts?: string[]; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string },
+  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; criteria?: string; fromRun: string }; inputArtifacts?: string[]; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string },
 ): Promise<RunResult> {
   const depth = opts.depth ?? 0;
   const ancestry = opts.ancestry ?? [];
@@ -158,6 +171,13 @@ export async function executeRun(
     parentRunId: opts.brief?.fromRun,
   });
 
+  // Resolve THIS agent's model up front (before tools are built) so the delegation checker can run
+  // on the same model plumbing the loop uses — an independent call on the delegating agent's model.
+  const picked = deps.resolveModel?.(opts.agent.id);
+  const subscription = picked?.subscription === true;
+  const model = picked?.model ?? deps.model;
+  const priceUsd = picked ? pricerFor(picked.modelId) : deps.priceUsd;
+
   const ctx: RunContext = {
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
     ingestSource: opts.ingestSource,
@@ -165,18 +185,25 @@ export async function executeRun(
     requestApproval: deps.requestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
     canDelegate: (toId) => canDelegate(opts.agent, toId),
-    runChild: async ({ to, goal, context, inputArtifacts }) => {
+    runChild: async ({ to, goal, context, criteria, inputArtifacts }) => {
       const child = await loadAgent(deps.ws, to);
       return executeRun(deps, {
         agent: child,
         messages: [{ role: "user", content: context ? `${goal}\n\nContext: ${context}` : goal }],
-        brief: { from: opts.agent.id, goal, context, fromRun: runId },
+        brief: { from: opts.agent.id, goal, context, criteria, fromRun: runId },
         inputArtifacts, // handed to the child by REFERENCE (handles + summaries in the prompt, not inlined bodies)
         triggeredBy: runId,
         depth: depth + 1,
         ancestry: [...ancestry, opts.agent.id],
       });
     },
+    verifications: [],
+    checkCriteria: (p) => runChecker({
+      model, agent: opts.agent, subscription, priceUsd,
+      captureProviderCost: picked?.captureCost, signal: deps.signal,
+      goal: p.goal, criteria: p.criteria, output: p.output,
+    }),
+    emit: deps.onStep ? (info) => deps.onStep!({ note: info.note, agent: opts.agent.id }) : undefined,
     // Discovery respects the caller's visibility ACL, consistent with the inline-roster path.
     findAgents: (query, k) =>
       rankAgents(
@@ -190,6 +217,7 @@ export async function executeRun(
     notes: [],
     workItems: { n: 0 },
     childSpend: { tokens: 0, costUsd: 0 },
+    verifierSpend: { tokens: 0, costUsd: 0 },
     childTraces: [],
     delegationGuard: (to) => {
       if (!canDelegate(opts.agent, to)) return { ok: false, error: `not permitted to delegate to "${to}"` };
@@ -287,11 +315,6 @@ export async function executeRun(
   });
   const tools = toolsForAgent(opts.agent, ctx, deps.mcp);
 
-  const picked = deps.resolveModel?.(opts.agent.id);
-  const subscription = picked?.subscription === true;
-  const model = picked?.model ?? deps.model;
-  const priceUsd = picked ? pricerFor(picked.modelId) : deps.priceUsd;
-
   const result = await runLoop({
     model, agent: opts.agent, system, messages: opts.messages, tools,
     onStep: deps.onStep ? (i) => deps.onStep!({ ...i, agent: opts.agent.id }) : undefined,
@@ -310,14 +333,21 @@ export async function executeRun(
     ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [], knowledge: knowledgeIds, skills: skillIds },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
     artifacts: ctx.artifacts, inputArtifacts: ctx.inputArtifacts, outputArtifacts: ctx.outputArtifacts,
-    delegatedOut: ctx.delegatedOut, outcome,
+    delegatedOut: ctx.delegatedOut, verification: ctx.verifications, outcome,
     tokens: result.tokens, costUsd: subscription ? null : result.costUsd,
     costNote: subscription ? "subscription" : undefined,
-    aggregate: { tokens: result.tokens + ctx.childSpend.tokens, costUsd: subscription ? null : result.costUsd + ctx.childSpend.costUsd },
+    // aggregate = this run's own loop + child RUNS + this run's delegation-checker calls. All three
+    // are real model spend this run caused; verifier spend is 0 for subscription (costUsd stays null).
+    aggregate: {
+      tokens: result.tokens + ctx.childSpend.tokens + ctx.verifierSpend.tokens,
+      costUsd: subscription ? null : result.costUsd + ctx.childSpend.costUsd + ctx.verifierSpend.costUsd,
+    },
     notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };
   for (const event of result.transcript) appendRunTranscript(deps.ws, runId, event);
+  // Verdicts are part of the run's story ("why did it retry?") — record them in the transcript too.
+  for (const v of ctx.verifications) appendRunTranscript(deps.ws, runId, { ts: new Date().toISOString(), kind: "verification", data: v });
   writeChildRuns(deps.ws, runId, ctx.childTraces);
   writeRunFinal(deps.ws, runId, result.error ? `error: ${result.error}` : result.text);
   writeRunFailure(deps.ws, runId, trace, result.error ? `error: ${result.error}` : result.text);

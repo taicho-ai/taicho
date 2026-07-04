@@ -202,7 +202,7 @@ export function App(props: {
   const deps = (model: Model) => makeDeps({
     ws: props.ws, db: props.db, model,
     requestApproval,
-    onStep: ({ tool, agent, delta }) => {
+    onStep: ({ tool, agent, delta, note }) => {
       if (delta) {
         streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
         const { blocks } = splitCompletedBlocks(streamRef.current);
@@ -212,6 +212,8 @@ export function App(props: {
         }
         return;
       }
+      // A run-level breadcrumb (e.g. a delegation verification verdict) — surface it to the captain.
+      if (note) { flushStream(); say({ kind: "system", text: `  ${note}` }); return; }
       if (tool) { flushStream(); setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); }
     },
     pollSteer: () => steerQueue.current.shift() ?? null,

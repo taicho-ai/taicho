@@ -155,37 +155,97 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
 
   if (agent.tools.includes("delegate_task"))
     set.delegate_task = tool({
-      description: "Delegate a goal to another agent by id. Hand work over BY REFERENCE via inputArtifacts (artifact handles the child reads with read_artifact) rather than pasting content into `context`. You get back the child's output artifact handles + a short summary — not its full text.",
+      description:
+        "Delegate a goal to another agent by id. Hand work over BY REFERENCE via `inputArtifacts` " +
+        "(artifact handles the child reads with read_artifact) rather than pasting content into `context`; " +
+        "you get back the child's output artifact handles + a short summary — not its full text. " +
+        "Optionally pass `criteria` — a plain-language contract for what 'done' means (e.g. \"a markdown " +
+        "dossier with ≥5 cited, dated sources\"). When you set criteria, the child's output is judged by an " +
+        "independent check before you get it; a failing check triggers one automatic retry with feedback, " +
+        "and a still-failing result comes back with its failed verdict attached so you can see the caveat. " +
+        "Set criteria whenever the output has concrete requirements you'd otherwise have to re-check by hand.",
       inputSchema: z.object({
         to: z.string(),
         goal: z.string(),
         context: z.string().optional(),
+        criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
         inputArtifacts: z.array(z.string()).optional().describe("artifact handles ('id' or 'id@vN') to hand to the child by reference"),
       }),
-      execute: async ({ to, goal, context, inputArtifacts }) => {
+      execute: async ({ to, goal, context, criteria, inputArtifacts }) => {
+        const budgetMsg = () => `work item budget (${agent.budgets.maxWorkItemsPerRequest}) exhausted`;
+        // Each delegation (initial AND the verification retry) consumes one work item — config
+        // disposes, so the retry is no new runaway vector.
         ctx.workItems.n += 1;
         if (ctx.workItems.n > agent.budgets.maxWorkItemsPerRequest) {
-          const msg = `work item budget (${agent.budgets.maxWorkItemsPerRequest}) exhausted`;
-          ctx.notes.push(`delegate refused: ${msg}`);
-          return { error: msg };
+          ctx.notes.push(`delegate refused: ${budgetMsg()}`);
+          return { error: budgetMsg() };
         }
         const guard = ctx.delegationGuard(to);
         if (!guard.ok) { ctx.notes.push(`delegate refused: ${guard.error}`); return { error: guard.error }; }
+
         // resolve input handles; drop (and note) any that don't exist rather than passing a dead ref.
         const resolved: string[] = [], dropped: string[] = [];
         for (const h of inputArtifacts ?? []) (readArtifact(ctx.ws, h) ? resolved : dropped).push(h);
         if (dropped.length) ctx.notes.push(`delegate: dropped unknown input artifact(s) ${dropped.join(", ")}`);
-        try {
-          const child = await ctx.runChild({ to, goal, context, inputArtifacts: resolved });
+
+        // Spawn one child run (initial OR the verification retry). Both get the SAME input handles BY
+        // REFERENCE, and each spawn folds its spend + produced handles into this run's aggregate/graph.
+        const spawn = async (childContext?: string) => {
+          const child = await ctx.runChild({ to, goal, context: childContext, criteria, inputArtifacts: resolved });
           ctx.delegatedOut.push(child.runId);
           ctx.childTraces.push(child.trace);
-          ctx.inputArtifacts.push(...resolved);              // hand-off graph: handles I sent down
           ctx.outputArtifacts.push(...child.trace.artifacts); // hand-off graph: handles the child produced
-          const childAgg = child.trace.aggregate ?? { tokens: child.trace.tokens, costUsd: child.trace.costUsd };
-          ctx.childSpend.tokens += childAgg.tokens;
-          ctx.childSpend.costUsd += childAgg.costUsd ?? 0;
+          const agg = child.trace.aggregate ?? { tokens: child.trace.tokens, costUsd: child.trace.costUsd };
+          ctx.childSpend.tokens += agg.tokens;
+          ctx.childSpend.costUsd += agg.costUsd ?? 0;
+          return child;
+        };
+
+        try {
+          let child = await spawn(context);
+          ctx.inputArtifacts.push(...resolved); // hand-off graph: handles I sent down (same set for any retry)
+
+          // No criteria ⇒ no check ⇒ today's trust-everything behavior, zero extra cost.
           // Parent context gets handles + a summary, NOT the child's full body (the pollution vector).
-          return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
+          if (!criteria) return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
+
+          // Independent checker call, BEFORE the result reaches the parent's context. Its spend is
+          // real model spend this run caused → fold it into the aggregate (like child-run spend).
+          const first = await ctx.checkCriteria({ goal, criteria, output: child.text });
+          ctx.verifierSpend.tokens += first.tokens;
+          ctx.verifierSpend.costUsd += first.costUsd ?? 0; // null (subscription) folds as 0 in the sum; recorded value stays null
+          ctx.verifications.push({ criteria, verdict: first.verdict, runId: child.runId, retried: false, tokens: first.tokens, costUsd: first.costUsd, costNote: first.costNote });
+          let verdict = first.verdict;
+
+          if (!verdict.pass) {
+            ctx.emit?.({ note: `↻ ${to} output failed verification: ${verdict.reasons.join("; ")} — retrying once` });
+            // Exactly ONE bounded retry — consumes a work item like any delegation.
+            ctx.workItems.n += 1;
+            const overBudget = ctx.workItems.n > agent.budgets.maxWorkItemsPerRequest;
+            const retryGuard = ctx.delegationGuard(to);
+            if (overBudget || !retryGuard.ok) {
+              const why = overBudget ? budgetMsg() : !retryGuard.ok ? retryGuard.error : "retry blocked";
+              ctx.notes.push(`verification retry refused: ${why}`);
+              ctx.emit?.({ note: `⚠ ${to} result surfaced WITHOUT a passing verification (retry blocked: ${why})` });
+              return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text, verification: verdict };
+            }
+            const feedback = "Your previous attempt did NOT meet the acceptance criteria. Fix these before returning:\n" +
+              verdict.reasons.map((r) => `- ${r}`).join("\n");
+            // Retry-spawn ALSO threads inputArtifacts (via the closure's `resolved`) so the retried
+            // child still receives the same input handles by reference.
+            const retry = await spawn(context ? `${context}\n\n${feedback}` : feedback);
+            const second = await ctx.checkCriteria({ goal, criteria, output: retry.text });
+            ctx.verifierSpend.tokens += second.tokens;
+            ctx.verifierSpend.costUsd += second.costUsd ?? 0; // null (subscription) folds as 0 in the sum; recorded value stays null
+            ctx.verifications.push({ criteria, verdict: second.verdict, runId: retry.runId, retried: true, tokens: second.tokens, costUsd: second.costUsd, costNote: second.costNote });
+            child = retry;
+            verdict = second.verdict;
+            if (verdict.pass) ctx.emit?.({ note: `✓ ${to} passed verification after one retry` });
+            else ctx.emit?.({ note: `⚠ ${to} still failed verification after retry: ${verdict.reasons.join("; ")} — surfacing result with the failed verdict` });
+          }
+
+          // Criteria was set: always attach the verdict so the parent (and captain) sees the caveat.
+          return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text, verification: verdict };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           ctx.notes.push(`delegate failed: ${msg}`);

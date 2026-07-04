@@ -2,10 +2,19 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { paths } from "./files";
-import type { RunTrace } from "../schemas/trace";
+import type { RunTrace, VerificationVerdict } from "../schemas/trace";
 
 export type TaskStepStatus = "not_started" | "running" | "completed" | "failed" | "blocked" | "interrupted" | "verified";
 export type TaskStatus = "requested" | "running" | "completed" | "partial" | "failed" | "blocked" | "interrupted";
+
+/** A criteria→verdict record surfaced from a delegation's independent check (Plan 06). Replaces the
+ *  never-populated `verifiedClaims`: this field is populated from trace.verification (root + children). */
+export interface TaskVerification {
+  criteria: string;
+  verdict: VerificationVerdict;
+  runId: string;      // the checked child run
+  retried: boolean;
+}
 
 export interface TaskState {
   taskId: string;
@@ -16,7 +25,7 @@ export interface TaskState {
   rootRunId: string;
   userTurnId?: string;
   steps: { name: string; status: TaskStepStatus; runId?: string; details?: string }[];
-  verifiedClaims: { claim: string; evidenceEventId?: string; verified: boolean }[];
+  verifications: TaskVerification[];
 }
 
 function taskFile(ws: string, taskId: string): string {
@@ -39,7 +48,7 @@ export function createTaskState(ws: string, input: { runId: string; title: strin
     rootRunId: input.runId,
     userTurnId: input.userTurnId,
     steps: [{ name: "root_run", status: "running", runId: input.runId }],
-    verifiedClaims: [],
+    verifications: [],
   };
   writeFileSync(taskFile(ws, task.taskId), JSON.stringify(task, null, 2));
   return task;
@@ -61,6 +70,10 @@ export function updateTaskFromTrace(ws: string, taskId: string, trace: RunTrace,
   for (const child of children) {
     task.steps.push({ name: `child:${child.agent}`, status: outcomeToStep(child.outcome), runId: child.id, details: child.task });
   }
+  // Populate the verification record from the checks this run (and its children) actually ran.
+  task.verifications = [trace, ...children].flatMap((t) =>
+    (t.verification ?? []).map((v) => ({ criteria: v.criteria, verdict: v.verdict, runId: v.runId, retried: v.retried })),
+  );
   if (trace.outcome === "completed" && children.every((c) => c.outcome === "completed")) task.status = "completed";
   else if (trace.outcome === "blocked" || children.some((c) => c.outcome === "blocked")) task.status = "blocked";
   else if (trace.outcome === "interrupted" || children.some((c) => c.outcome === "interrupted")) task.status = "interrupted";

@@ -266,22 +266,22 @@ question (recommended: rename → `verifications[]` and populate, or cut — dec
 - [x] **`verifiedClaims`:** rename → `verifications[]` and populate, or cut. *Decided (2026-07-04): rename + populate.*
 
 ### Phase 1 — Criteria in the brief
-- [ ] `delegate_task` (and Plan 04's `dispatch_task`) gains `criteria?: string`; rides the brief into the child's system prompt via `assemble`.
+- [x] `delegate_task` (and Plan 04's `dispatch_task`) gains `criteria?: string`; rides the brief into the child's system prompt via `assemble`. *(delegate_task done + CRITERIA line in the brief block; `dispatch_task` is Plan 04's tool — doesn't exist yet, deferred to that plan.)*
 
 ### Phase 2 — The verification step
-- [ ] On child return with `criteria`: checker call → `{ pass, reasons[] }` before the result reaches the parent's context.
-- [ ] On fail: one retry (goal + verdict reasons as feedback), consuming `maxWorkItemsPerRequest`; second fail returns the result **with the failed verdict attached**.
-- [ ] Record verdicts on the trace (`trace.verification`) + transcript → waterfall span + ledger answer to "why did it retry?".
+- [x] On child return with `criteria`: checker call → `{ pass, reasons[] }` before the result reaches the parent's context. *(`src/core/verification.ts` — independent model call on the delegating agent's resolved model, via `runLoop` with an empty toolset.)*
+- [x] On fail: one retry (goal + verdict reasons as feedback), consuming `maxWorkItemsPerRequest`; second fail returns the result **with the failed verdict attached**.
+- [x] Record verdicts on the trace (`trace.verification`) + transcript → waterfall span + ledger answer to "why did it retry?".
 
 ### Phase 3 — Artifact & coaching tie-in
 - [ ] Verdict = annotation on the artifact version (Plan 01 Phase 4's same annotation → revision path).
 - [ ] Repeated failure patterns feed coaching (propose a policy note).
-- [ ] Populate `verifications[]` on the task (per Phase 0 decision).
+- [x] Populate `verifications[]` on the task (per Phase 0 decision). *(renamed `verifiedClaims` → `verifications[]` in `task-state.ts`; `updateTaskFromTrace` populates it from `trace.verification` on root + children.)*
 
 ### Phase 4 — Tests & docs
-- [ ] Unit: pass path (no extra calls when no criteria), fail→retry→pass, fail→fail→surfaced verdict, budget consumption.
-- [ ] Layer-1: captain sees the attached failed verdict.
-- [ ] Update `prompt.ts` delegation guidance, `TESTING.md`, `CLAUDE.md`.
+- [x] Unit: pass path (no extra calls when no criteria), fail→retry→pass, fail→fail→surfaced verdict, budget consumption.
+- [x] Layer-1: captain sees the attached failed verdict.
+- [x] Update `prompt.ts` delegation guidance, `TESTING.md`, `CLAUDE.md`.
 
 ---
 

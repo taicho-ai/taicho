@@ -5,6 +5,7 @@ export const Brief = z.object({
   to: z.string(),
   goal: z.string(),
   context: z.string().optional(),
+  criteria: z.string().optional(),         // acceptance criteria the output must meet (rides into the prompt + drives the checker)
   from: z.string(),                        // sending agent id
   fromRun: z.string(),
 });

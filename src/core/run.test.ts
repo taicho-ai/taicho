@@ -9,6 +9,7 @@ import { openDb } from "../store/db";
 import { seedRoot, reindex, loadIndex, loadAgent, createAgent, serializeAgent } from "../store/roster";
 import { AgentDef } from "../schemas/agent";
 import { makeDeps, executeRun } from "./run";
+import { runChecker } from "./verification";
 import { readTrace } from "../store/trace";
 import { writePolicy } from "../store/policy";
 import { PolicyNote } from "../schemas/policy";
@@ -337,7 +338,8 @@ test("a delegating run's aggregate includes child spend", async () => {
   const childId = res.trace.delegatedOut[0];
   const child = readTrace(ws, childId);
   expect(res.trace.aggregate).toBeTruthy();
-  expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + child.tokens); // exact: locks out double-counting
+  expect(res.trace.verification.length).toBe(0);                              // no criteria ⇒ no checker call ⇒ zero verifier spend
+  expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + child.tokens); // exact: own loop + child run, no verifier, no double-count
 });
 
 test("delegation is refused once the per-request run ceiling is hit", async () => {
@@ -394,6 +396,7 @@ test("aggregate sums the whole run-tree exactly (root + mid + leaf)", async () =
   const mid = readTrace(ws, midId);
   const leafId = mid.delegatedOut[0];
   const leaf = readTrace(ws, leafId);
+  expect(res.trace.verification.length).toBe(0);                                         // no criteria anywhere ⇒ no verifier spend in the tree
   expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + mid.tokens + leaf.tokens); // exact tree sum, no double-count
 });
 
@@ -572,4 +575,167 @@ test("create_agent honors an edited identity, not just role", async () => {
   const root = await loadAgent(ws, "root");
   await executeRun(deps, { agent: root, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
   expect((await loadAgent(ws, "newbie")).identity).toBe("EDITED SOUL");
+});
+
+// ---------------------------------------------------------------------------
+// Plan 06 — Delegation verification (acceptance criteria + independent checker + one retry)
+// ---------------------------------------------------------------------------
+
+/** boss delegates; worker does the work. Both have generous budgets unless overridden. */
+function bossAndWorker(ws: string, db: import("bun:sqlite").Database, over: { workItems?: number } = {}) {
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You delegate.", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 10, maxWorkItemsPerRequest: over.workItems ?? 20 } });
+  putAgent(ws, db, { id: "worker", role: "worker", identity: "You work.", tools: [], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+}
+
+test("delegation WITHOUT criteria skips the checker — no extra model call, no verdict recorded", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "do X" }), // boss step 1 (no criteria)
+    text("worker result"),                                  // worker
+    text("boss done"),                                      // boss step 2
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.text).toBe("boss done");
+  expect(res.trace.delegatedOut.length).toBe(1);
+  expect(res.trace.verification.length).toBe(0);                 // no criteria ⇒ no check ⇒ today's behavior
+  expect((model as any).doGenerateCalls.length).toBe(3);         // delegate + worker + boss final — NO checker call (zero cost when unused)
+});
+
+test("criteria that first fails → one independent retry with the verdict as feedback → passes", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // boss
+    text("attempt one, no Y"),                                    // worker (1st)
+    text('{"pass": false, "reasons": ["missing Y"]}'),           // checker (1st) — independent model call
+    text("attempt two, mentions Y"),                             // worker (retry)
+    text('{"pass": true, "reasons": []}'),                       // checker (2nd)
+    text("boss done"),                                           // boss final
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.text).toBe("boss done");
+  expect(res.trace.delegatedOut.length).toBe(2);                 // initial + exactly one retry
+  expect(res.trace.verification.length).toBe(2);
+  expect(res.trace.verification[0]).toMatchObject({ retried: false });
+  expect(res.trace.verification[0].verdict.pass).toBe(false);
+  expect(res.trace.verification[1]).toMatchObject({ retried: true });
+  expect(res.trace.verification[1].verdict.pass).toBe(true);
+  // the retry child's brief carried the failed verdict's reasons as feedback
+  const retryChildId = res.trace.delegatedOut[1];
+  const retryInput = readFileSync(join(paths.runRecordDir(ws, retryChildId), "input.json"), "utf8");
+  expect(retryInput).toContain("missing Y");
+});
+
+test("criteria that fails twice surfaces the result WITH the failed verdict attached (not a silent lie)", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }),
+    text("attempt one"),
+    text('{"pass": false, "reasons": ["missing Y"]}'),
+    text("attempt two"),
+    text('{"pass": false, "reasons": ["still missing Y"]}'),
+    text("boss done"),
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut.length).toBe(2);                 // one retry, then it stops (no second retry)
+  expect(res.trace.verification.length).toBe(2);
+  expect(res.trace.verification.every((v) => v.verdict.pass === false)).toBe(true);
+  expect(res.trace.verification[1].retried).toBe(true);
+  expect(res.trace.verification[1].verdict.reasons.join(" ")).toContain("still missing Y");
+  // recorded in the transcript too (the ledger answer to "why did it retry?")
+  const tr = readFileSync(join(paths.runRecordDir(ws, res.runId), "transcript.jsonl"), "utf8");
+  expect(tr).toContain("verification");
+  expect(tr).toContain("still missing Y");
+});
+
+test("the verification retry consumes a work item — a budget-exhausted retry is refused, result surfaced with the failed verdict", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db, { workItems: 1 }); // boss may delegate ONCE; the retry needs a 2nd → refused
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }),
+    text("attempt one"),
+    text('{"pass": false, "reasons": ["missing Y"]}'),
+    text("boss done"),
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.text).toBe("boss done");
+  expect(res.trace.delegatedOut.length).toBe(1);                 // the retry never spawned a 2nd child
+  expect(res.trace.verification.length).toBe(1);
+  expect(res.trace.verification[0].verdict.pass).toBe(false);
+  expect(res.trace.notes.some((n) => /retry refused|work item/i.test(n))).toBe(true);
+  expect((model as any).doGenerateCalls.length).toBe(4);         // delegate + worker + checker + boss final — no retry child, no 2nd checker
+});
+
+test("aggregate folds checker spend: with criteria it equals own loop + child runs + verifier calls (cost-honesty)", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  // Criteria fails once then passes ⇒ 2 child runs (initial + retry) AND 2 independent checker calls,
+  // both real, metered model spend this run caused. The aggregate must include ALL of it.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // boss
+    text("attempt one, no Y"),                                    // worker (1st)
+    text('{"pass": false, "reasons": ["missing Y"]}'),           // checker (1st) — independent model call
+    text("attempt two, mentions Y"),                             // worker (retry)
+    text('{"pass": true, "reasons": []}'),                       // checker (2nd)
+    text("boss done"),                                           // boss final
+  ) as any });
+  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+
+  // two child runs and two checker calls happened
+  expect(res.trace.delegatedOut.length).toBe(2);
+  expect(res.trace.verification.length).toBe(2);
+  // child-run spend (workers have no sub-delegation, so trace.tokens == its aggregate.tokens)
+  const childTokens = res.trace.delegatedOut.reduce((s, id) => s + readTrace(ws, id).tokens, 0);
+  // verifier spend is recorded on the verification records (same numbers folded into the aggregate)
+  const verifierTokens = res.trace.verification.reduce((s, v) => s + v.tokens, 0);
+  expect(verifierTokens).toBeGreaterThan(0);                     // the checker really spent metered tokens
+  // THE INVARIANT (strengthened): aggregate = own loop + child runs + verifier calls — nothing under-reported
+  expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + childTokens + verifierTokens);
+  // and it changes the number: dropping verifier spend would under-report by verifierTokens
+  expect(res.trace.aggregate!.tokens).toBeGreaterThan(res.trace.tokens + childTokens);
+
+  // cost mirrors tokens under the identity pricer, and verifier cost is really folded in (not just tokens)
+  const childCost = res.trace.delegatedOut.reduce((s, id) => s + (readTrace(ws, id).aggregate?.costUsd ?? 0), 0);
+  const verifierCost = res.trace.verification.reduce((s, v) => s + (v.costUsd ?? 0), 0);
+  expect(verifierCost).toBeGreaterThan(0);
+  expect(res.trace.aggregate!.costUsd).toBeCloseTo(res.trace.costUsd! + childCost + verifierCost, 6);
+});
+
+test("subscription checker is cost-honest: costUsd is 0 (never fabricated) even with a pricer, tokens still metered so they fold", async () => {
+  const { ws } = await boot();
+  const agent = await loadAgent(ws, "root");
+  // subscription:true ⇒ Codex backend ⇒ the checker streams (doStream) and its USD is unpriced.
+  const model = new MockLanguageModelV3({ doStream: textStream('{"pass": true, "reasons": []}') });
+  const r = await runChecker({
+    model, agent, subscription: true,
+    priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens, // present, but must be ignored on subscription
+    goal: "g", criteria: "must mention Y", output: "mentions Y",
+  });
+  expect(r.verdict.pass).toBe(true);
+  expect(r.costUsd).toBeNull();          // subscription: NO measurable USD — null, never a fabricated 0 (mirrors loop.ts)
+  expect(r.costNote).toBe("subscription");
+  expect(r.tokens).toBeGreaterThan(0);  // tokens ARE metered — this is what folds into the aggregate honestly
+});
+
+test("non-subscription checker prices its real spend: runChecker returns a USD cost the aggregate now folds in", async () => {
+  const { ws } = await boot();
+  const agent = await loadAgent(ws, "root");
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text('{"pass": true, "reasons": []}')) as any });
+  const r = await runChecker({
+    model, agent, subscription: false,
+    priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens,
+    goal: "g", criteria: "c", output: "o",
+  });
+  expect(r.verdict.pass).toBe(true);
+  expect(r.costUsd).toBeGreaterThan(0); // a real cost — folding it is exactly what closes the cost-honesty gap
+  expect(r.costNote).toBeUndefined();   // priced run ⇒ no subscription note
+  expect(r.tokens).toBeGreaterThan(0);
 });
