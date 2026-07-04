@@ -17,7 +17,8 @@ import { getActiveSkills } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
 import { reserveRunId, writeTrace } from "../store/trace";
-import { appendRunTranscript, writeChildRuns, writeRunFailure, writeRunFinal, writeRunInput } from "../store/run-transcript";
+import { appendRunTranscript, writeChildRuns, writeRunFailure, writeRunFinal, writeRunInput, type RunTranscriptEvent } from "../store/run-transcript";
+import type { StepInfo, StepEvent } from "./step-events";
 import type { ProposalDraft } from "../coaching/proposal";
 import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
@@ -46,6 +47,18 @@ function lastUserText(messages: ModelMessage[]): string {
 
 const MAX_DELEGATION_DEPTH = 5;
 const MAX_RUNS_PER_REQUEST = 50;
+
+/** A short label for an approval span (what the captain is being asked to decide). */
+function approvalLabel(req: ApprovalRequest): string {
+  switch (req.kind) {
+    case "create_agent": return `create_agent ${req.draft.id}`;
+    case "run_command": return `run_command ${req.command}`.slice(0, 60);
+    case "add_mcp": return `add_mcp ${req.name}`;
+    case "propose_skill": return `propose_skill ${req.draft.name}`;
+    case "propose_coaching": return "propose_coaching";
+    case "ask_human": return "ask_human";
+  }
+}
 
 export type ApprovalRequest =
   | { kind: "create_agent"; draft: NewAgentDraft }
@@ -98,6 +111,11 @@ export interface RunContext {
   checkCriteria: (p: { goal: string; criteria: string; output: string }) => Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string }>;
   /** Surface a one-line breadcrumb to the captain (e.g. a failed verification), routed via onStep. */
   emit?: (info: { note: string }) => void;
+  /** The shared instrumentation seam (Plan 02 + Plan 10). tools.ts wraps every tool `execute()` and
+   *  run.ts wraps `requestApproval` to (a) push tool/approval span events into `spanEvents` (flushed
+   *  to transcript.jsonl for the waterfall) and (b) emit a live typed phase via `emitStep`. */
+  spanEvents: RunTranscriptEvent[];
+  emitStep?: (info: StepInfo) => void;
 }
 
 export interface RunDeps {
@@ -105,7 +123,7 @@ export interface RunDeps {
   db: Database;
   model: Model;
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
-  onStep?: (info: { text?: string; tool?: string; delta?: string; note?: string; agent: string }) => void;
+  onStep?: (info: StepEvent) => void;
   pollSteer?: () => string | null;
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
@@ -179,11 +197,34 @@ export async function executeRun(
   const model = picked?.model ?? deps.model;
   const priceUsd = picked ? pricerFor(picked.modelId) : deps.priceUsd;
 
+  // The shared instrumentation seam (Plan 02 waterfall spans + Plan 10 live status). Tool spans are
+  // pushed by the execute() wrapper in tools.ts; approval spans by the wrapped requestApproval below.
+  // Both are merged (by ts) into transcript.jsonl at run end and streamed live via emitStep.
+  const spanEvents: RunTranscriptEvent[] = [];
+  const emitStep = deps.onStep
+    ? (info: StepInfo) => deps.onStep!({ ...info, agent: opts.agent.id, runId })
+    : undefined;
+  // Time approval / ask_human waits as their own `approval` spans — core, not optional: in this
+  // system the human wait frequently dominates wall-clock, and a waterfall that folds it into the
+  // enclosing tool span would lie about where the time went.
+  const wrappedRequestApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
+    const label = approvalLabel(req);
+    spanEvents.push({ ts: new Date().toISOString(), kind: "approval_start", data: { kind: req.kind, label } });
+    emitStep?.({ phase: "approval_start", tool: label, argsPreview: label });
+    try {
+      return await deps.requestApproval(req);
+    } finally {
+      spanEvents.push({ ts: new Date().toISOString(), kind: "approval_end", data: { kind: req.kind, label } });
+      emitStep?.({ phase: "approval_end", tool: label });
+    }
+  };
+
   const ctx: RunContext = {
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
     ingestSource: opts.ingestSource,
     artifacts: [], inputArtifacts: [], outputArtifacts: [], delegatedOut: [],
-    requestApproval: deps.requestApproval,
+    spanEvents, emitStep,
+    requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
     canDelegate: (toId) => canDelegate(opts.agent, toId),
     runChild: async ({ to, goal, context, criteria, inputArtifacts }) => {
@@ -204,7 +245,7 @@ export async function executeRun(
       captureProviderCost: picked?.captureCost, signal: deps.signal,
       goal: p.goal, criteria: p.criteria, output: p.output,
     }),
-    emit: deps.onStep ? (info) => deps.onStep!({ note: info.note, agent: opts.agent.id }) : undefined,
+    emit: emitStep ? (info) => emitStep({ note: info.note }) : undefined,
     // Discovery respects the caller's visibility ACL, consistent with the inline-roster path.
     findAgents: (query, k) =>
       rankAgents(
@@ -318,7 +359,7 @@ export async function executeRun(
 
   const result = await runLoop({
     model, agent: opts.agent, system, messages: opts.messages, tools,
-    onStep: deps.onStep ? (i) => deps.onStep!({ ...i, agent: opts.agent.id }) : undefined,
+    onStep: emitStep,
     pollSteer: deps.pollSteer,
     signal: deps.signal,
     priceUsd,
@@ -346,7 +387,11 @@ export async function executeRun(
     notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };
-  for (const event of result.transcript) appendRunTranscript(deps.ws, runId, event);
+  // Merge the loop's model events with the tool/approval span events (both carry a ts) and flush in
+  // time order, so the waterfall reader reconstructs the true timeline. (Incremental per-event flush
+  // is Plan 04 Phase 5 — deferred; buffering + one ordered write is correct until then.)
+  const merged = [...result.transcript, ...ctx.spanEvents].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  for (const event of merged) appendRunTranscript(deps.ws, runId, event);
   // Verdicts are part of the run's story ("why did it retry?") — record them in the transcript too.
   for (const v of ctx.verifications) appendRunTranscript(deps.ws, runId, { ts: new Date().toISOString(), kind: "verification", data: v });
   writeChildRuns(deps.ws, runId, ctx.childTraces);

@@ -101,33 +101,33 @@ gap at once (see `reference/observability-waterfall.md` §2 for the gap→featur
 - `/trace` with no arg opens the **latest** run.
 
 ### Phase 0 — Span capture gaps (small adds for accurate bars)
-- [ ] Wrap tool `execute()` to emit tool-span **start/end** in `transcript.jsonl` (today only the emit ts exists).
-- [ ] Time approval / `ask_human` waits as `approval` spans — **core, not optional**: approval waits dominate wall-clock in this system; a waterfall without them misattributes the wait to whatever span contains it.
+- [x] Wrap tool `execute()` to emit tool-span **start/end** in `transcript.jsonl` (today only the emit ts exists). *(shared seam in `tools.ts` `instrument()`; events buffered on `ctx.spanEvents` → merged into transcript by ts.)*
+- [x] Time approval / `ask_human` waits as `approval` spans — **core, not optional**: approval waits dominate wall-clock in this system; a waterfall without them misattributes the wait to whatever span contains it. *(wrapped `ctx.requestApproval` in `run.ts`.)*
 
 ### Phase 1 — Span model & derivation (pure, testable)
-- [ ] Define the `Span` type — `kind: run|llm|tool|approval`, `parentId`, `startMs`/`endMs`, `tokens`/`cost`, `status`, `error`, `detail`.
-- [ ] `deriveTrace(rootRunId)`: walk `delegatedOut` recursively (`readTrace`) → run spans; read each run's `transcript.jsonl` → llm/tool spans; link a `delegate_task` tool span to its child run span.
-- [ ] Roll up tokens/cost onto run spans (reuse `aggregate`).
-- [ ] Unit tests over fixture traces + transcripts.
+- [x] Define the `Span` type — `kind: run|llm|tool|approval`, `parentId`, `startMs`/`endMs`, `tokens`/`cost`, `status`, `error`, `detail`. *(`src/core/trace-tree.ts`.)*
+- [x] `deriveTrace(rootRunId)`: walk `delegatedOut` recursively (`readTrace`) → run spans; read each run's `transcript.jsonl` → llm/tool spans; link a `delegate_task` tool span to its child run span. *(child run nested under the delegate tool span via the captured `childRunId`.)*
+- [x] Roll up tokens/cost onto run spans (reuse `aggregate`).
+- [x] Unit tests over fixture traces + transcripts. *(`trace-tree.test.ts` — real engine runs generate the fixtures.)*
 
 ### Phase 2 — Waterfall layout (pure)
-- [ ] Timeline scale: map `[traceStart, traceEnd]` → N columns; **min-width floor** ≥1 cell/bar; adaptive to total duration.
-- [ ] Row render: indent by depth + tree glyphs, status icon, bar, duration, tokens.
-- [ ] Expand/collapse state + visible-rows computation.
-- [ ] Unit tests: tiny spans get the floor, nesting indent, collapse hides subtree.
+- [x] Timeline scale: map `[traceStart, traceEnd]` → N columns; **min-width floor** ≥1 cell/bar; adaptive to total duration. *(`src/core/trace-layout.ts`.)*
+- [x] Row render: indent by depth + tree glyphs, status icon, bar, duration, tokens.
+- [x] Expand/collapse state + visible-rows computation.
+- [x] Unit tests: tiny spans get the floor, nesting indent, collapse hides subtree. *(`trace-layout.test.ts`.)*
 
 ### Phase 3 — Interactive inspector (Ink)
-- [ ] `TraceInspector` component; owns the keyboard via the existing `cardKeyRef` pattern while open.
-- [ ] Keys: `↑↓` move · `→/←` expand/collapse · `⏎` open detail · `q`/esc close.
-- [ ] Selected-span summary line pinned at the bottom.
-- [ ] Detail view per kind: **llm** (assembled prompt from `input.json`, response, tokens, finish reason) · **tool** (args/result/error) · **run** (outcome, rolled-up cost, `notes`, **coaching ledger: policies/KB/skills retrieved·applied·skipped**).
-- [ ] Layer-1 `ink-testing-library` tests: render, nav, drill-in, error span.
+- [x] `TraceInspector` component; owns the keyboard via the existing `cardKeyRef` pattern while open.
+- [x] Keys: `↑↓` move · `→/←` expand/collapse · `⏎` open detail · `q`/esc close.
+- [x] Selected-span summary line pinned at the bottom.
+- [x] Detail view per kind: **llm** (response, tokens, finish reason) · **tool** (args/result/error) · **run** (outcome, rolled-up cost, `notes`, **coaching ledger: policies/KB/skills retrieved·applied·skipped**, verification). *(run `input.json` messages captured on the run detail.)*
+- [x] Layer-1 `ink-testing-library` tests: render, nav, drill-in, error span. *(`App.test.tsx`.)*
 
 ### Phase 4 — Command surface & integration
-- [ ] Upgrade `/trace`: no-arg → latest run; `<id>` → that run. (Replaces today's shallow one-liner.)
-- [ ] Post-run inline hint: *"/trace to inspect."*
-- [ ] `/runs` stays the picker; add duration to its rows.
-- [ ] Update `COMMANDS` + `/help`.
+- [x] Upgrade `/trace`: no-arg → latest run; `<id>` → that run. (Replaces today's shallow one-liner.)
+- [x] Post-run inline hint: *"/trace to inspect."* *(appended to the existing `trace: <id>` lines.)*
+- [x] `/runs` stays the picker; add duration to its rows.
+- [x] Update `COMMANDS` + `/help`.
 
 ### Phase 5 — Tests & docs
 - [ ] Real-binary e2e (tui-test): run a delegation, open `/trace`, assert the tree renders + a drill-in works.
@@ -350,20 +350,20 @@ background tasks stay visible.
 - [x] **Bar position:** top vs bottom. *Decided (2026-07-04): bottom, directly above the input — glanceable where the eyes already are.*
 
 ### Phase 1 — Typed live event stream (engine; shared with Plan 02 Phase 0)
-- [ ] Extend `onStep` to a typed event: `{ agent, runId, phase: model_start|delta|tool_start|tool_end|approval_start|approval_end|final, tool?, argsPreview?, text? }`.
-- [ ] `tool_start`/`tool_end` from the tool `execute()` wrapper (same hook as Plan 02 span timing).
-- [ ] `approval_start`/`approval_end` wrapping `ctx.requestApproval` (same hook as Plan 02 approval spans).
-- [ ] `argsPreview`: one-line, redacted, length-capped arg render — transparency without payload dumping; never log auth material.
+- [x] Extend `onStep` to a typed event: `{ agent, runId, phase: model_start|delta|tool_start|tool_end|approval_start|approval_end|final, tool?, argsPreview?, text? }`. *(`src/core/events.ts`; loop emits model_start/delta/final, tools/approval emit the rest.)*
+- [x] `tool_start`/`tool_end` from the tool `execute()` wrapper (same hook as Plan 02 span timing).
+- [x] `approval_start`/`approval_end` wrapping `ctx.requestApproval` (same hook as Plan 02 approval spans).
+- [x] `argsPreview`: one-line, redacted, length-capped arg render — transparency without payload dumping; never log auth material. *(`src/core/instrument.ts`, unit-tested incl. an auth-leak guard.)*
 
 ### Phase 2 — Status model (pure, testable)
-- [ ] `AgentStatus` reducer: event stream → per-run status (idle/thinking/writing/working/waiting/delegating) + current tool + elapsed-in-state.
-- [ ] Unit tests: event sequences → expected status transitions (incl. nested delegation and approval waits).
+- [x] `AgentStatus` reducer: event stream → per-run status (idle/thinking/writing/working/waiting/delegating) + current tool + elapsed-in-state. *(`src/core/agent-status.ts`.)*
+- [x] Unit tests: event sequences → expected status transitions (incl. nested delegation and approval waits). *(`agent-status.test.ts`.)*
 
 ### Phase 3 — Status bar (Ink)
-- [ ] `StatusBar` component: one compact segment per live agent (glyph · agent · state · tool+argsPreview · elapsed); `waiting` rendered loud.
-- [ ] Graceful collapse: hidden when nothing runs; "+N more" past terminal width.
-- [ ] Absorb the live role of the `↳` breadcrumbs (breadcrumbs remain as scrollback record).
-- [ ] Layer-1 `App.test.tsx`: bar appears on run start, shows tool during execution, shows waiting during an approval card, clears on completion.
+- [x] `StatusBar` component: one compact segment per live agent (glyph · agent · state · tool+argsPreview · elapsed); `waiting` rendered loud. *(`src/ui/StatusBar.tsx`, pinned above the input.)*
+- [x] Graceful collapse: hidden when nothing runs; "+N more" past terminal width.
+- [x] Absorb the live role of the `↳` breadcrumbs (breadcrumbs remain as scrollback record). *(the ↳ line now fires at real `tool_start` time; the bar is the live channel.)*
+- [x] Layer-1 `App.test.tsx`: bar appears on run start, shows tool during execution, shows waiting during an approval card, clears on completion.
 
 ### Phase 4 — Split panes
 - [ ] `SquadPanes` layout: terminal splits into one pane per **live** agent (status line + its live stream: tool lines with argsPreview, streamed/final text), REPL pane keeps focus and full width when the squad is idle.

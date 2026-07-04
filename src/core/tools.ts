@@ -23,6 +23,7 @@ import { getActiveSkills, mkSkillId, writeSkill } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
 import { Skill } from "../schemas/skill";
 import { classifyCommand, runShell } from "./command-guard";
+import { argsPreview, capJson } from "./instrument";
 
 // read_artifact body cap: default returns metadata + summary only; a body read is capped so an
 // uncapped read can't funnel a large payload back into context (the pollution this plan exists to kill).
@@ -459,5 +460,46 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
     for (const [k, v] of Object.entries(mcp.allTools()))
       if (!(k in set)) set[k] = v;
 
-  return set;
+  return instrument(set, ctx);
+}
+
+/** Wrap every tool's `execute()` — the ONE seam Plan 02 (accurate span bars) and Plan 10 (live
+ *  "working: read_url …" status) share. Emits `tool_start`/`tool_end` (with a redacted, capped
+ *  argsPreview) into the run's `spanEvents` (→ transcript.jsonl → waterfall) and a live typed phase
+ *  via `ctx.emitStep`. Rebuilds each tool object (never mutates the shared MCP tool instances). A
+ *  `delegate_task` result's `runId` is captured on `tool_end` so the waterfall can nest the child
+ *  run under its delegating tool span. */
+function instrument(set: ToolSet, ctx: RunContext): ToolSet {
+  let seq = 0;
+  const out: ToolSet = {};
+  for (const [name, t] of Object.entries(set)) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const orig = (t as any).execute;
+    if (typeof orig !== "function") { out[name] = t; continue; }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const execute = async (input: unknown, options: any) => {
+      const callId: string = options?.toolCallId ?? `${name}#${++seq}`;
+      const preview = argsPreview(name, input);
+      ctx.spanEvents?.push({ ts: new Date().toISOString(), kind: "tool_start", data: { tool: name, callId, argsPreview: preview, args: capJson(input) } });
+      ctx.emitStep?.({ phase: "tool_start", tool: name, argsPreview: preview });
+      let result: unknown, err: string | undefined;
+      try {
+        result = await orig(input, options);
+        return result;
+      } catch (e) {
+        err = e instanceof Error ? e.message : String(e);
+        throw e;
+      } finally {
+        const childRunId =
+          result && typeof result === "object" && typeof (result as { runId?: unknown }).runId === "string"
+            ? (result as { runId: string }).runId
+            : undefined;
+        ctx.spanEvents?.push({ ts: new Date().toISOString(), kind: "tool_end", data: { tool: name, callId, ok: !err, error: err, childRunId, result: capJson(result) } });
+        ctx.emitStep?.({ phase: "tool_end", tool: name, ok: !err });
+      }
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    out[name] = { ...(t as any), execute } as any;
+  }
+  return out;
 }
