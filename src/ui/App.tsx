@@ -652,9 +652,14 @@ export function App(props: {
       setBusy(true);
       setActivity(`teaching ${agentId}…`);
       try {
-        // Plan 09: meter the distiller call against the deck ceiling (it's a real model call, but runs
-        // outside a run trace so it's not surfaced in /costs — see coaching/teach.ts + costs.ts).
-        const draft = await draftPolicy(activeModel, agentId, correction, { deckLedger: props.deckLedger, priceUsd });
+        // Plan 07: route the distiller through the Codex-safe streaming shape when signed in with a
+        // ChatGPT subscription (a bare non-streaming call 400s). Plan 09: meter it against the deck
+        // ceiling (real model call, but no run trace ⇒ not surfaced in /costs — see coaching/teach.ts).
+        const draft = await draftPolicy(activeModel, agentId, correction, {
+          codexBackend: authSource.kind === "oauth-openai-codex",
+          deckLedger: props.deckLedger,
+          priceUsd,
+        });
         const decision = await requestApproval({ kind: "propose_coaching", draft });
         if (decision.type === "reject") { say({ kind: "system", text: "  discarded" }); }
         else {
