@@ -48,7 +48,7 @@ export async function runChecker(params: {
   goal: string;
   criteria: string;
   output: string;
-}): Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number }> {
+}): Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string }> {
   const user =
     `GOAL:\n${params.goal}\n\n` +
     `ACCEPTANCE CRITERIA:\n${params.criteria}\n\n` +
@@ -65,9 +65,16 @@ export async function runChecker(params: {
     codexBackend: params.subscription,
     captureProviderCost: params.captureProviderCost,
   });
+  // We read only result.text, never result.error: a checker that NEVER RAN (transport error/timeout ⇒
+  // result.text like "[error]"/"[timed out]") parses to the SAME non-blocking advisory PASS as a
+  // garbled verdict. Deliberate for now — the checker is advisory, never a hard gate — so a broken or
+  // unreachable verifier must not wedge delegation. Louder surfacing of a never-ran verifier is a follow-up.
+  // Cost honesty (mirrors run.ts/loop.ts): a subscription checker has NO measurable USD, so costUsd is
+  // null + costNote:"subscription" — never a fabricated 0 that claims an unmeasured price. Tokens always meter.
   return {
     verdict: parseVerdict(result.text),
     tokens: result.tokens,
-    costUsd: params.subscription ? 0 : result.costUsd,
+    costUsd: params.subscription ? null : result.costUsd,
+    costNote: params.subscription ? "subscription" : undefined,
   };
 }

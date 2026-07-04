@@ -23,7 +23,8 @@ export const VerificationRecord = z.object({
   runId: z.string(),                          // the child run whose output was checked
   retried: z.boolean().default(false),
   tokens: z.number().default(0),              // the checker call's own spend (advisory; not a hard budget)
-  costUsd: z.number().nullable().default(0),
+  costUsd: z.number().nullable().default(0),  // null on a subscription checker (no measurable USD) — never a fabricated 0
+  costNote: z.string().optional(),            // "subscription" when the checker ran on an unpriced subscription model
 });
 export type VerificationRecord = z.infer<typeof VerificationRecord>;
 

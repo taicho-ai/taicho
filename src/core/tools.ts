@@ -110,8 +110,8 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           // real model spend this run caused → fold it into the aggregate (like child-run spend).
           const first = await ctx.checkCriteria({ goal, criteria, output: child.text });
           ctx.verifierSpend.tokens += first.tokens;
-          ctx.verifierSpend.costUsd += first.costUsd;
-          ctx.verifications.push({ criteria, verdict: first.verdict, runId: child.runId, retried: false, tokens: first.tokens, costUsd: first.costUsd });
+          ctx.verifierSpend.costUsd += first.costUsd ?? 0; // null (subscription) folds as 0 in the sum; recorded value stays null
+          ctx.verifications.push({ criteria, verdict: first.verdict, runId: child.runId, retried: false, tokens: first.tokens, costUsd: first.costUsd, costNote: first.costNote });
           let verdict = first.verdict;
 
           if (!verdict.pass) {
@@ -131,8 +131,8 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
             const retry = await spawn(context ? `${context}\n\n${feedback}` : feedback);
             const second = await ctx.checkCriteria({ goal, criteria, output: retry.text });
             ctx.verifierSpend.tokens += second.tokens;
-            ctx.verifierSpend.costUsd += second.costUsd;
-            ctx.verifications.push({ criteria, verdict: second.verdict, runId: retry.runId, retried: true, tokens: second.tokens, costUsd: second.costUsd });
+            ctx.verifierSpend.costUsd += second.costUsd ?? 0; // null (subscription) folds as 0 in the sum; recorded value stays null
+            ctx.verifications.push({ criteria, verdict: second.verdict, runId: retry.runId, retried: true, tokens: second.tokens, costUsd: second.costUsd, costNote: second.costNote });
             child = retry;
             verdict = second.verdict;
             if (verdict.pass) ctx.emit?.({ note: `✓ ${to} passed verification after one retry` });

@@ -90,7 +90,7 @@ export interface RunContext {
   verifications: VerificationRecord[];
   /** The independent delegation checker: child output + criteria → verdict, via the delegating
    *  agent's own resolved model (same plumbing the loop uses). */
-  checkCriteria: (p: { goal: string; criteria: string; output: string }) => Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number }>;
+  checkCriteria: (p: { goal: string; criteria: string; output: string }) => Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string }>;
   /** Surface a one-line breadcrumb to the captain (e.g. a failed verification), routed via onStep. */
   emit?: (info: { note: string }) => void;
 }

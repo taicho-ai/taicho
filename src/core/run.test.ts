@@ -650,7 +650,8 @@ test("subscription checker is cost-honest: costUsd is 0 (never fabricated) even 
     goal: "g", criteria: "must mention Y", output: "mentions Y",
   });
   expect(r.verdict.pass).toBe(true);
-  expect(r.costUsd).toBe(0);            // subscription: real USD is never invented, even though a pricer exists
+  expect(r.costUsd).toBeNull();          // subscription: NO measurable USD — null, never a fabricated 0 (mirrors loop.ts)
+  expect(r.costNote).toBe("subscription");
   expect(r.tokens).toBeGreaterThan(0);  // tokens ARE metered — this is what folds into the aggregate honestly
 });
 
@@ -665,5 +666,6 @@ test("non-subscription checker prices its real spend: runChecker returns a USD c
   });
   expect(r.verdict.pass).toBe(true);
   expect(r.costUsd).toBeGreaterThan(0); // a real cost — folding it is exactly what closes the cost-honesty gap
+  expect(r.costNote).toBeUndefined();   // priced run ⇒ no subscription note
   expect(r.tokens).toBeGreaterThan(0);
 });
