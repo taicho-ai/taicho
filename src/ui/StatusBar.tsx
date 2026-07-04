@@ -29,15 +29,27 @@ export function StatusBar({ statuses, width }: { statuses: AgentStatus[]; width:
   if (!statuses.length) return null;
 
   const now = Date.now();
-  const segs = statuses.map((s) => ({ s, text: segmentText(s, now, Math.min(64, width - 4)) }));
+  // Worst-case " +N more" tail width. Reserve it for the FIRST segment too (else a narrow terminal
+  // <~72 cols or ≥10 hidden agents pushes the tail past the single line and soft-wraps). Cap each
+  // segment to leave tail room so even one segment + tail fits.
+  const tailLen = ` +${statuses.length} more`.length;
+  const segCap = Math.min(64, Math.max(8, width - tailLen));
+  const segs = statuses.map((s) => ({ s, text: segmentText(s, now, segCap) }));
   const SEP = 3; // " · "
-  const shown: typeof segs = [];
-  let used = 0;
-  for (const seg of segs) {
-    const add = seg.text.length + (shown.length ? SEP : 0);
-    if (shown.length && used + add > width - 8) break; // reserve room for the "+N more" tail
-    shown.push(seg);
-    used += add;
+  // Fast path: if everything fits on the line with NO tail, show all (no wasted tail reservation).
+  const totalAll = segs.reduce((sum, seg, i) => sum + seg.text.length + (i ? SEP : 0), 0);
+  let shown: typeof segs;
+  if (totalAll <= width) {
+    shown = segs;
+  } else {
+    shown = [];
+    let used = 0;
+    for (const seg of segs) {
+      const add = seg.text.length + (shown.length ? SEP : 0);
+      if (shown.length && used + add > width - tailLen) break; // reserve room for the "+N more" tail
+      shown.push(seg);
+      used += add;
+    }
   }
   const hidden = segs.length - shown.length;
 
