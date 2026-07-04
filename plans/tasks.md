@@ -405,19 +405,19 @@ the tracking view; the runbook is the build view.
 - [x] **Determinism:** e2e-model modes per scenario; real-model evidence stays manual (Layer 3 rules). *Decided (2026-07-04).*
 
 ### Phase 1 — Tooling & harness
-- [ ] `brew install vhs` (pulls ttyd; ffmpeg already present); pin the version note in TESTING.md.
-- [ ] `scripts/e2e-evidence.ts <scenario>`: build binary → temp workspace (NEVER the repo root — live dev workspace) → run `vhs e2e/tapes/<scenario>.tape` → run the scenario's file assertions → write `evidence/<scenario>/manifest.json` (video, screenshots, assertion results w/ expected·actual, workspace pointer, git SHA, timestamp); non-zero exit on any failure.
-- [ ] Gitignore `evidence/` output; keep tapes + assertion specs in-repo.
+- [x] `brew install vhs` (pulls ttyd; ffmpeg already present); pin the version note in TESTING.md. *vhs 0.11.0 / ttyd 1.7.7 installed + pinned in TESTING.md & CLI_TESTING.md.*
+- [x] `scripts/e2e-evidence.ts <scenario>`: build binary → temp workspace (NEVER the repo root — live dev workspace) → run `vhs e2e/tapes/<scenario>.tape` → run the scenario's file assertions → write `evidence/<scenario>/manifest.json` (video, screenshots, assertion results w/ expected·actual, workspace pointer, git SHA, timestamp); non-zero exit on any failure. *Wrapper also warms the freshly-built binary (macOS cold-exec flake fix) and copies vhs's relative outputs into evidenceDir.*
+- [x] Gitignore `evidence/` output; keep tapes + assertion specs in-repo. *`evidence/` already in .gitignore; scenario spec (tape source + assertions) lives at `e2e/scenarios/agent-flow.ts`.*
 
 ### Phase 2 — First scenario: agent-flow
-- [ ] `e2e/tapes/agent-flow.tape`: create agent → `Wait+Screen /New agent/` → approve → delegate → `Wait+Screen /Root used proof-agent/`, with screenshots at the approval card and final state.
-- [ ] Port the assertion set from `e2e/agent-flow.tui.ts` / CLI_TESTING.md (trace outcome, `delegatedOut`, child `final.md`, ledger, `child-runs.json`) into the wrapper.
-- [ ] Delete `e2e/record-agent-flow.expect` + the rendered-MP4 flow once the tape passes.
+- [x] `e2e/tapes/agent-flow.tape`: create agent → `Wait+Screen /New agent/` → approve → delegate → `Wait+Screen /Root used proof-agent/`, with screenshots at the approval card and final state. *Tape is returned by the scenario's `tape()` and written into the temp ws at run time (per runbook §3c); screenshots captured at the approval card and final delegation.*
+- [x] Port the assertion set from `e2e/agent-flow.tui.ts` / CLI_TESTING.md (trace outcome, `delegatedOut`, child `final.md`, ledger, `child-runs.json`) into the wrapper. *7 assertions; run ids discovered dynamically (date-stamped).*
+- [x] Delete `e2e/record-agent-flow.expect` + the rendered-MP4 flow once the tape passes. *Deleted the expect recorder; CLI_TESTING.md rewritten to drop the rendered-MP4 flow. `e2e/agent-flow.tui.ts` (Layer 2) kept.*
 
 ### Phase 3 — Scenario roster
 - [ ] `conversation-audit` tape (port the interrupted-turn scenario from `e2e/conversation-audit.tui.ts`).
 - [ ] Convention: every headline capability (Plans 01, 04, 06, 10) adds its proof scenario (e2e-model mode + tape + assertions) in its own test phase.
 
 ### Phase 4 — Docs & CI
-- [ ] Rewrite `CLI_TESTING.md` around the new harness; add Layer 4 to `TESTING.md`'s table; update `CLAUDE.md`.
+- [x] Rewrite `CLI_TESTING.md` around the new harness; add Layer 4 to `TESTING.md`'s table; update `CLAUDE.md`. *CLI_TESTING.md rewritten (assertion contract kept, manifest = deliverable, gotchas documented); TESTING.md now four layers + a Layer 4 section; CLAUDE.md testing line updated.*
 - [ ] (later) `charmbracelet/vhs-action` in CI, evidence folder as build artifact — only once tapes prove stable locally.

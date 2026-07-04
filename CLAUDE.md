@@ -80,10 +80,12 @@ resolution).
 
 - Bun + TypeScript ESM, React 19 / Ink 7 for the TUI, zod for all schema validation.
 - Tests are colocated `*.test.ts` using `bun:test`; model calls are mocked with
-  `MockLanguageModelV3` from `ai/test` — **no network in tests**. See **`TESTING.md`** for the three
+  `MockLanguageModelV3` from `ai/test` — **no network in tests**. See **`TESTING.md`** for the four
   testing layers (in-process Ink via ink-testing-library, real-binary via `@microsoft/tui-test`,
-  real-model verification scripts) and the non-obvious gotchas (separate keystroke writes, ANSI
-  escapes, the `bun test` vs `tui-test` file split).
+  real-model verification scripts, and **Layer 4 VHS evidence** — `bun scripts/e2e-evidence.ts
+  <scenario>` records a true session video + workspace-file assertions, see `CLI_TESTING.md`) and
+  the non-obvious gotchas (separate keystroke writes, ANSI escapes, the `bun test` vs `tui-test`
+  file split).
 - Keep the resolver return shape (`{ model, modelId, subscription?, captureCost? }`) in sync across
   its mirrors: `model.ts` (`ResolvedModel`), `run.ts` (`RunDeps`), `index.tsx` (`BuiltAuth`),
   `ui/App.tsx` (`ResolveModelFn`).

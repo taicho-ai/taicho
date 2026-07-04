@@ -1,12 +1,13 @@
 # Testing taicho
 
-taicho is tested in **three layers**, fastest/most-isolated first. Most work only needs Layer 1.
+taicho is tested in **four layers**, fastest/most-isolated first. Most work only needs Layer 1.
 
 | Layer | What it covers | Tool | Run with | Speed |
 |-------|----------------|------|----------|-------|
 | **1. Unit + in-process E2E** | pure logic, the agent loop, and the **real `<App>` REPL** with a mocked model | `bun:test` + `ink-testing-library` | `bun test` | ~1.5s, deterministic |
 | **2. Real-binary E2E** | the **compiled `dist/taicho`** booting and responding in a real terminal | `@microsoft/tui-test` (xterm pty) | `bun run test:e2e` | ~20s |
 | **3. Real-model verification** | actual multi-agent behavior (delegation, memory, …) with the **live LLM** | plain `bun` scripts | `bun run <script>.ts` | seconds, costs tokens |
+| **4. VHS evidence** | **real user flows through the real binary, with watchable video proof** — records a true session video + screenshots and asserts on the **workspace files** | VHS (`ttyd`+`ffmpeg`) + wrapper | `bun scripts/e2e-evidence.ts <scenario>` | ~15–30s, needs `vhs` |
 
 ```bash
 bun test                       # Layer 1 — the whole src suite
@@ -14,6 +15,7 @@ bun test src/ui/App.test.tsx   # a single file
 bun run typecheck              # bunx tsc --noEmit
 bun run build                  # compile dist/taicho
 bun run test:e2e               # Layer 2 — builds, then runs tui-test
+bun scripts/e2e-evidence.ts agent-flow   # Layer 4 — records real-binary video proof (needs vhs)
 ```
 There is no `npm test` script — use `bun test` (Bun's built-in runner discovers `src/**/*.test.ts`).
 
@@ -91,6 +93,29 @@ console.log(res.trace.delegatedOut, listTraces(ws).map(t => `${t.id} ${t.outcome
 Auto-approving `requestApproval` lets it run unattended. Assert on the trace: `delegatedOut`, `toolCalls`, `artifacts`, `outcome`. These run on the user's **subscription/API** (real tokens), so keep them small and don't commit them to CI. Park them under `scripts/` or a scratch dir.
 
 ---
+
+## Layer 4 — VHS evidence (recorded real-binary proof)
+
+When a flow needs **watchable, auditable proof** (not just "tests passed"), Layer 4 drives the
+compiled `dist/taicho` through a real user flow in a headless terminal and hands back a folder a
+human can watch: a **true session video** + screenshots + machine-checked assertions on the files
+the binary produced.
+
+```bash
+bun scripts/e2e-evidence.ts agent-flow    # → evidence/agent-flow/{session.mp4, *.png, manifest.json}
+```
+
+A **scenario** (`e2e/scenarios/<name>.ts`) = a VHS tape (drives the flow, waits gated on on-screen
+text) + file assertions (decide pass/fail). The wrapper (`scripts/e2e-evidence.ts`) builds + warms
+the binary, records in a **fresh temp workspace** (never the repo root), and writes
+`evidence/<scenario>/manifest.json` — the deliverable. **Video is evidence, not assertion**:
+pass/fail comes only from the workspace-file assertions. Deterministic via
+`TAICHO_E2E_MODEL=agent-flow` (`src/core/e2e-model.ts`), same keystone as Layer 2.
+
+Needs `vhs` on PATH (`brew install vhs`) — verified on this machine with **vhs 0.11.0 / ttyd
+1.7.7** (ffmpeg already present). Full guide, the assertion contract, and the verified
+gotchas (relative vhs `Output`/`Screenshot` paths, the `ttyd` localhost port, binary warm-up):
+[CLI_TESTING.md](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/CLI_TESTING.md).
 
 ## Adding a dependency (testing-adjacent gotcha)
 

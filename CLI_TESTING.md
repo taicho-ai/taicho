@@ -1,18 +1,24 @@
-# CLI Testing
+# CLI Testing — Layer 4 (evidence-grade E2E, video proof)
 
-This document tracks how we test Taicho through the compiled CLI binary. The goal is to prove real user workflows through `dist/taicho`, not just unit tests, component tests, or synthetic screenshots.
+This document describes how we prove real user workflows through the compiled `dist/taicho`
+binary and hand back **watchable, re-runnable evidence** — a true terminal-session video plus
+machine-checked assertions on the files the binary produced. Not "tests passed, trust me."
 
-## What This Layer Must Prove
+This is **Layer 4** in [TESTING.md](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/TESTING.md).
+Layer 2 (`@microsoft/tui-test`, `bun run test:e2e`) remains the thin, fast CI smoke; Layer 4 is
+the deep, recorded proof.
 
-A useful CLI test must exercise the same path a user exercises:
+## What this layer must prove (the assertion contract)
+
+A useful CLI test exercises the same path a user does:
 
 1. Build the executable with `bun run build`.
-2. Start the compiled binary, `dist/taicho`, inside a real PTY.
+2. Start the compiled binary, `dist/taicho`, in a real terminal.
 3. Type prompts into the Taicho terminal UI.
 4. Approve interactive tool cards when needed.
-5. Verify the files and run records that the binary produced.
+5. Verify the files and run records the binary produced.
 
-For the agent workflow, the minimum acceptable test is:
+For the agent workflow, the minimum acceptable proof is:
 
 1. Prompt Taicho to create an agent.
 2. Approve the proposed agent.
@@ -20,114 +26,88 @@ For the agent workflow, the minimum acceptable test is:
 4. Prompt Taicho again to use that agent.
 5. Verify the root run delegated to the child agent.
 6. Verify the child agent completed and its output was rolled up into the root answer.
-7. Verify the conversation ledger preserved the user prompts and assistant replies.
+7. Verify the conversation ledger preserved the user prompts.
 
 Anything less is only a smoke test.
 
-## Current Real-Binary E2E
-
-The current focused test is:
+## Run it
 
 ```bash
-bun run build
-bunx @microsoft/tui-test --trace e2e/agent-flow.tui.ts
+bun scripts/e2e-evidence.ts agent-flow
 ```
 
-The test file is [e2e/agent-flow.tui.ts](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/e2e/agent-flow.tui.ts). It resolves the binary as:
+Exit 0 = pass. On success it writes `evidence/agent-flow/` (gitignored):
 
-```ts
-const bin = join(repo, "dist", "taicho");
+```
+evidence/agent-flow/
+  session.mp4        # true headless-terminal recording of the whole flow
+  approval-card.png  # screenshot: the "New agent — approve?" card
+  final.png          # screenshot: the completed delegation
+  agent-flow.tape    # the exact VHS tape that drove this run (reproducibility)
+  manifest.json      # THE deliverable — pass/fail, assertions w/ expected·actual, ws, git SHA
 ```
 
-It then starts that binary through `@microsoft/tui-test` in a real terminal PTY and drives this flow:
+`evidence/agent-flow/manifest.json` is the folder's point: it ties the proof together and its
+`assertions[]` (each with `expected`/`actual`) are what decide pass/fail.
 
-```text
-create a proof worker agent
-approve with y
-use the proof worker to prove delegation works
-```
+**Requires `vhs` on PATH** (a system binary: `brew install vhs`, which also pulls `ttyd`; `ffmpeg`
+is already present). Installed & verified on this machine: vhs 0.11.0, ttyd 1.7.7.
 
-The test uses `TAICHO_E2E_MODEL=agent-flow`. That is a deterministic model hook used only for repeatable CLI testing. It avoids network and LLM variability while still driving the compiled binary, real terminal UI, real tool approval, real run execution, and real persistence.
+## How it works
 
-## Assertions
+A **scenario** = tape + assertions, in one file under `e2e/scenarios/<name>.ts`
+(see [`e2e/scenarios/agent-flow.ts`](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/e2e/scenarios/agent-flow.ts)):
 
-`e2e/agent-flow.tui.ts` verifies:
+- `tape({ binary, evidenceDir })` returns the full VHS `.tape` source that drives the flow. Waits
+  are gated on **on-screen text** (`Wait+Screen@Ns /regex/`) — the same wait-for-signal discipline
+  as the Layer-1/2 tests, which kills timing flakiness. Two submits gate `Enter` on the typed
+  prompt being visible (avoids the Ink `TextInput` submit race).
+- `assertions(ws)` returns `AssertionResult[]` run against the temp workspace. Each catches its own
+  error (a missing file ⇒ `pass:false`), so one failure never hides the rest. Run ids are
+  **discovered dynamically** — they are date-stamped (`<date>-run<n>`), never hardcode them.
 
-- `agents/proof-agent/agent.md` exists.
-- `runs/root/2026-07-03-run2.json` has `outcome: "completed"`.
-- the second root run has `delegatedOut` pointing at `proof-agent/...`.
-- the child `proof-agent` run completed.
-- root conversation ledger contains the second user prompt.
-- root run companion evidence contains `child-runs.json`.
-- child `final.md` contains `proof-agent completed delegated work`.
+The wrapper [`scripts/e2e-evidence.ts`](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/scripts/e2e-evidence.ts):
+build binary → **warm the binary** → **fresh temp workspace** (`mkdtemp` — NEVER the repo root,
+which is the live dev workspace) → run `vhs` with `cwd = workspace` → copy the recorded artifacts
+into `evidence/<scenario>/` → run the scenario's assertions → write `manifest.json` → exit non-zero
+on any failure. Determinism comes from `TAICHO_E2E_MODEL=agent-flow`
+([`src/core/e2e-model.ts`](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/src/core/e2e-model.ts)):
+the compiled binary uses a scripted model, so the flow runs with no network, no tokens, repeatable.
 
-This proves the binary can create an agent and later use that created agent.
+**Video is evidence, not assertion.** A video can show a happy path over a silently-wrong
+workspace, so pass/fail comes only from the file assertions — the video shows *what happened*.
 
-## Recording Evidence
+## Gotchas (verified on this machine — honor these)
 
-The current recorder is:
+1. **VHS 0.11.0 cannot parse absolute paths in `Output`/`Screenshot`** (a leading `/` breaks its
+   lexer). So the tape uses **relative** filenames (`Output session.mp4`, `Screenshot final.png`);
+   vhs runs with `cwd = temp workspace` so they land next to the binary's data, and the wrapper
+   **copies them into `evidence/<scenario>/`** afterwards. (An absolute path is fine *inside* a
+   `Type` string — only `Output`/`Screenshot` arguments must be relative.)
+2. **vhs spawns a local `ttyd` server** (needs a localhost port). A sandboxed shell that blocks
+   localhost listening fails with `could not open ttyd: … ERR_CONNECTION_REFUSED`. Run the harness
+   in a shell that can bind a local port. (typecheck / `bun test` / `bun run build` don't need
+   this — only the vhs recording step does.) If vhs fails it can orphan its `ttyd`; a pile of
+   orphans causes contention that flakes later runs — clear them with `pkill -f 'ttyd --port'` and
+   re-run. On success vhs cleans up its own ttyd.
+3. **The temp workspace gets a `taicho.yaml`** with `mcp.enabled: false` (MCP off or boot may hang)
+   and `auth.chatgpt_signin: false`. With `TAICHO_E2E_MODEL` set, the binary bypasses `resolveAuth`,
+   so no API key is needed. `TAICHO_E2E_MODEL` is passed via the wrapper env **and** typed on the
+   binary's command line in the tape (belt-and-braces).
+4. **The wrapper warms the freshly-built binary** before recording. `bun run build` rewrites a
+   ~66MB compiled binary; macOS runs first-exec code-sign verification + builds the dyld closure on
+   the FIRST exec of that new file — a cold, sluggish exec during which the booting app drops the
+   submit keystroke (empirically ~5/6 flake without warm-up; 0/10 with). Any completed exec primes
+   the OS's cached validation, so vhs's exec is then fast and the flow is reliable.
 
-```bash
-expect e2e/record-agent-flow.expect "$PWD" "$WORKSPACE" "$PWD/artifacts/taicho-binary-agent-flow.raw.log"
-```
+## Adding a scenario
 
-It spawns:
+Each new headline flow that needs proof adds: one `e2e-model.ts` mode (a scripted `doGenerate`
+sequence), one `e2e/scenarios/<name>.ts` (tape + assertions), then `bun scripts/e2e-evidence.ts
+<name>`. Real-model evidence runs are possible (same tape, drop `TAICHO_E2E_MODEL`) but stay
+manual/off-CI like Layer 3 — they cost tokens and vary.
 
-```text
-dist/taicho
-```
+## CI (later)
 
-and records the real ANSI terminal output to:
-
-```text
-artifacts/taicho-binary-agent-flow.raw.log
-```
-
-The current generated MP4 is:
-
-```text
-artifacts/taicho-binary-agent-flow.mp4
-```
-
-Important limitation: this MP4 is not yet a clean live screen recording of the terminal. It is a watchable evidence video rendered from the binary-run terminal log plus the files produced by that same run. The raw log is real; the video is a presentation of that log and evidence.
-
-## Current Evidence Artifacts
-
-After a recording run, check:
-
-```bash
-cat artifacts/taicho-binary-video-workspace.txt
-```
-
-Then inspect the workspace from that file:
-
-```bash
-ws=$(cat artifacts/taicho-binary-video-workspace.txt)
-jq '{outcome, delegatedOut}' "$ws/runs/root/2026-07-03-run2.json"
-cat "$ws/runs/root/2026-07-03-run2/final.md"
-cat "$ws/runs/proof-agent/2026-07-03-run1/final.md"
-tail -n 4 "$ws/conversations/root/ledger.jsonl"
-```
-
-Expected evidence:
-
-```text
-outcome=completed
-delegatedOut=proof-agent/2026-07-03-run1
-Root used proof-agent: proof-agent completed delegated work
-proof-agent completed delegated work
-```
-
-## Known Problems
-
-- `@microsoft/tui-test` is early and can be timing-sensitive. The agent-flow test waits for typed text to render before sending Enter to avoid a flaky submit race.
-- Raw `expect` driving can be unreliable with Ink `TextInput` if Enter or approval keys are sent before the UI is ready.
-- The existing video artifact is acceptable as a starting evidence artifact, but it is not the final desired form. The desired artifact is a clean live recording of the binary terminal session.
-
-## Next Improvements
-
-1. Add a single script, for example `scripts/record-cli-agent-flow.ts`, that builds the binary, creates the temp workspace, runs the PTY driver, validates produced files, and emits the raw log plus video.
-2. Replace the rendered evidence MP4 with a true terminal-session recording if we can get stable capture from the PTY.
-3. Add a CI-safe command for the deterministic binary test.
-4. Keep real-model CLI tests separate because they require credentials, network, and token spend.
-
+`charmbracelet/vhs-action` exists; the `evidence/<scenario>/` folder uploads as a build artifact.
+Local-first for now — wire it into CI once the tapes prove stable.
