@@ -2,9 +2,7 @@
  *  ledger.jsonl is append-only audit history; context.json says which turns are safe to replay. */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ModelMessage } from "ai";
 import { paths } from "./files";
-import type { RunTrace } from "../schemas/trace";
 
 export type LedgerStatus = "submitted" | "completed" | "failed" | "blocked" | "interrupted";
 
@@ -84,12 +82,4 @@ export function recordContextDecision(
   if (decision.include) ctx.includedTurns.push(entry);
   else ctx.excludedTurns.push(entry);
   writeFileSync(contextFile(ws, agent), JSON.stringify(ctx, null, 2));
-}
-
-export function statusFromOutcome(outcome: RunTrace["outcome"]): LedgerStatus {
-  return outcome;
-}
-
-export function modelMessageContent(msg: ModelMessage): unknown {
-  return typeof msg.content === "string" ? msg.content : msg.content;
 }

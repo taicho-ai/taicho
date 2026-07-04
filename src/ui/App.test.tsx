@@ -20,6 +20,7 @@ import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "../sto
 import { listTraces, writeTrace } from "../store/trace";
 import { RunTrace } from "../schemas/trace";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
+import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { loadContext, loadLedger } from "../store/conversation";
 import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
 import { readMcpStore } from "../store/mcp-store";
@@ -895,4 +896,73 @@ test("concurrent approval requests queue instead of clobbering: both are answere
   await waitFor(lastFrame, "background task", 6000);    // the background run settled → its promise resolved too
   const bg = listTaskIndex(db, { activeOrBackground: true }).find((r) => r.agent === "bgworker");
   expect(bg?.status).toBe("completed");                // both runs finished cleanly
+});
+
+// ── Plan 01 Phase 4 — the /artifacts UI (view / annotate / approve) ──────────
+
+test("/artifacts list shows a stored artifact with its handle", async () => {
+  const { ws, props } = await setup();
+  saveArtifact(ws, { id: "dossier", title: "Foo dossier", type: "dossier", summary: "on foo", body: "BODY", producer: "root", runId: "root/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts list", ENTER);
+  await waitFor(lastFrame, "dossier@v1");
+  expect(lastFrame()).toContain("Foo dossier");
+});
+
+test("/artifacts on an empty store reports (no artifacts)", async () => {
+  const { props } = await setup();
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts", ENTER);
+  await waitFor(lastFrame, "no artifacts");
+});
+
+test("/artifacts annotate attaches human feedback (asserted against the store)", async () => {
+  const { ws, props } = await setup();
+  saveArtifact(ws, { id: "dossier", title: "Dossier", body: "BODY", producer: "root", runId: "root/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts annotate dossier tighten the intro", ENTER);
+  await waitFor(lastFrame, "annotated dossier@v1");
+  const open = listAnnotations(ws, "dossier", { status: "open" });
+  expect(open.length).toBe(1);
+  expect(open[0].author).toBe("human");
+  expect(open[0].body).toBe("tighten the intro");
+  expect(open[0].kind).toBe("feedback");
+});
+
+test("/artifacts approve records a captain sign-off", async () => {
+  const { ws, props } = await setup();
+  saveArtifact(ws, { id: "dossier", title: "Dossier", body: "BODY", producer: "root", runId: "root/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts approve dossier@v1", ENTER);
+  await waitFor(lastFrame, "approved dossier@v1");
+  expect(listAnnotations(ws, "dossier").map((a) => a.kind)).toEqual(["approval"]);
+});
+
+test("/artifacts show surfaces provenance + the open feedback on an artifact", async () => {
+  const { ws, props } = await setup();
+  saveArtifact(ws, { id: "dossier", title: "Dossier", type: "dossier", summary: "sum", body: "BODY", producer: "root", runId: "root/1" });
+  annotateArtifact(ws, { target: "dossier@v1", author: "human", body: "add dates" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts show dossier", ENTER);
+  await waitFor(lastFrame, "add dates");
+  const frame = lastFrame() ?? "";
+  expect(frame).toContain("producer=root");
+  expect(frame).toContain("versions=[1]");
+});
+
+test("/artifacts annotate on a missing artifact reports the error (no dangling feedback)", async () => {
+  const { props } = await setup();
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts annotate ghost do something", ENTER);
+  await waitFor(lastFrame, "no artifact");
+});
+
+test("/artifacts gc archives old unreferenced versions and reports what it collected", async () => {
+  const { ws, props } = await setup();
+  for (let i = 1; i <= 5; i++) saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: "root/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts gc", ENTER);
+  await waitFor(lastFrame, "archived 2 version(s)");
+  expect(readArtifact(ws, "doc@v1")).toBeNull();        // v1/v2 archived out of the live store
+  expect(readArtifact(ws, "doc")!.version).toBe(5);     // latest untouched
 });

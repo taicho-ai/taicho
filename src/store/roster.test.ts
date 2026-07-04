@@ -59,7 +59,7 @@ test("createAgent writes a file, a registry row, and is discoverable immediately
   expect(loadIndex(db).some((r) => r.id === "writer")).toBe(true);
   const loaded = await loadAgent(ws, "writer");
   expect(loaded.identity).toBe("You write.");
-  expect(loaded.tools).toEqual(["write_artifact", "save_artifact", "read_artifact", "list_artifacts"]); // default worker grant (Plan 01)
+  expect(loaded.tools).toEqual(["write_artifact", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations"]); // default worker grant (Plan 01: produce + hand off + consume + annotate/revise)
 });
 
 test("createAgent rejects a duplicate id", async () => {

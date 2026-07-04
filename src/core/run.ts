@@ -11,6 +11,7 @@ import { canDelegate, visibleToRows } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
 import { readArtifact } from "../store/artifacts";
+import { listAnnotations } from "../store/annotations";
 import { artifactHandle } from "../schemas/artifact";
 import { searchKnowledge } from "../knowledge/retrieval";
 import { getActiveSkills } from "../store/skills";
@@ -407,16 +408,30 @@ export async function executeRun(
 
   // Input artifacts handed in by a delegating parent: render HANDLES + summaries, never inline the
   // body — the child pulls what it needs with read_artifact (size-capped). This is hand-off by reference.
+  // Plan 01 Ph4: any OPEN annotation on the handed artifact rides along here — that is the annotation →
+  // revision path. An input artifact carrying open feedback IS a revision brief: the child addresses the
+  // points and saves a new version linked back. A verification verdict (Plan 06) surfaces identically.
   let inputArtifactsBlock: string | undefined;
+  let sawOpenFeedback = false;
   if (opts.inputArtifacts?.length) {
     const lines = opts.inputArtifacts.map((h) => {
       const a = readArtifact(deps.ws, h);
-      return a
-        ? `- [${artifactHandle(a)}] ${a.title} (${a.type})${a.summary ? " — " + a.summary : ""}`
-        : `- [${h}] (unavailable)`;
+      if (!a) return `- [${h}] (unavailable)`;
+      const handle = artifactHandle(a);
+      const open = listAnnotations(deps.ws, handle, { status: "open" });
+      if (open.length) sawOpenFeedback = true;
+      const feedback = open.map((an) =>
+        `    ↳ ${an.kind === "verification" ? "verdict" : "feedback"} from ${an.author}: ${an.body}` +
+        (an.verdict ? ` [${an.verdict.pass ? "PASS" : "FAIL: " + an.verdict.reasons.join("; ")}]` : ""));
+      return [`- [${handle}] ${a.title} (${a.type})${a.summary ? " — " + a.summary : ""}`, ...feedback].join("\n");
     });
     inputArtifactsBlock = "## Input artifacts (handed to you by reference)\n" +
-      "Read one with read_artifact(id) — do NOT expect its body inlined here.\n" + lines.join("\n");
+      "Read one with read_artifact(id) — do NOT expect its body inlined here." +
+      (sawOpenFeedback
+        ? " An artifact with open feedback below is a REVISION: address EVERY point (list_annotations for detail), " +
+          "then save_artifact with the SAME id (a new version) and parents:[the handle].\n"
+        : "\n") +
+      lines.join("\n");
   }
 
   const { system } = assemble(opts.agent, {

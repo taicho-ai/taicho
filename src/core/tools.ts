@@ -11,6 +11,7 @@ import type { McpManager } from "./mcp/manager";
 import { paths } from "../store/files";
 import { readTaskState } from "../store/task-state";
 import { saveArtifact, readArtifact, readArtifactBody, listArtifacts } from "../store/artifacts";
+import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { artifactHandle } from "../schemas/artifact";
 import { mergeDraft } from "./draft";
 import { scrapeUrl } from "./firecrawl";
@@ -129,6 +130,40 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         artifacts: listArtifacts(ctx.ws, { producer, type, role, q }).slice(0, k).map((a) => ({
           handle: artifactHandle(a), id: a.id, version: a.version, title: a.title,
           type: a.type, role: a.role, producer: a.producer, summary: a.summary ?? null,
+        })),
+      }),
+    });
+
+  if (agent.tools.includes("annotate_artifact"))
+    set.annotate_artifact = tool({
+      description: "Leave feedback ON an artifact version (by handle 'id' for the latest, or 'id@vN'). An OPEN annotation becomes the input to a REVISION run: when the artifact is later handed to an agent by reference, your feedback rides along, that agent reads the artifact, addresses your points, and saves a NEW version. Use this to request changes, flag a problem, or sign off (kind:'approval'). Your identity is recorded as the author. Pin your feedback to the exact version you reviewed.",
+      inputSchema: z.object({
+        id: z.string().describe("artifact handle: 'id' (latest) or 'id@vN'"),
+        body: z.string().describe("the feedback — what to fix / what's wrong / what to change (or, for an approval, why it's accepted)"),
+        kind: z.enum(["feedback", "approval"]).default("feedback").describe("feedback = a change request that drives a revision; approval = sign-off"),
+      }),
+      execute: async ({ id, body, kind }) => {
+        try {
+          const a = annotateArtifact(ctx.ws, { target: id, author: ctx.agentId, body, kind });
+          ctx.notes.push(`annotated ${a.target} (${a.id})`);
+          return { annotationId: a.id, target: a.target, kind: a.kind, status: a.status };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
+  if (agent.tools.includes("list_annotations"))
+    set.list_annotations = tool({
+      description: "List the feedback/annotations on an artifact (by handle 'id' for all versions, or 'id@vN' for one). Call this BEFORE you revise an artifact so you address every open point. Returns each annotation's author, body, kind, verdict (if it's a verification), and status (open/addressed/dismissed).",
+      inputSchema: z.object({
+        id: z.string().describe("artifact handle: 'id' (all versions) or 'id@vN' (that version)"),
+        status: z.enum(["open", "addressed", "dismissed"]).optional().describe("filter by status (default: all)"),
+      }),
+      execute: async ({ id, status }) => ({
+        annotations: listAnnotations(ctx.ws, id, { status }).map((a) => ({
+          annotationId: a.id, target: a.target, author: a.author, kind: a.kind,
+          body: a.body, verdict: a.verdict ?? null, status: a.status, resolvedBy: a.resolvedBy ?? null,
         })),
       }),
     });
@@ -600,6 +635,9 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   for (const name of [
     "read_url", "read_artifact", "recall", "search_knowledge", "read_source",
     "delegate_task", "await_task", "dispatch_task", "check_task",
+    // list_annotations surfaces feedback bodies — an agent may have ingested a page then annotated, so
+    // annotation text is attacker-influenceable content entering this run (same reasoning as read_artifact).
+    "list_annotations",
   ]) untrustedSources.add(name);
 
   return instrument(set, ctx, untrustedSources);

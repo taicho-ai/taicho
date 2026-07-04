@@ -199,3 +199,88 @@ export function rebuildArtifactIndex(ws: string): Artifact[] {
   writeManifest(ws, latest);
   return latest;
 }
+
+// ── retention & GC (Plan 01 Phase 4b) ────────────────────────────────────────
+// Immutable-per-version + heavy media = unbounded disk. Policy (Phase 0): keep-latest-N per id +
+// archive UNREFERENCED old versions; NEVER break an id referenced by a trace/policy/task. "Archive"
+// relocates a version's files into artifacts/<id>/_archive/ — out of the live scan (artifactVersions
+// only reads the id dir's top level), so the addressable store shrinks WITHOUT losing history and no
+// referenced version ever disappears from under a trace.
+
+// underscore prefix ⇒ can never collide with a valid artifact id dir; also where a version's files go.
+const ARCHIVE = "_archive";
+
+export interface GcOptions {
+  keepLatest?: number;    // per id: always keep the N newest versions (default 3)
+  referenced?: string[];  // extra protected handles the CALLER knows are live (trace/policy/task refs)
+}
+export interface GcReport {
+  archived: string[];     // version handles ("id@vN") relocated into _archive
+  kept: number;           // count of live versions remaining after GC
+  protectedRefs: number;  // size of the protected set honored (keep-latest + referenced + annotated + lineage)
+}
+
+/** Normalize a handle to a concrete "id@vN" (bare id ⇒ its latest present version); null if absent. */
+function pin(ws: string, handle: string): string | null {
+  const { id, version } = parseHandle(handle);
+  const v = version ?? artifactVersions(ws, id).at(-1);
+  return v ? `${id}@v${v}` : null;
+}
+
+/** Collect the handles GC must protect for one id: keep-latest-N + every version that carries an
+ *  annotation (its target/resolvedBy). Read straight off the annotations log to avoid an import cycle
+ *  with store/annotations.ts (which reads THIS module). */
+function protectForId(ws: string, id: string, keepLatest: number, into: Set<string>): void {
+  const vs = artifactVersions(ws, id);
+  for (const v of vs.slice(-keepLatest)) into.add(`${id}@v${v}`);
+  const af = join(idDir(ws, id), "annotations.jsonl");
+  if (!existsSync(af)) return;
+  for (const line of readFileSync(af, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const a = JSON.parse(line) as { target?: string; resolvedBy?: string };
+      for (const h of [a.target, a.resolvedBy]) { if (h) { const n = pin(ws, h); if (n) into.add(n); } }
+    } catch { /* skip corrupt annotation line */ }
+  }
+}
+
+export function gcArtifacts(ws: string, opts: GcOptions = {}): GcReport {
+  const keepLatest = Math.max(1, opts.keepLatest ?? 3);
+  const dir = paths.artifactDir(ws);
+  if (!existsSync(dir)) return { archived: [], kept: 0, protectedRefs: 0 };
+
+  const ids = readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name !== ARCHIVE)
+    .map((e) => e.name);
+
+  const protectedSet = new Set<string>();
+  for (const h of opts.referenced ?? []) { const n = pin(ws, h); if (n) protectedSet.add(n); }
+  for (const id of ids) protectForId(ws, id, keepLatest, protectedSet);
+
+  // Lineage integrity: a protected version's ancestors must survive too. Iterate to a fixed point.
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const h of [...protectedSet]) {
+      const a = readArtifact(ws, h);
+      for (const p of a?.parents ?? []) { const n = pin(ws, p); if (n && !protectedSet.has(n)) { protectedSet.add(n); grew = true; } }
+    }
+  }
+
+  const archived: string[] = [];
+  let kept = 0;
+  for (const id of ids) {
+    for (const v of artifactVersions(ws, id)) {
+      const handle = `${id}@v${v}`;
+      if (protectedSet.has(handle)) { kept++; continue; }
+      const archiveDir = join(idDir(ws, id), ARCHIVE);
+      mkdirSync(archiveDir, { recursive: true });
+      // relocate the envelope (v<N>.json) + any body (v<N>.<ext>) — anchored so v1 never matches v11.
+      const re = new RegExp(`^v${v}\\.`);
+      for (const f of readdirSync(idDir(ws, id))) if (re.test(f)) renameSync(join(idDir(ws, id), f), join(archiveDir, f));
+      archived.push(handle);
+    }
+  }
+  rebuildArtifactIndex(ws); // latest-per-id is unchanged (only OLDER versions archived) — refresh anyway
+  return { archived, kept, protectedRefs: protectedSet.size };
+}
