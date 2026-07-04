@@ -17,7 +17,7 @@
 import type { Database } from "bun:sqlite";
 import type { RunTrace } from "../schemas/trace";
 import { appendLedgerTurn, newTurnId, recordContextDecision } from "../store/conversation";
-import { createTaskState, taskIdForRun, updateTaskFromTrace } from "../store/task-state";
+import { createTaskState, taskIdForRun, updateTaskFromTrace, setTaskFields } from "../store/task-state";
 import { rebuildReplayCache } from "./conversation-replay";
 
 export interface UserTurn {
@@ -73,4 +73,28 @@ export function recordTurnOutcome(
   if (o.trace.outcome === "completed") {
     rebuildReplayCache(ws, o.agent, { keepRecentTurns: o.keepRecentTurns });
   }
+}
+
+/** Run START opened an append-only `submitted` ledger turn + a `running` task BEFORE the model was
+ *  even resolved (recordUserTurn). If something between there and the normal close THROWS — e.g.
+ *  `resolveModel` hitting the OpenRouter/explicit-model guard — the turn/task would otherwise DANGLE:
+ *  a `submitted` turn with no terminal reply and a `running` task that never settles (and would only
+ *  be swept to `interrupted` by the NEXT boot reconciliation). This closes the OPEN turn with a
+ *  terminal `failed` outcome so the ledger + task are never left mid-flight. It mirrors the failed
+ *  branch of `recordTurnOutcome` (append a `failed` assistant turn + EXCLUDE both turns from replay,
+ *  leaving the replay cache untouched), but needs no RunTrace since no run ever completed. */
+export function recordTurnFailure(
+  ws: string,
+  db: Database,
+  o: { agent: string; runId: string; userTurn: UserTurn; error: string },
+): void {
+  const assistantTurnId = newTurnId(o.agent, o.runId, "assistant");
+  appendLedgerTurn(ws, o.agent, {
+    turnId: assistantTurnId, runId: o.runId, timestamp: new Date().toISOString(),
+    agent: o.agent, role: "assistant", content: `error: ${o.error}`, status: "failed",
+  });
+  const reason = "failed_run_not_safe_as_context";
+  recordContextDecision(ws, o.agent, { include: false, turnId: o.userTurn.userTurnId, runId: o.runId, reason });
+  recordContextDecision(ws, o.agent, { include: false, turnId: assistantTurnId, runId: o.runId, reason });
+  setTaskFields(ws, db, o.userTurn.taskId, { status: "failed", stepStatus: "failed" });
 }

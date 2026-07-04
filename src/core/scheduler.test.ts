@@ -6,8 +6,10 @@ import { MockLanguageModelV3, mockValues } from "./mock-model";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { ensureWorkspace } from "../store/files";
 import { openDb } from "../store/db";
-import { seedRoot, reindex, loadIndex } from "../store/roster";
+import { seedRoot, reindex, loadIndex, loadAgent } from "../store/roster";
 import { runHeadless } from "./headless";
+import { loadLedger } from "../store/conversation";
+import { loadThread } from "../store/thread";
 import {
   parseCronField, parseCron, cronMatches, nextCronAfter,
   SchedulerRunner, parseDuration,
@@ -221,6 +223,59 @@ test("an unattended scheduled run drives runHeadless and auto-rejects a privileg
   await firePromise;                         // … then wait for the detached headless run to complete
 
   expect(loadIndex(db).some((r) => r.id === "ghost")).toBe(false); // the create_agent approval was rejected
+});
+
+// ── a scheduled fire is AUTOMATION, not a conversation turn (Plan 01 Ph5 follow-up) ─
+//    Regression: the fire path went runHeadless → executeRun with a HARDCODED triggeredBy "user", so
+//    every cron/interval/watch fire appended a user+assistant pair to the target agent's append-only
+//    ledger and rebuilt its boot-replay cache — the automation then replayed as prior "conversation" on
+//    the next interactive launch. The real wiring now passes triggeredBy `schedule:<id>`; this drives the
+//    SAME real scheduler→runHeadless path and proves the fire leaves NO conversation audit, while an
+//    explicit `taicho run` (default triggeredBy) STILL audits.
+
+test("a scheduled fire writes NO conversation-ledger turn and does NOT rebuild the replay cache", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-sched-audit-"));
+  await ensureWorkspace(ws);
+  await seedRoot(ws);
+  const db = openDb(ws);
+  await reindex(ws, db);
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("nightly report")) as any });
+
+  let firePromise: Promise<unknown> | undefined;
+  let clock = 0;
+  const runner = new SchedulerRunner({
+    now: () => clock,
+    // Mirrors the production fire closure (App.tsx / index.tsx): the schedule id becomes the triggeredBy.
+    fire: (s) => (firePromise = runHeadless({ ws, db, model }, { goal: s.goal, agent: s.agent, approve: s.approve, triggeredBy: `schedule:${s.id}`, out: () => {} })),
+  });
+  runner.add(mkSchedule({ id: "nightly", goal: "summarize the logs", agent: "root", approve: "reject", trigger: { kind: "interval", everyMs: 1000 } }));
+
+  clock = 1000; runner.tick();
+  await flush();
+  await firePromise;
+
+  // The autonomous fire produced run evidence but left the CONVERSATION untouched: no ledger turn …
+  expect(loadLedger(ws, "root")).toEqual([]);
+  // … and no boot-replay cache rebuild (thread.jsonl stays empty ⇒ nothing replays next launch).
+  expect(loadThread(ws, "root")).toEqual([]);
+});
+
+test("an explicit `taicho run` (default triggeredBy) STILL audits — the seam distinguishes user from automation", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-sched-audit2-"));
+  await ensureWorkspace(ws);
+  await seedRoot(ws);
+  const db = openDb(ws);
+  await reindex(ws, db);
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("done")) as any });
+  await loadAgent(ws, "root");
+
+  // Same headless entrypoint, NO triggeredBy ⇒ a real user turn ⇒ audited (ledger + replay cache).
+  await runHeadless({ ws, db, model }, { goal: "hello", out: () => {} });
+
+  const led = loadLedger(ws, "root");
+  expect(led.length).toBe(2);                                   // user + assistant recorded
+  expect(led[0]).toMatchObject({ role: "user", content: "hello", status: "submitted" });
+  expect(loadThread(ws, "root").length).toBeGreaterThan(0);     // boot-replay cache rebuilt
 });
 
 // ── Fix 1: per-entry tick isolation — a poison cron never starves its siblings ──

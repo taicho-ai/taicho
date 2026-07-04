@@ -41,6 +41,25 @@ test("compactReplay keeps the recent-K turns verbatim and folds older turns into
   expect(String(summary.content)).not.toContain("user turn 4");
 });
 
+test("buildReplaySummary represents EVERY folded turn — newest survive, older overflow is noted, none silently dropped", () => {
+  // Regression (Plan 05 Ph3 follow-up): the old summary kept only the OLDEST ~39 gists (then char-capped),
+  // so the MORE RECENT folded turns — the ones most relevant to current context — vanished with no trace.
+  // 80 folded turns with long, distinct content force the character budget to elide; +1 recent turn kept.
+  const msgs: ModelMessage[] = [];
+  for (let i = 1; i <= 80; i++) {
+    msgs.push({ role: "user", content: `folded turn ${i} ` + "x".repeat(140) });
+    msgs.push({ role: "assistant", content: `reply ${i}` });
+  }
+  msgs.push({ role: "user", content: "recent" }, { role: "assistant", content: "r" });
+  const c = compactReplay(msgs, 1); // keep 1 ⇒ fold 80
+  expect(c.foldedTurns).toBe(80);
+  const s = String(c.messages[0].content);
+  expect(s).toContain("Folded 80 earlier turns"); // the header counts ALL folded turns
+  expect(s).toContain("folded turn 80");          // the MOST RECENT folded turn survives (old code dropped it)
+  expect(s).toContain("elided");                  // the older overflow is EXPLICITLY noted, not silently lost
+  expect(s).not.toContain("folded turn 1 ");      // the oldest turns are elided (covered by the count), not gisted
+});
+
 test("compactReplay leaves a short conversation untouched (turns <= keep)", () => {
   const input = turns(2);
   const c = compactReplay(input, 2);
@@ -102,4 +121,26 @@ test("rebuildReplayCache writes the compacted replay to thread.jsonl (the boot-r
   expect(replayed.length).toBe(5);               // [summary] + 2 recent turns verbatim
   expect(String(replayed[0].content)).toContain("[CONVERSATION COMPACTION]");
   expect(String(replayed.at(-1)!.content)).toBe("reply 4");
+});
+
+test("a compacted replay LARGER than loadThread's cap still replays the compaction-summary HEAD", () => {
+  // Regression (Plan 05 Ph3 follow-up): loadThread front-truncates at maxTurns=40. With a large
+  // replayKeepTurns the summary head + kept tail exceed 40, and a naive tail-slice dropped the pinned
+  // `[CONVERSATION COMPACTION]` head — silently losing the whole folded-history summary at boot.
+  const w = ws();
+  for (let i = 1; i <= 25; i++) { // 25 turns ⇒ 50 replay messages
+    const uid = newTurnId("root", `root/r${i}`, "user");
+    const aid = newTurnId("root", `root/r${i}`, "assistant");
+    appendLedgerTurn(w, "root", { turnId: uid, runId: `root/r${i}`, timestamp: "t", agent: "root", role: "user", content: `ask ${i}`, status: "submitted" });
+    appendLedgerTurn(w, "root", { turnId: aid, runId: `root/r${i}`, timestamp: "t", agent: "root", role: "assistant", content: `reply ${i}`, status: "completed" });
+    recordContextDecision(w, "root", { include: true, turnId: uid, runId: `root/r${i}`, reason: "completed_turn" });
+    recordContextDecision(w, "root", { include: true, turnId: aid, runId: `root/r${i}`, reason: "completed_turn" });
+  }
+  // keep 20 verbatim ⇒ fold 5; replay = 1 summary + 40 tail msgs = 41 lines > loadThread's cap of 40.
+  const c = rebuildReplayCache(w, "root", { keepRecentTurns: 20 });
+  expect(c.foldedTurns).toBe(5);
+  const replayed = loadThread(w, "root"); // what boot would replay (default maxTurns = 40)
+  expect(replayed.length).toBe(40);
+  expect(String(replayed[0].content)).toContain("[CONVERSATION COMPACTION]"); // the head survives the cap
+  expect(String(replayed.at(-1)!.content)).toBe("reply 25");                  // newest tail kept
 });

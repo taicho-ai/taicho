@@ -25,7 +25,7 @@ import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
 import { recentRunsDigest } from "./memory";
 import { compactionThreshold } from "./compaction";
-import { recordUserTurn, recordTurnOutcome } from "./turn-audit";
+import { recordUserTurn, recordTurnOutcome, recordTurnFailure } from "./turn-audit";
 import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
@@ -240,14 +240,25 @@ export async function executeRun(
 
   // Plan 01 Ph5 — the turn-outcome audit is an ENGINE seam (was App-local; PR #17), so every caller
   // (REPL, headless, tests) gets identical ledger + task + replay audit. A user CONVERSATION turn is
-  // triggeredBy "user" and NOT a `/kb sync` ingest (ingestSource): those get run evidence but no
-  // ledger/task, exactly as before. Open the user turn + task record now, before any model call, so
-  // an interrupted/failed run still leaves the turn audited. Closed at run end by recordTurnOutcome.
+  // triggeredBy the LITERAL "user" and NOT a `/kb sync` ingest (ingestSource): those get run evidence
+  // but no ledger/task, exactly as before. Autonomous automation is likewise NOT a conversation turn —
+  // a background dispatch cascade is triggeredBy a taskId, and a scheduler fire (cron/interval/watch,
+  // `taicho schedule run`) is triggeredBy "schedule:<id>" — so both are excluded by the exact-"user"
+  // check here, and never pollute the target agent's append-only ledger or its boot-replay cache. Open
+  // the user turn + task record now, before any model call, so an interrupted/failed run still leaves
+  // the turn audited. Closed at run end by recordTurnOutcome (or by recordTurnFailure on a pre-run throw).
   const isUserTurn = opts.triggeredBy === "user" && !opts.ingestSource;
   const userTurn = isUserTurn
     ? recordUserTurn(deps.ws, deps.db, { agent: opts.agent.id, runId, text: lastUserText(opts.messages) })
     : undefined;
 
+  // Exception-safe seam: recordUserTurn just opened a `submitted` ledger turn + a `running` task. The
+  // body below can THROW before the normal close (most notably deps.resolveModel — the OpenRouter /
+  // explicit-model guard). Guard it so ANY such throw settles the turn to a terminal `failed` outcome
+  // instead of leaving a dangling `submitted` turn + a `running` task. (runLoop itself does NOT throw
+  // for model errors — it returns result.error → outcome "failed" — so this covers the PRE-loop throws.)
+  let turnClosed = false;
+  try {
   // Resolve THIS agent's model up front (before tools are built) so the delegation checker can run
   // on the same model plumbing the loop uses — an independent call on the delegating agent's model.
   const picked = deps.resolveModel?.(opts.agent.id);
@@ -529,6 +540,23 @@ export async function executeRun(
       keepRecentTurns: deps.configDefaults?.replayKeepTurns,
     });
   }
+  turnClosed = true; // normal path settled the turn — the catch below must not double-close it
   deps.onRunEnd?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, outcome });
   return { runId, text: finalText, trace };
+  } catch (err) {
+    // A throw between recordUserTurn and the normal close would strand the open turn — settle it to a
+    // terminal `failed` outcome so the ledger + task never dangle, then re-throw so the caller still
+    // sees the real error. Guarded to user turns that haven't already been closed by the normal path.
+    if (isUserTurn && userTurn && !turnClosed) {
+      try {
+        recordTurnFailure(deps.ws, deps.db, {
+          agent: opts.agent.id, runId, userTurn,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } catch (closeErr) {
+        log.error(`could not close dangling turn for ${opts.agent.id}/${runId}`, closeErr);
+      }
+    }
+    throw err;
+  }
 }
