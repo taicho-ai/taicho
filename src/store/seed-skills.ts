@@ -37,6 +37,20 @@ export const STARTER_SKILLS: Skill[] = [
     ].join("\n"),
   }),
   Skill.parse({
+    id: "skill_hand_off_artifacts", name: "hand-off-work-by-reference",
+    description: "Move work products between agents (and to the human) by reference — save outputs as artifacts and consume others' by handle instead of pasting content into the conversation.",
+    tags: ["artifact", "handoff", "delegation", "context-hygiene"], created: SEED_TS,
+    body: [
+      "Keep heavy content OUT of the conversation — hand it off by reference:",
+      "1. PRODUCE: when you finish a real work product, save_artifact it (give a clear title, a free-form `type` tag, and a short `summary`). You get back a handle like research-foo@v1.",
+      "2. HAND OFF: when you delegate_task, pass the handles in `inputArtifacts` — never paste the content into `context`. The child reads what it needs with read_artifact.",
+      "3. CONSUME: given an input artifact, call read_artifact(handle) — you get metadata + summary by default; add includeBody:true only when you truly need the (size-capped) body.",
+      "4. DISCOVER: list_artifacts (filter by producer/type/role/q) to find what others have produced before re-deriving it.",
+      "5. REVISE: to update an artifact, save_artifact with the SAME id — it becomes a new immutable version; nothing is overwritten. Set `parents` to record lineage.",
+      "6. EXTERNAL: if the work product lives in a system an MCP server fronts (a Notion page, a ClickUp task), save it with `external` (a locator) instead of a local body.",
+    ].join("\n"),
+  }),
+  Skill.parse({
     id: "skill_use_kb", name: "use-the-knowledgebase",
     description: "Recall shared knowledge before acting and record durable facts so the squad stops re-deriving them.",
     tags: ["knowledge", "memory", "recall", "remember"], created: SEED_TS,

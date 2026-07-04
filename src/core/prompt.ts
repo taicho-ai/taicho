@@ -21,7 +21,7 @@ export const ROOT_OPERATING_CONTEXT =
   `**Workspace layout** (the files are canon; taicho.db is a rebuildable index of them):\n` +
   `- agents/<id>/agent.md — each agent's persona + frontmatter (tools, visibility, budgets). root and librarian are seeded from code; other agents are created by you or the captain.\n` +
   `- kb/sources/*.md — the captain's source documents (canon). kb/nodes/*.md — the derived knowledge graph. The librarian re-derives nodes from sources when the captain runs \`/kb sync\`.\n` +
-  `- skills/*.md — reusable procedure docs agents can load. runs/ — run traces. artifacts/ — produced outputs.\n` +
+  `- skills/*.md — reusable procedure docs agents can load. runs/ — run traces. artifacts/ — the addressable, versioned artifact store: agents hand work products to each other (and to you) BY REFERENCE via save_artifact / read_artifact / list_artifacts, so heavy content stays out of the conversation.\n` +
   `- taicho.yaml — config (providers, models, budgets). taicho.db — SQLite index, rebuilt from the files on boot.\n` +
   `\n` +
   `**The captain drives via slash commands** — point them to the right one when it helps:\n` +
@@ -53,6 +53,7 @@ export function assemble(
     memoryBlock?: string;
     knowledgeBlock?: string;
     skillsBlock?: string;
+    inputArtifactsBlock?: string;
   },
 ): { system: string; sections: PromptSection[] } {
   const s: PromptSection[] = [];
@@ -80,6 +81,8 @@ export function assemble(
       text: `## Delegated task (from ${opts.brief.from})\nGOAL: ${opts.brief.goal}` +
         (opts.brief.context ? `\nCONTEXT: ${opts.brief.context}` : ""),
     });
+  if (opts.inputArtifactsBlock)
+    s.push({ name: "input-artifacts", tier: "context", text: opts.inputArtifactsBlock });
   if (opts.memoryBlock)
     s.push({ name: "memory", tier: "context", text: opts.memoryBlock });
   // volatile

@@ -9,6 +9,8 @@ import { runLoop } from "./loop";
 import { canDelegate, visibleToRows } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
+import { readArtifact } from "../store/artifacts";
+import { artifactHandle } from "../schemas/artifact";
 import { searchKnowledge } from "../knowledge/retrieval";
 import { getActiveSkills } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
@@ -68,11 +70,13 @@ export interface RunContext {
   runShell?: (command: string, cwd: string) => { exitCode: number; stdout: string; stderr: string }; // test seam
   ingestSource?: string; // when set (a source-ingestion run), remember stamps this instead of agentId:runId
   artifacts: string[];
+  inputArtifacts: string[];   // artifact handles this run handed DOWN to children (hand-off graph)
+  outputArtifacts: string[];  // artifact handles this run received UP from children
   delegatedOut: string[];
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   createAgent: (draft: NewAgentDraft) => Promise<AgentDef>;
   canDelegate: (toId: string) => boolean;
-  runChild: (brief: { to: string; goal: string; context?: string }) => Promise<RunResult>;
+  runChild: (brief: { to: string; goal: string; context?: string; inputArtifacts?: string[] }) => Promise<RunResult>;
   findAgents: (query: string, k: number) => AgentHit[];
   agentExists: (id: string) => boolean;
   notes: string[];
@@ -131,7 +135,7 @@ export function makeDeps(opts: {
 
 export async function executeRun(
   deps: RunDeps,
-  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; fromRun: string }; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string },
+  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; fromRun: string }; inputArtifacts?: string[]; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string },
 ): Promise<RunResult> {
   const depth = opts.depth ?? 0;
   const ancestry = opts.ancestry ?? [];
@@ -157,16 +161,17 @@ export async function executeRun(
   const ctx: RunContext = {
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
     ingestSource: opts.ingestSource,
-    artifacts: [], delegatedOut: [],
+    artifacts: [], inputArtifacts: [], outputArtifacts: [], delegatedOut: [],
     requestApproval: deps.requestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
     canDelegate: (toId) => canDelegate(opts.agent, toId),
-    runChild: async ({ to, goal, context }) => {
+    runChild: async ({ to, goal, context, inputArtifacts }) => {
       const child = await loadAgent(deps.ws, to);
       return executeRun(deps, {
         agent: child,
         messages: [{ role: "user", content: context ? `${goal}\n\nContext: ${context}` : goal }],
         brief: { from: opts.agent.id, goal, context, fromRun: runId },
+        inputArtifacts, // handed to the child by REFERENCE (handles + summaries in the prompt, not inlined bodies)
         triggeredBy: runId,
         depth: depth + 1,
         ancestry: [...ancestry, opts.agent.id],
@@ -257,6 +262,20 @@ export async function executeRun(
     }
   } catch (e) { console.error(`skill inject failed for ${opts.agent.id}:`, e); }
 
+  // Input artifacts handed in by a delegating parent: render HANDLES + summaries, never inline the
+  // body — the child pulls what it needs with read_artifact (size-capped). This is hand-off by reference.
+  let inputArtifactsBlock: string | undefined;
+  if (opts.inputArtifacts?.length) {
+    const lines = opts.inputArtifacts.map((h) => {
+      const a = readArtifact(deps.ws, h);
+      return a
+        ? `- [${artifactHandle(a)}] ${a.title} (${a.type})${a.summary ? " — " + a.summary : ""}`
+        : `- [${h}] (unavailable)`;
+    });
+    inputArtifactsBlock = "## Input artifacts (handed to you by reference)\n" +
+      "Read one with read_artifact(id) — do NOT expect its body inlined here.\n" + lines.join("\n");
+  }
+
   const { system } = assemble(opts.agent, {
     visibleAgents: visible,
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
@@ -264,6 +283,7 @@ export async function executeRun(
     memoryBlock,
     knowledgeBlock,
     skillsBlock,
+    inputArtifactsBlock,
   });
   const tools = toolsForAgent(opts.agent, ctx, deps.mcp);
 
@@ -289,7 +309,8 @@ export async function executeRun(
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,
     ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [], knowledge: knowledgeIds, skills: skillIds },
     toolCalls: Object.entries(result.toolCalls).map(([tool, count]) => ({ tool, count })),
-    artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, outcome,
+    artifacts: ctx.artifacts, inputArtifacts: ctx.inputArtifacts, outputArtifacts: ctx.outputArtifacts,
+    delegatedOut: ctx.delegatedOut, outcome,
     tokens: result.tokens, costUsd: subscription ? null : result.costUsd,
     costNote: subscription ? "subscription" : undefined,
     aggregate: { tokens: result.tokens + ctx.childSpend.tokens, costUsd: subscription ? null : result.costUsd + ctx.childSpend.costUsd },

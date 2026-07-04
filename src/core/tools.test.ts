@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { tool } from "ai";
 import { z } from "zod";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toolsForAgent } from "./tools";
@@ -15,6 +15,7 @@ import { paths } from "../store/files";
 import { KbNode } from "../schemas/knowledge";
 import { writeSkill, getActiveSkills } from "../store/skills";
 import { Skill } from "../schemas/skill";
+import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
 const fakeMcp = {
@@ -271,6 +272,104 @@ test("propose_skill: present only when granted; approve writes an active skill; 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   expect((out2 as any).rejected).toBe(true);
   expect(getActiveSkills(db).map((s) => s.name)).not.toContain("nope");
+});
+
+// ── artifact tools (Plan 01) ────────────────────────────────────────────────
+
+test("save/read/list_artifacts: present only when granted", () => {
+  const set = toolsForAgent(agent(["write_artifact"]), ctx);
+  expect("save_artifact" in set).toBe(false);
+  expect("read_artifact" in set).toBe(false);
+  expect("list_artifacts" in set).toBe(false);
+  const granted = toolsForAgent(agent(["save_artifact", "read_artifact", "list_artifacts"]), ctx);
+  expect("save_artifact" in granted).toBe(true);
+  expect("read_artifact" in granted).toBe(true);
+  expect("list_artifacts" in granted).toBe(true);
+});
+
+test("save_artifact stamps provenance from ctx (agentId + runId), pushes the handle, returns id@vN", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-sa-"));
+  const c = { ws: w, agentId: "researcher", runId: "researcher/2026-07-04-run2", artifacts: [] as string[], notes: [] as string[] } as unknown as RunContext;
+  const set = toolsForAgent(agent(["save_artifact"]), c);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await set.save_artifact!.execute!({ title: "Foo dossier", type: "dossier", summary: "on foo", body: "big body" }, { toolCallId: "1", messages: [] } as any) as any;
+  expect(out.handle).toBe("foo-dossier@v1");
+  const stored = readArtifact(w, out.handle)!;
+  expect(stored.producer).toBe("researcher");                    // provenance NOT model-supplied — pulled from ctx
+  expect(stored.runId).toBe("researcher/2026-07-04-run2");
+  expect(c.artifacts).toEqual(["foo-dossier@v1"]);               // handle recorded for the trace / hand-off
+});
+
+test("save_artifact requires a body or an external locator", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-sa-"));
+  const c = { ws: w, agentId: "a", runId: "a/1", artifacts: [] as string[], notes: [] as string[] } as unknown as RunContext;
+  const set = toolsForAgent(agent(["save_artifact"]), c);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await set.save_artifact!.execute!({ title: "Empty" }, { toolCallId: "1", messages: [] } as any) as any;
+  expect(out.error).toMatch(/body.*or.*external/);
+});
+
+test("read_artifact is summary-first: metadata + summary by default, NO body", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-ra-"));
+  saveArtifact(w, { id: "doc", title: "Doc", type: "report", summary: "the short version", body: "THE FULL BODY", producer: "r", runId: "r/1" });
+  const c = { ws: w, agentId: "root", runId: "root/1" } as unknown as RunContext;
+  const set = toolsForAgent(agent(["read_artifact"]), c);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await set.read_artifact!.execute!({ id: "doc" }, { toolCallId: "1", messages: [] } as any) as any;
+  expect(out.summary).toBe("the short version");
+  expect(out.handle).toBe("doc@v1");
+  expect(out.bodyOmitted).toBe(true);
+  expect(out.body).toBeUndefined();                              // body NOT returned by default
+});
+
+test("read_artifact body is size-capped and truncated with a marker when includeBody:true", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-ra-"));
+  saveArtifact(w, { id: "big", title: "Big", body: "x".repeat(5000), producer: "r", runId: "r/1" });
+  const c = { ws: w, agentId: "root", runId: "root/1" } as unknown as RunContext;
+  const set = toolsForAgent(agent(["read_artifact"]), c);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await set.read_artifact!.execute!({ id: "big", includeBody: true, maxChars: 1000 }, { toolCallId: "1", messages: [] } as any) as any;
+  expect(out.truncated).toBe(true);
+  expect(out.body.length).toBeLessThan(1200);                    // ~1000 + a short marker, NOT the full 5000
+  expect(out.body).toContain("truncated");
+});
+
+test("read_artifact returns an actionable error for an unknown handle", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-ra-"));
+  const c = { ws: w, agentId: "root", runId: "root/1" } as unknown as RunContext;
+  const set = toolsForAgent(agent(["read_artifact"]), c);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await set.read_artifact!.execute!({ id: "nope" }, { toolCallId: "1", messages: [] } as any) as any;
+  expect(out.error).toMatch(/no artifact/);
+});
+
+test("list_artifacts discovers artifacts and filters by producer/type", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-la-"));
+  saveArtifact(w, { id: "a", title: "A", type: "report", body: "1", producer: "r1", runId: "r1/1" });
+  saveArtifact(w, { id: "b", title: "B", type: "brief", body: "2", producer: "r2", runId: "r2/1" });
+  const c = { ws: w, agentId: "root", runId: "root/1" } as unknown as RunContext;
+  const set = toolsForAgent(agent(["list_artifacts"]), c);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const all = await set.list_artifacts!.execute!({}, { toolCallId: "1", messages: [] } as any) as any;
+  expect(all.artifacts.map((x: any) => x.id).sort()).toEqual(["a", "b"]);
+  expect(all.artifacts[0].handle).toMatch(/@v1$/);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const filtered = await set.list_artifacts!.execute!({ type: "brief" }, { toolCallId: "2", messages: [] } as any) as any;
+  expect(filtered.artifacts.map((x: any) => x.id)).toEqual(["b"]);
+});
+
+test("write_artifact (legacy) routes through the store: versioned + provenance, path still returned", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-wa-"));
+  const c = { ws: w, agentId: "writer", runId: "writer/2026-07-04-run1", artifacts: [] as string[], notes: [] as string[] } as unknown as RunContext;
+  const set = toolsForAgent(agent(["write_artifact"]), c);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out = await set.write_artifact!.execute!({ topicSlug: "hello", markdown: "# Hi" }, { toolCallId: "1", messages: [] } as any) as any;
+  expect(existsSync(out.path)).toBe(true);                       // back-compat: the model still gets a real file path
+  // hand-off graph records the HANDLE (id@vN) like save_artifact, NOT an un-resolvable absolute path.
+  expect(c.artifacts).toEqual(["hello@v1"]);
+  const stored = listArtifacts(w);
+  expect(stored.length).toBe(1);
+  expect(stored[0]).toMatchObject({ id: "hello", version: 1, producer: "writer" });
 });
 
 test("run_command: allow → runs without approval; block → asks then runs on approve; reject → no run", async () => {
