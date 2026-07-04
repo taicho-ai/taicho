@@ -88,6 +88,43 @@ test("delegation: the child run span nests UNDER the parent's delegate_task tool
   expect(summary.status).toBe("ok");
 });
 
+test("verification retry: BOTH the failed first attempt and the retry nest under the delegate_task span", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "worker", role: "works", identity: "You work." }, "root");
+  // One delegate_task with criteria: worker fails the first check, retries once, passes. That is ONE
+  // tool call but TWO child runs — the tool span only captures the retry's runId, so the first
+  // attempt must be re-linked under the same span (not reparented to the root run as a stray sibling).
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // root
+    text("attempt one, no Y"),                          // worker (1st attempt)
+    text('{"pass": false, "reasons": ["missing Y"]}'),  // checker (1st) — independent model call
+    text("attempt two, mentions Y"),                    // worker (retry)
+    text('{"pass": true, "reasons": []}'),              // checker (2nd)
+    text("root done"),                                  // root final
+  ) as any });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+
+  expect(res.trace.delegatedOut.length).toBe(2);  // initial + one retry
+  expect(res.trace.verification.length).toBe(2);
+
+  const spans = deriveTrace(ws, res.runId);
+  const delegSpan = byKind(spans, "tool").find((s) => s.name === "delegate_task")!;
+  expect(delegSpan).toBeTruthy();
+
+  const [firstId, retryId] = res.trace.delegatedOut; // [0]=failed first attempt, [1]=retry
+  const runs = byKind(spans, "run");
+  const firstRun = runs.find((s) => s.id === firstId)!;
+  const retryRun = runs.find((s) => s.id === retryId)!;
+  // BOTH children hang off the delegate_task tool span — the tree shows the retry as a sibling of the
+  // first attempt under one delegation, not a stray top-level run.
+  expect(retryRun.parentId).toBe(delegSpan.id);
+  expect(firstRun.parentId).toBe(delegSpan.id);
+  expect(firstRun.parentId).not.toBe(res.runId); // NOT reparented to the root run span
+  // exactly the three run spans (root + two attempts), all accounted for
+  expect(runs.length).toBe(3);
+});
+
 test("an approval wait becomes its own approval span", async () => {
   const { ws, db } = await boot();
   const model = new MockLanguageModelV3({ doGenerate: mockValues(call("create_agent", { id: "scout", role: "scouts", identity: "A scout." }), text("created")) as any });

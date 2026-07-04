@@ -28,7 +28,7 @@ import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
 import type { Verdict } from "./command-guard";
-import { log } from "./logger";
+import { log, redact } from "./logger";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -48,13 +48,16 @@ function lastUserText(messages: ModelMessage[]): string {
 const MAX_DELEGATION_DEPTH = 5;
 const MAX_RUNS_PER_REQUEST = 50;
 
-/** A short label for an approval span (what the captain is being asked to decide). */
+/** A short label for an approval span (what the captain is being asked to decide). Free-form fields
+ *  (esp. a `run_command` command) are value-scrubbed BEFORE the length cap — this label reaches the
+ *  live status bar, the approval span, and the persisted transcript, so an embedded `Bearer …`/api
+ *  key must never surface (redact runs pre-slice so truncation can't expose a partial secret). */
 function approvalLabel(req: ApprovalRequest): string {
   switch (req.kind) {
-    case "create_agent": return `create_agent ${req.draft.id}`;
-    case "run_command": return `run_command ${req.command}`.slice(0, 60);
-    case "add_mcp": return `add_mcp ${req.name}`;
-    case "propose_skill": return `propose_skill ${req.draft.name}`;
+    case "create_agent": return redact(`create_agent ${req.draft.id}`);
+    case "run_command": return redact(`run_command ${req.command}`).slice(0, 60);
+    case "add_mcp": return redact(`add_mcp ${req.name}`);
+    case "propose_skill": return redact(`propose_skill ${req.draft.name}`);
     case "propose_coaching": return "propose_coaching";
     case "ask_human": return "ask_human";
   }

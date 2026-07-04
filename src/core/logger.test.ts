@@ -78,6 +78,23 @@ test("redacts a bare JWT (header.payload.signature)", () => {
   expect(redact(`session=${jwt}`)).toBe("session=eyJ***");
 });
 
+test("redacts Slack tokens (xox* prefixes)", () => {
+  // Built at runtime so no scannable Slack-token literal sits in source (GitHub push protection).
+  const body = "EXAMPLE00example00";
+  const out = redact(`slack xoxb-${body}`);
+  expect(out).toContain("xoxb-***");
+  expect(out).not.toContain(body);
+});
+
+test("redacts secrets embedded in a URL query string (value under an innocuous key)", () => {
+  // The value here is NOT sk-/gh/JWT shaped, so ONLY the URL-param rule can catch it.
+  const out = redact("GET https://api.example.com/x?api_key=deadbeefcafef00d1234&page=2");
+  expect(out).not.toContain("deadbeefcafef00d1234");
+  expect(out).toContain("api_key=***");
+  expect(out).toContain("page=2"); // non-secret query survives
+  expect(redact("open https://h/cb?token=OPAQUErandomVALUE987#frag")).toContain("token=***");
+});
+
 test("redact leaves ordinary prose untouched (no over-redaction)", () => {
   const s = "The gh command staged 20 files; check the api overview in README before you push skills.";
   expect(redact(s)).toBe(s);

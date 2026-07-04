@@ -1,7 +1,13 @@
 /** Pure helpers for the instrumentation seam: a one-line, redacted, length-capped render of tool
  *  args ("read_url https://foo…", "run_command bun test") plus a capped JSON for the waterfall
  *  drill-in. Transparency WITHOUT payload dumping, and NEVER logs auth material (mirrors the
- *  redactAuthHeader discipline). No I/O — unit-tested in isolation. */
+ *  redactAuthHeader discipline). Redaction is DEFENSE IN DEPTH: key-name masking (isSecretKey) for
+ *  secret-named fields PLUS value-level scrubbing (logger.redact) so a token embedded in the VALUE of
+ *  an ordinary field — `read_url {url:"…?api_key=sk-live-…"}`, `run_command {command:"curl -H
+ *  'Authorization: Bearer …'"}` — never surfaces in the status bar, breadcrumb, inspector, or the
+ *  persisted transcript. Value scrubbing runs BEFORE the length cap so a truncation can't expose a
+ *  partial secret. No I/O — unit-tested in isolation. */
+import { redact } from "./logger";
 
 const PREVIEW_CAP = 80;
 const JSON_CAP = 2000;
@@ -9,9 +15,11 @@ const JSON_CAP = 2000;
 const SECRET_KEY = /(^|_|-)(token|secret|password|passwd|authorization|auth|bearer|api[_-]?key|apikey|key|credential|cookie|session)s?($|_|-)/i;
 const REDACTED = "‹redacted›";
 
-/** Cap a string to `n` chars, collapsing whitespace/newlines to single spaces first (one-liner). */
+/** Cap a string to `n` chars, collapsing whitespace/newlines to single spaces first (one-liner).
+ *  Value-level secret scrubbing (logger.redact) runs BEFORE the cap so truncation can't leave a
+ *  partial secret visible. */
 export function oneLine(s: string, n = PREVIEW_CAP): string {
-  const flat = s.replace(/\s+/g, " ").trim();
+  const flat = redact(s.replace(/\s+/g, " ").trim());
   return flat.length > n ? flat.slice(0, n - 1) + "…" : flat;
 }
 
@@ -68,10 +76,13 @@ export function argsPreview(tool: string, args: unknown): string {
   return parts.length ? oneLine(parts.join(" ")) : "";
 }
 
-/** A capped, redacted JSON render of a value for the waterfall drill-in (args in / result out). */
+/** A capped, redacted JSON render of a value for the waterfall drill-in (args in / result out).
+ *  Two-layer redaction: key-name masking (redactValue) then value-level scrubbing (logger.redact)
+ *  for secrets embedded in ordinary-keyed values. Scrubbing runs BEFORE the cap. */
 export function capJson(value: unknown, cap = JSON_CAP): string {
-  let s: string;
+  let s: string | undefined;
   try { s = JSON.stringify(redactValue(value)); } catch { s = String(value); }
   if (s == null) return "";
+  s = redact(s);
   return s.length > cap ? s.slice(0, cap) + `…[+${s.length - cap} chars]` : s;
 }

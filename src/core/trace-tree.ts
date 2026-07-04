@@ -203,13 +203,30 @@ export function deriveTrace(ws: string, rootRunId: string): Span[] {
     const kids = childSpansOf(ws, trace);
     for (const k of kids) spans.push(k);
 
+    // A verification retry spawns TWO child runs from ONE delegate_task call, but the tool span only
+    // captures the retry's runId (the tool's return value). Pair each retry (verification.retried) with
+    // its failed first attempt (same criteria) so BOTH nest under the delegate_task span instead of the
+    // first attempt reparenting to the run span as a stray top-level sibling.
+    const firstAttemptFor = new Map<string, string>(); // retryRunId → its failed first-attempt runId
+    const pendingFirst: { criteria: string; runId: string }[] = [];
+    for (const v of trace.verification) {
+      if (!v.retried) { pendingFirst.push({ criteria: v.criteria, runId: v.runId }); continue; }
+      let idx = -1;
+      for (let i = pendingFirst.length - 1; i >= 0; i--) if (pendingFirst[i].criteria === v.criteria) { idx = i; break; }
+      if (idx >= 0) { firstAttemptFor.set(v.runId, pendingFirst[idx].runId); pendingFirst.splice(idx, 1); }
+    }
+
     // Recurse into delegated child runs, nesting each under its delegate_task tool span when the
-    // childRunId was captured; otherwise directly under this run.
+    // childRunId was captured (plus any paired first attempt); otherwise directly under this run.
     const delegSpans = kids.filter((k) => k.kind === "tool" && k.detail.kind === "tool" && (k.detail.childRunId != null));
     const linked = new Set<string>();
+    const nestUnder = (childId: string | undefined, spanId: string) => {
+      if (childId && trace.delegatedOut.includes(childId) && !linked.has(childId)) { linked.add(childId); walk(childId, spanId); }
+    };
     for (const d of delegSpans) {
       const childId = d.detail.kind === "tool" ? d.detail.childRunId : undefined;
-      if (childId && trace.delegatedOut.includes(childId)) { linked.add(childId); walk(childId, d.id); }
+      nestUnder(childId, d.id);
+      if (childId) nestUnder(firstAttemptFor.get(childId), d.id); // the failed first attempt, under the same span
     }
     for (const childId of trace.delegatedOut) if (!linked.has(childId)) walk(childId, runSpan.id);
   };

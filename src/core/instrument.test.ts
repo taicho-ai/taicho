@@ -28,6 +28,47 @@ test("argsPreview NEVER leaks auth material (redacted in the generic fallback)",
   expect(p).toContain("‹redacted›");
 });
 
+// Regression: key-name redaction alone was NOT enough — a secret embedded in the VALUE of an
+// ordinary key (read_url's url, run_command's command) leaked verbatim into the status bar,
+// breadcrumb, inspector, and persisted transcript. Value-level scrubbing must catch it in BOTH the
+// one-line preview AND the capped JSON.
+test("argsPreview scrubs a secret embedded in a read_url URL query param (value, not key)", () => {
+  const p = argsPreview("read_url", { url: "https://api.example.com/x?api_key=sk-live-ABCDEF1234567890&page=2" });
+  expect(p).not.toContain("sk-live-ABCDEF1234567890");
+  expect(p).toContain("***");
+  expect(p).toContain("page=2"); // non-secret query survives
+});
+
+test("argsPreview scrubs a Bearer token embedded in a run_command command (value, not key)", () => {
+  const p = argsPreview("run_command", { command: "curl -H 'Authorization: Bearer sk-ant-SUPERSECRETTOKEN' https://x" });
+  expect(p).not.toContain("sk-ant-SUPERSECRETTOKEN");
+  expect(p).not.toContain("Bearer sk-ant-SUPERSECRETTOKEN");
+  expect(p).toContain("***");
+});
+
+test("argsPreview redacts BEFORE the length cap (no partial-secret leak on truncation)", () => {
+  // Pad so the secret sits near the 80-char cap boundary; if we capped before redacting, a partial
+  // token would survive. Assert no run of the secret leaks.
+  const pad = "x".repeat(60);
+  const p = argsPreview("read_url", { url: `https://h/${pad}?token=sk-live-LEAKME9999999999` });
+  expect(p).not.toContain("sk-live-LEAKME");
+  expect(p).not.toContain("LEAKME");
+});
+
+test("capJson scrubs value-embedded secrets (URL param + Bearer), not just secret keys", () => {
+  const url = capJson({ url: "https://h/x?access_token=sk-live-XYZ1234567890AB" });
+  expect(url).not.toContain("sk-live-XYZ1234567890AB");
+  expect(url).toContain("***");
+
+  const cmd = capJson({ command: "gh auth login --with-token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" });
+  expect(cmd).not.toContain("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345");
+  expect(cmd).toContain("***");
+
+  // `data` is NOT a secret key, so this only stays masked via value-level scrubbing (the JWT shape).
+  const jwt = capJson({ data: "session=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payloadpart.sigpart" });
+  expect(jwt).not.toContain("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
+});
+
 test("isSecretKey matches common auth key names", () => {
   for (const k of ["token", "api_key", "apiKey", "authorization", "password", "SESSION_COOKIE", "bearer"]) expect(isSecretKey(k)).toBe(true);
   for (const k of ["title", "url", "goal", "count"]) expect(isSecretKey(k)).toBe(false);

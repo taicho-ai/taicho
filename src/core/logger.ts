@@ -31,18 +31,24 @@ export interface Logger {
 
 /** Scrub anything that looks like a bearer token or API key BEFORE it reaches disk. Mirrors
  *  `redactAuthHeader` (Bearer <token> → Bearer ***) and adds the common key/secret shapes an error
- *  string or serialized profile might carry. Targeted on purpose — it must not maul ordinary prose.
- *  Beyond Bearer/`sk-`/named-JSON-field shapes it also covers GitHub tokens (`ghp_`/`gho_`/`ghu_`/
- *  `ghs_`/`ghr_` and fine-grained `github_pat_…`) and bare JWTs, so a gh-backed MCP or a new provider
- *  can't leak a credential shape the original three rules miss. Each new rule requires a distinctive
- *  prefix + a long opaque body, so it stays off ordinary text. */
+ *  string, serialized profile, tool arg, or URL might carry. Targeted on purpose — it must not maul
+ *  ordinary prose. Beyond Bearer/`sk-`/named-JSON-field shapes it covers GitHub tokens (`ghp_`/`gho_`/
+ *  `ghu_`/`ghs_`/`ghr_` and fine-grained `github_pat_…`), Slack tokens (`xox[baprs]-…`), and bare
+ *  JWTs, so a gh-backed MCP or a new provider can't leak a credential shape the original rules miss.
+ *  It ALSO scrubs secret-carrying URL query params (`?api_key=…`, `&token=…`) so a secret leaks even
+ *  when it sits in the VALUE of an innocuously-named field. Each rule needs a distinctive prefix +
+ *  long opaque body (or a query-param delimiter), so it stays off ordinary text. Reused by the
+ *  instrumentation seam (instrument.ts) so waterfall/status-bar/transcript arg previews scrub too. */
 export function redact(s: string): string {
   return s
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer ***")
     .replace(/\bsk-[A-Za-z0-9._-]{8,}/g, "sk-***") // OpenAI/Anthropic/OpenRouter: sk-, sk-ant-, sk-proj-, sk-or-
     .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "github_pat_***") // GitHub fine-grained PAT
     .replace(/\bgh[oprsu]_[A-Za-z0-9]{20,}/g, (m) => m.slice(0, 4) + "***") // GitHub gho_/ghp_/ghr_/ghs_/ghu_ tokens
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, (m) => m.slice(0, 5) + "***") // Slack xoxb-/xoxa-/xoxp-/xoxr-/xoxs- tokens
     .replace(/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g, "eyJ***") // bare JWT: header.payload.signature
+    // URL/query-string secrets: the value leaks even under an innocuous key name (?api_key=…, &token=…).
+    .replace(/([?&](?:access_token|api[_-]?key|token|secret|sig|key)=)[^&\s#"'\\]+/gi, "$1***")
     .replace(/"(access_token|refresh_token|id_token|api[_-]?key|apiKey|authorization)"\s*:\s*"[^"]*"/gi, '"$1":"***"');
 }
 
