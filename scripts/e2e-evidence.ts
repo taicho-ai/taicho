@@ -22,7 +22,7 @@
 import { mkdtemp, mkdir, writeFile, copyFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { Scenario } from "../e2e/scenarios/agent-flow";
+import type { Scenario } from "../e2e/scenarios/types";
 
 const scenarioName = process.argv[2];
 if (!scenarioName) {
@@ -89,7 +89,8 @@ p = Bun.spawnSync(["vhs", tapePath], {
 const vhsOk = p.exitCode === 0;
 
 // copy the recorded artifacts out of the workspace into evidence/<scenario>/
-const outputs = ["session.mp4", "approval-card.png", "final.png"];
+// (scenario-declared, not hardcoded — each scenario lists its own video + screenshots)
+const outputs = [scenario.video, ...scenario.screenshots];
 for (const f of outputs) {
   try {
     await access(join(ws, f));
@@ -112,8 +113,8 @@ await writeFile(
       scenario: scenario.name,
       pass: allPass,
       vhsExitOk: vhsOk,
-      video: join(evidenceDir, "session.mp4"),
-      screenshots: ["approval-card.png", "final.png"].map((f) => join(evidenceDir, f)),
+      video: join(evidenceDir, scenario.video),
+      screenshots: scenario.screenshots.map((f) => join(evidenceDir, f)),
       tape: join(evidenceDir, `${scenario.name}.tape`),
       workspace: ws,
       gitSha: sha,

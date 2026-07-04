@@ -64,6 +64,15 @@ trace files are the `.json` files directly under `runs/<agent>/` — sort and pi
 
 ## 3. Phase 1 — the harness
 
+> **The code skeletons in §3c and §4a are illustrative sketches, not the source of truth.** The
+> harness is now implemented; the authoritative, working shapes are
+> [`scripts/e2e-evidence.ts`](../../scripts/e2e-evidence.ts) and
+> [`e2e/scenarios/agent-flow.ts`](../../e2e/scenarios/agent-flow.ts), and the two VHS landmines they
+> encode — **relative** `Output`/`Screenshot` paths (VHS 0.11.0 can't lex a leading `/`) and a
+> **binary warm-up before recording** — are documented in
+> [`CLI_TESTING.md` → Gotchas](../../CLI_TESTING.md). If a skeleton below ever drifts from those,
+> trust the code and CLI_TESTING.md. (The skeletons have been patched to those shapes below.)
+
 ### 3a. Layout to create
 
 ```
@@ -80,17 +89,24 @@ Add `evidence/` to `.gitignore`.
 
 ### 3b. Scenario spec contract
 
-One file per scenario under `e2e/scenarios/`, exporting:
+Shared types live in `e2e/scenarios/types.ts`; one file per scenario under `e2e/scenarios/`
+implements `Scenario` (default-exported):
 
 ```ts
+// e2e/scenarios/types.ts
 export interface Scenario {
   name: string;                       // "agent-flow"
   e2eModelMode: string;               // value for TAICHO_E2E_MODEL
+  video: string;                      // relative Output filename, e.g. "session.mp4"
+  screenshots: string[];              // relative Screenshot filenames, e.g. ["approval-card.png"]
   tape: (p: { binary: string; evidenceDir: string }) => string;  // full .tape source
   assertions: (ws: string) => Promise<AssertionResult[]>;
 }
 export interface AssertionResult { name: string; pass: boolean; expected: string; actual: string }
 ```
+
+`video`/`screenshots` are the artifacts the tape writes: the wrapper copies exactly these out of
+the temp ws and records them in the manifest, so it stays scenario-generic (no hardcoded names).
 
 Assertions must **catch their own errors** (missing file ⇒ `pass:false, actual:"<file missing>"`),
 so one failure never hides the rest.
@@ -100,7 +116,7 @@ so one failure never hides the rest.
 Behavior (skeleton below): build → temp ws → generate tape → run vhs → assert → manifest → exit.
 
 ```ts
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, copyFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -117,10 +133,26 @@ await mkdir(evidenceDir, { recursive: true });
 let p = Bun.spawnSync(["bun", "run", "build"], { cwd: repo });
 if (p.exitCode !== 0) { console.error("build failed"); process.exit(1); }
 
+// 1b. WARM the freshly-built binary (see CLI_TESTING.md Gotcha #4): macOS runs first-exec
+//     code-sign verification + dyld-closure build on the FIRST exec of the new ~66MB file — a cold,
+//     sluggish exec during which the booting app drops the submit keystroke (~5/6 flake without
+//     this). One completed exec primes the OS cache so vhs's exec is fast. REQUIRED before recording.
+{
+  const warmWs = await mkdtemp(join(tmpdir(), "taicho-warm-"));
+  await writeFile(join(warmWs, "taicho.yaml"), "mcp:\n  enabled: false\nauth:\n  chatgpt_signin: false\n");
+  Bun.spawnSync([binary], {
+    cwd: warmWs,
+    env: { ...process.env, TAICHO_E2E_MODEL: scenario.e2eModelMode },
+    stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 5000,
+  });
+}
+
 // 2. fresh temp workspace — NEVER the repo root (live dev workspace)
 const ws = await mkdtemp(join(tmpdir(), "taicho-evidence-"));
 
-// 3. write the tape INTO the workspace (vhs output paths are absolute → land in evidenceDir)
+// 3. write the tape INTO the workspace. The tape's Output/Screenshot paths are RELATIVE (VHS 0.11.0
+//    can't lex a leading `/` — CLI_TESTING.md Gotcha #1), so the artifacts land in `ws`; we copy
+//    them into evidenceDir in step 4b.
 const tapePath = join(ws, `${scenario.name}.tape`);
 await writeFile(tapePath, scenario.tape({ binary, evidenceDir }));
 
@@ -132,16 +164,23 @@ p = Bun.spawnSync(["vhs", tapePath], {
 });
 const vhsOk = p.exitCode === 0;
 
+// 4b. copy the scenario-declared artifacts out of the temp ws into evidence/<scenario>/
+const outputs = [scenario.video, ...scenario.screenshots];
+for (const f of outputs) {
+  try { await access(join(ws, f)); await copyFile(join(ws, f), join(evidenceDir, f)); }
+  catch { console.warn(`warning: ${f} not produced by vhs (workspace: ${ws})`); }
+}
+
 // 5. assertions decide pass/fail — the video never does
 const assertions = await scenario.assertions(ws);
 const allPass = vhsOk && assertions.every((a) => a.pass);
 
-// 6. manifest = the proof deliverable
+// 6. manifest = the proof deliverable (paths are scenario-declared, never hardcoded)
 const sha = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: repo }).stdout.toString().trim();
 await writeFile(join(evidenceDir, "manifest.json"), JSON.stringify({
   scenario: scenario.name, pass: allPass, vhsExitOk: vhsOk,
-  video: join(evidenceDir, "session.mp4"),
-  screenshots: ["approval-card.png", "final.png"].map((f) => join(evidenceDir, f)),
+  video: join(evidenceDir, scenario.video),
+  screenshots: scenario.screenshots.map((f) => join(evidenceDir, f)),
   workspace: ws, gitSha: sha, ranAt: new Date().toISOString(),
   assertions,
 }, null, 2));
@@ -164,7 +203,7 @@ Notes for the implementer:
 ### 4a. Tape source (returned by `scenario.tape(...)`)
 
 ```tape
-Output ${evidenceDir}/session.mp4
+Output session.mp4
 Set FontSize 16
 Set Width 1200
 Set Height 700
@@ -176,22 +215,28 @@ Sleep 500ms
 Type "create a proof worker agent"
 Enter
 Wait+Screen@15s /New agent/
-Screenshot ${evidenceDir}/approval-card.png
+Screenshot approval-card.png
 Type "y"
 Wait+Screen@15s /Created proof-agent/
 Sleep 500ms
 Type "use the proof worker to prove delegation works"
 Enter
 Wait+Screen@20s /Root used proof-agent/
-Screenshot ${evidenceDir}/final.png
+Screenshot final.png
 Sleep 1s
 Escape
 Sleep 500ms
 ```
 
-(Template-string the two `${…}` placeholders in the `tape()` function. Waits are gated on screen
-text — never add fixed sleeps to "fix" a race; raise the `@timeout` or fix the regex instead. The
-regexes mirror the waits the old expect script used, which are known-stable strings.)
+**`Output`/`Screenshot` paths are RELATIVE** (`session.mp4`, not `${evidenceDir}/session.mp4`):
+VHS 0.11.0 can't lex a leading `/` (CLI_TESTING.md Gotcha #1). vhs runs with `cwd = temp ws` so
+they land there; the wrapper copies them into `evidenceDir` (§3c step 4b). The scenario declares
+these same filenames as `video`/`screenshots` (§3b). Only `${binary}` is template-stringed in the
+`tape()` function — and an absolute path is fine there because it's inside a `Type` string, not an
+`Output`/`Screenshot` argument. Waits are gated on screen text — never add fixed sleeps to "fix" a
+race; raise the `@timeout` or fix the regex instead. (The live agent-flow tape uses a couple of
+`Wait+Screen` gates on the typed prompt before `Enter` too, to dodge the Ink `TextInput` submit
+race — see [`e2e/scenarios/agent-flow.ts`](../../e2e/scenarios/agent-flow.ts).)
 
 ### 4b. Assertion set (port of `e2e/agent-flow.tui.ts` / old CLI_TESTING.md list)
 
