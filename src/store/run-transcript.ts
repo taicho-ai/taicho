@@ -1,5 +1,5 @@
 /** Per-run evidence files. Trace JSON remains the summary; this directory keeps debuggable context. */
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ModelMessage } from "ai";
 import { paths } from "./files";
@@ -29,6 +29,19 @@ export function appendRunTranscript(ws: string, runId: string, event: RunTranscr
   const dir = paths.runRecordDir(ws, runId);
   mkdirSync(dir, { recursive: true });
   appendFileSync(join(dir, "transcript.jsonl"), JSON.stringify(event) + "\n");
+}
+
+/** Read a run's transcript.jsonl back as parsed events (the waterfall reader; returns [] if absent).
+ *  Unparseable lines are skipped so a truncated/in-progress file never throws. */
+export function readRunTranscript(ws: string, runId: string): RunTranscriptEvent[] {
+  const file = join(paths.runRecordDir(ws, runId), "transcript.jsonl");
+  if (!existsSync(file)) return [];
+  const out: RunTranscriptEvent[] = [];
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line) as RunTranscriptEvent); } catch { /* skip a partial line */ }
+  }
+  return out;
 }
 
 export function writeRunFinal(ws: string, runId: string, text: string): void {

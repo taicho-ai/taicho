@@ -14,7 +14,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "help", summary: "list commands" },
   { name: "agents", summary: "list the squad" },
   { name: "runs", summary: "list runs", usage: "[agent]" },
-  { name: "trace", summary: "show a run", usage: "<id>", requiresArg: true },
+  { name: "trace", summary: "open the waterfall inspector (no arg = latest run)", usage: "[id]" },
   { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>", requiresArg: true },
   { name: "policies", summary: "list an agent's coaching notes", usage: "<agent>", requiresArg: true },
   { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>", requiresArg: true },
@@ -62,17 +62,11 @@ export function runSlash(cmd: string, arg: string, deps: SlashDeps): Line[] {
   if (cmd === "runs") {
     const traces = deps.listTraces(arg || undefined);
     if (!traces.length) return [sys("  (no runs yet)")];
-    return traces.map((t) => sys(`  ${t.id}  ${t.outcome}  ${t.tokens}tok`));
+    // Duration surfaced so /runs doubles as the waterfall picker (open one with /trace <id>).
+    return traces.map((t) => sys(`  ${t.id}  ${t.outcome}  ${t.tokens}tok  ${(t.durationMs / 1000).toFixed(1)}s`));
   }
-  if (cmd === "trace") {
-    try {
-      const t = deps.readTrace(arg);
-      const cost = t.costUsd == null ? "subscription" : `$${t.costUsd.toFixed(4)}`;
-      return [sys(`  ${t.id} — ${t.task}\n  outcome=${t.outcome} tokens=${t.tokens} cost=${cost} tools=${t.toolCalls.map((c) => `${c.tool}×${c.count}`).join(",")}\n  artifacts: ${t.artifacts.join(", ") || "none"}`)];
-    } catch {
-      return [sys(`  no such trace: ${arg}`)];
-    }
-  }
+  // NOTE: `/trace` is handled interactively in App.tsx (it opens the TraceInspector over the derived
+  // span tree — see deriveTrace); it can't live here because that needs workspace file access.
   if (cmd === "policies") {
     const notes = deps.listPolicies(arg);
     if (!notes.length) return [sys("  (no policies)")];

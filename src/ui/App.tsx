@@ -4,8 +4,12 @@ import { TextInput, Spinner } from "@inkjs/ui";
 import type { Database } from "bun:sqlite";
 import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCard";
 import { QuestionCard } from "./QuestionCard";
+import { StatusBar } from "./StatusBar";
+import { TraceInspector } from "./TraceInspector";
 import { parseInput } from "./input";
 import { BANNER } from "./banner";
+import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
+import { deriveTrace, type Span } from "../core/trace-tree";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
@@ -144,6 +148,13 @@ export function App(props: {
   const streamedRef = useRef(false);
   const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
   const pendingAuditRef = useRef<{ agent: string; text: string; userTurnId?: string; runId?: string; taskId?: string } | null>(null);
+  // Plan 10 live status: statusRef is the authoritative per-run status map (dodges stale closures in
+  // the rapid onStep stream); `statuses` is the rendered snapshot. Plan 02: `inspect` holds the
+  // derived span tree while the waterfall inspector is open (it owns the keyboard via cardKeyRef).
+  const statusRef = useRef<StatusMap>(new Map());
+  const [statuses, setStatuses] = useState<AgentStatus[]>([]);
+  const [inspect, setInspect] = useState<{ rootId: string; spans: Span[] } | null>(null);
+  const clearStatuses = () => { statusRef.current = new Map(); setStatuses([]); };
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
@@ -153,7 +164,7 @@ export function App(props: {
     // when the captain's first keystroke arrives, so we forward it to the active card. (A card-owned
     // useInput registers a beat after its render commits and would drop that first key — the hang
     // we're fixing.) The card publishes its handler to cardKeyRef during render.
-    if (pending) { cardKeyRef.current?.(input, key); return; }
+    if (pending || inspect) { cardKeyRef.current?.(input, key); return; } // a card OR the trace inspector owns the keyboard
     if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else { void (async () => { await props.mcp?.closeAll(); exit(); })(); } return; }
     if (sugg.length > 0) {
       if (key.upArrow)   { setSelected((s) => cycleIndex(s, sugg.length, -1)); return; }
@@ -202,7 +213,13 @@ export function App(props: {
   const deps = (model: Model) => makeDeps({
     ws: props.ws, db: props.db, model,
     requestApproval,
-    onStep: ({ tool, agent, delta, note }) => {
+    onStep: (ev) => {
+      const { phase, tool, agent, delta, note, argsPreview } = ev;
+      // Plan 10: fold every phase-tagged event into the live status map (drives the StatusBar).
+      if (phase && ev.runId) {
+        statusRef.current = statusReducer(statusRef.current, ev, Date.now());
+        setStatuses(statusList(statusRef.current));
+      }
       if (delta) {
         streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
         const { blocks } = splitCompletedBlocks(streamRef.current);
@@ -214,7 +231,13 @@ export function App(props: {
       }
       // A run-level breadcrumb (e.g. a delegation verification verdict) — surface it to the captain.
       if (note) { flushStream(); say({ kind: "system", text: `  ${note}` }); return; }
-      if (tool) { flushStream(); setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); }
+      // The scrollback breadcrumb now fires at real tool_start time (the status bar carries the live
+      // role; the ↳ line stays as the record). argsPreview is redacted + capped upstream.
+      if (phase === "tool_start" && tool) {
+        flushStream();
+        setActivity(`${agent} → ${tool}()`);
+        say({ kind: "system", text: `  ↳ ${agent} → ${tool}()${argsPreview ? " " + argsPreview : ""}` });
+      }
     },
     pollSteer: () => steerQueue.current.shift() ?? null,
     signal: aborter.current?.signal,
@@ -266,6 +289,7 @@ export function App(props: {
     steerQueue.current = [];
     aborter.current = new AbortController();
     streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
+    clearStatuses();
     try {
       if (parsed.kind === "chat") {
         pendingAuditRef.current = { agent: "root", text: parsed.text };
@@ -310,7 +334,7 @@ export function App(props: {
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
           maybeSayAuthExpired(res.text);
-          say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)})` });
+          say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}) · /trace to inspect` });
         }
         setRoster(loadIndex(props.db)); // create_agent may have grown the squad
       } else {
@@ -348,13 +372,13 @@ export function App(props: {
           updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)));
         }
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
-        say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
+        say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s)) · /trace to inspect` });
       }
     } catch (e) {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
       // explicit-model guard for a misconfigured OpenRouter agent. Surface it instead of crashing Ink.
       say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
-    } finally { pendingAuditRef.current = null; setBusy(false); }
+    } finally { pendingAuditRef.current = null; setBusy(false); clearStatuses(); }
   };
 
   const runSlash = async (cmd: string, arg: string) => {
@@ -514,6 +538,17 @@ export function App(props: {
       say({ kind: "system", text: `  reindexed ${listSkills(props.ws).length} skill(s) from files` });
       return;
     }
+    if (cmd === "trace") {
+      // No arg → the latest user-triggered run (the "what just happened" case); <id> → that run.
+      const id = arg.trim() || latestUserRunId(props.ws);
+      if (!id) { say({ kind: "system", text: "  (no runs yet)" }); return; }
+      let spans: Span[];
+      try { spans = deriveTrace(props.ws, id); }
+      catch (e) { say({ kind: "system", text: `  no such trace: ${id} (${e instanceof Error ? e.message : String(e)})` }); return; }
+      if (!spans.length) { say({ kind: "system", text: `  no such trace: ${id}` }); return; }
+      setInspect({ rootId: id, spans });
+      return;
+    }
     runSlashPure(cmd, arg, {
       roster,
       listTraces: (a?: string) => listTraces(props.ws, a),
@@ -521,6 +556,12 @@ export function App(props: {
       listPolicies: (a: string) => listPolicies(props.ws, a),
       deletePolicy: (a: string, p: string) => deletePolicy(props.ws, a, p),
     }).forEach(say);
+  };
+
+  /** The most recent user-triggered run id (listTraces is sorted by start time ascending). */
+  const latestUserRunId = (ws: string): string | undefined => {
+    const userRuns = listTraces(ws).filter((t) => t.triggeredBy === "user");
+    return userRuns.length ? userRuns[userRuns.length - 1].id : undefined;
   };
 
   return (
@@ -549,7 +590,16 @@ export function App(props: {
           </Text>
         );
       })}
-      {pending && (() => {
+      {inspect && (
+        <TraceInspector
+          rootId={inspect.rootId}
+          spans={inspect.spans}
+          width={mdWidth + 2}
+          keyHandlerRef={cardKeyRef}
+          onClose={() => { cardKeyRef.current = null; setInspect(null); }}
+        />
+      )}
+      {!inspect && pending && (() => {
         if (pending.req.kind === "ask_human") {
           return (
             <QuestionCard
@@ -570,9 +620,11 @@ export function App(props: {
           />
         );
       })()}
-      {!pending && (
+      {!inspect && !pending && busy && <RunStatus activity={activity} />}
+      {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
+      {!inspect && statuses.length > 0 && <StatusBar statuses={statuses} width={mdWidth + 2} />}
+      {!inspect && !pending && (
         <>
-          {busy && <RunStatus activity={activity} />}
           <Box>
             <Text color={busy ? "gray" : "cyan"}>{busy ? "❯ " : "> "}</Text>
             <TextInput
@@ -583,7 +635,7 @@ export function App(props: {
               onSubmit={submit}
             />
           </Box>
-          {!pending && sugg.length > 0 && (
+          {sugg.length > 0 && (
             <Box flexDirection="column">
               {sugg.map((c, i) => {
                 const on = i === Math.min(selected, sugg.length - 1);

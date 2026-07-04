@@ -30,6 +30,12 @@ import type { McpManager, McpServerStatus } from "../core/mcp/manager";
 const ENTER = "\r";
 const DOWN = "[B";
 
+// Arrow keys + Esc as the ANSI escapes ink parses (DOWN above is "[B").
+const UP = "[A";
+const RIGHT = "[C";
+const LEFT = "[D";
+const ESC = "";
+
 const usage = { inputTokens: { total: 3 }, outputTokens: { total: 2 } } as const;
 const finalText = (text: string) =>
   ({ content: [{ type: "text", text }], finishReason: { unified: "stop", raw: "stop" }, usage }) as unknown as LanguageModelV3GenerateResult;
@@ -596,4 +602,117 @@ test("delegation with acceptance criteria: a twice-failed verdict is surfaced to
   expect(root.verification.every((v) => v.verdict.pass === false)).toBe(true);
   const task = readTaskState(ws, taskIdForRun(root.id));
   expect(task?.verifications.length).toBe(2);
+});
+
+// ── Plan 02: the /trace waterfall inspector (Layer-1, through the real App) ──
+
+test("/trace opens the waterfall inspector over the latest run's span tree", async () => {
+  const { props } = await setup({ model: mockModel("waterfall reply") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "say hi", ENTER);
+  await waitFor(lastFrame, "waterfall reply");
+  await send(stdin, "/trace", ENTER);
+  await waitFor(lastFrame, "TRACE");                 // the inspector header
+  expect(lastFrame()).toContain("root · chat");      // the root run span row
+  expect(lastFrame()).toContain("llm #1");           // an llm span derived from the transcript
+  expect(lastFrame()).toContain("expand");           // the key hint footer
+});
+
+test("waterfall: ↓ then ⏎ drills into a span's per-kind detail; q closes it", async () => {
+  const { props } = await setup({ model: mockModel("hello detail") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "hello detail");
+  await send(stdin, "/trace", ENTER);
+  await waitFor(lastFrame, "TRACE");
+  await send(stdin, DOWN);                            // move selection off the root run onto llm #1
+  await send(stdin, ENTER);                           // open the detail panel
+  await waitFor(lastFrame, "iteration: 1");           // llm detail (only shown in the drill-in)
+  expect(lastFrame()).toContain("response:");
+  await send(stdin, "q");                             // first q closes the detail panel…
+  await waitForGone(lastFrame, "iteration: 1");
+  await send(stdin, "q");                             // …second q closes the inspector
+  await waitForGone(lastFrame, "TRACE");
+});
+
+test("waterfall renders an error span (✗) for a failed run and shows the error on drill-in", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const failing = new MockLanguageModelV3({ doGenerate: (() => { throw new Error("kaboom-trace"); }) as any });
+  const { props } = await setup({ model: failing });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "do the impossible", ENTER);
+  await waitFor(lastFrame, "failed");
+  await send(stdin, "/trace", ENTER);
+  await waitFor(lastFrame, "TRACE");
+  expect(lastFrame()).toContain("✗");                 // the failed run/llm span marker
+  await send(stdin, DOWN);                            // onto the errored llm span
+  await send(stdin, ENTER);
+  await waitFor(lastFrame, "kaboom-trace");           // the error detail
+});
+
+// ── Plan 10: the live status bar (Layer-1, through the real App) ──
+
+test("status bar shows the agent's live state during a run and clears on completion", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(300); return finalText("done"); }) as any });
+  const { props } = await setup({ model: slow });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "root thinking");          // the StatusBar segment (distinct from RunStatus's "root · thinking…")
+  await waitFor(lastFrame, "done");                   // run finishes
+  await waitForGone(lastFrame, "root thinking");      // …and the bar clears
+});
+
+test("status bar shows the current tool while an agent delegates (parent delegating + child live)", async () => {
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "write the thing" }),
+    finalText("root done"),
+  ) as any });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slowWriter = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(350); return finalText("writer done"); }) as any });
+  const { ws, db, props } = await setup({ model: rootModel });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  // route root → rootModel, writer → the slow model so the delegation is observable mid-flight
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (props as any).resolveModel = (id: string) => id === "writer" ? { model: slowWriter, modelId: "m" } : { model: rootModel, modelId: "m" };
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "have writer do it", ENTER);
+  await waitFor(lastFrame, "root delegating");        // parent shows the delegate_task in flight
+  expect(lastFrame()).toContain("writer");            // the child agent is live in the bar at the same time
+  await waitFor(lastFrame, "root done");
+  await waitForGone(lastFrame, "root delegating");    // bar clears when the cascade completes
+});
+
+test("status bar shows 'waiting' while an approval card is up, then clears on approval", async () => {
+  const createCall = {
+    content: [{ type: "tool-call", toolCallId: "c1", toolName: "create_agent", input: JSON.stringify({ id: "scout", role: "Scouts", identity: "A scout" }) }],
+    finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+  } as unknown as LanguageModelV3GenerateResult;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(createCall, finalText("Created scout")) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "make a scout", ENTER);
+  await waitFor(lastFrame, "New agent");              // the approval card is up…
+  expect(lastFrame()).toContain("waiting");           // …and the bar loudly shows the squad is blocked on the captain
+  await send(stdin, "y");                              // approve
+  await waitFor(lastFrame, "Created scout");
+  await waitForGone(lastFrame, "waiting");             // bar clears after the run completes
+});
+
+test("waterfall: ↓↑ navigate, ← collapses a run's subtree, → re-expands, Esc closes", async () => {
+  const { props } = await setup({ model: mockModel("collapse me") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "collapse me");
+  await send(stdin, "/trace", ENTER);
+  await waitFor(lastFrame, "llm #1");                 // the run's subtree is visible
+  await send(stdin, DOWN);                            // move down…
+  await send(stdin, UP);                              // …and back to the root run (selection index 0)
+  await send(stdin, LEFT);                            // collapse the root run
+  await waitForGone(lastFrame, "llm #1");             // its subtree is hidden
+  await send(stdin, RIGHT);                           // expand again
+  await waitFor(lastFrame, "llm #1");
+  await send(stdin, ESC);                             // Esc closes the inspector
+  await waitForGone(lastFrame, "TRACE");
 });

@@ -3,6 +3,7 @@
  *  spend (tokens + advisory USD) and the single place caps + cancellation are enforced. */
 import { generateText, streamText, type ModelMessage, type ToolSet } from "ai";
 import type { AgentDef } from "../schemas/agent";
+import type { StepInfo } from "./events";
 import { steerMarker } from "./prompt";
 
 const DEFAULT_MODEL_IDLE_TIMEOUT_MS = 120_000;
@@ -69,7 +70,7 @@ export async function runLoop(opts: {
   system: string;
   messages: ModelMessage[];
   tools: ToolSet;
-  onStep?: (info: { text?: string; tool?: string; delta?: string }) => void;
+  onStep?: (info: StepInfo) => void;
   pollSteer?: () => string | null;
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
@@ -115,6 +116,7 @@ export async function runLoop(opts: {
     let out: ModelOut;
     try {
       transcript.push({ ts: new Date().toISOString(), kind: "model_request", iteration: iterations + 1, data: { messageCount: messages.length } });
+      opts.onStep?.({ phase: "model_start" }); // → "thinking" until a delta or the response arrives
       // guardModelCall wraps the call so a wedged stream (no bytes/close/error, abort ignored) can't
       // hang the loop: it returns on completion, on abort, OR after an idle timeout. onChunk pings the
       // idle watchdog so a long-but-progressing response is never falsely killed.
@@ -131,7 +133,7 @@ export async function runLoop(opts: {
             onError: ({ error }) => { streamErr = error; },
             // Each chunk both pings the idle watchdog AND surfaces the text delta so the UI can
             // render the response live as it streams (instead of all at once when the run returns).
-            onChunk: ({ chunk }) => { progress(); if (chunk.type === "text-delta") opts.onStep?.({ delta: chunk.text }); },
+            onChunk: ({ chunk }) => { progress(); if (chunk.type === "text-delta") opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text }); },
           });
           await s.consumeStream();
           if (streamErr) throw streamErr;
@@ -164,13 +166,15 @@ export async function runLoop(opts: {
     costUsd += provCost ?? opts.priceUsd?.({ inputTokens: inTok, outputTokens: outTok }) ?? 0;
 
     if (toolCalls.length === 0) {
-      opts.onStep?.({ text });
+      opts.onStep?.({ phase: "final", text });
       return done({ text, iterations: iterations + 1 });
     }
+    // Tool start/end (real timing, argsPreview) come from the tool execute() wrapper in tools.ts —
+    // the single seam Plan 02 (spans) and Plan 10 (live status) share. Here we only keep the counts
+    // + the post-hoc tool_call transcript record (full args, for the drill-in).
     for (const tc of toolCalls) {
       counts[tc.toolName] = (counts[tc.toolName] ?? 0) + 1;
       transcript.push({ ts: new Date().toISOString(), kind: "tool_call", iteration: iterations + 1, data: tc });
-      opts.onStep?.({ tool: tc.toolName });
     }
     messages.push(...responseMessages);
   }
