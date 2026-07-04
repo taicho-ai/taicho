@@ -225,7 +225,12 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
         inputArtifacts: z.array(z.string()).optional().describe("artifact handles ('id' or 'id@vN') to hand to the child by reference"),
       }),
-      execute: async ({ to, goal, context, criteria, inputArtifacts }) => {
+      execute: async ({ to, goal, context, criteria, inputArtifacts }, options) => {
+        // The AI SDK's toolCallId is the SAME id the instrument() wrapper stamps on this call's
+        // tool_start/tool_end span (Plan 02), so threading it into runChild lets the LIVE waterfall nest
+        // each child under the EXACT delegate_task span that spawned it — deterministic for concurrent
+        // delegations in one turn, mirroring the post-hoc childRunId linkage.
+        const spawnCallId = options?.toolCallId;
         const budgetMsg = () => `work item budget (${agent.budgets.maxWorkItemsPerRequest}) exhausted`;
         // Each delegation (initial AND the verification retry) consumes one work item — config
         // disposes, so the retry is no new runaway vector.
@@ -245,7 +250,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         // Spawn one child run (initial OR the verification retry). Both get the SAME input handles BY
         // REFERENCE, and each spawn folds its spend + produced handles into this run's aggregate/graph.
         const spawn = async (childContext?: string) => {
-          const child = await ctx.runChild({ to, goal, context: childContext, criteria, inputArtifacts: resolved });
+          const child = await ctx.runChild({ to, goal, context: childContext, criteria, inputArtifacts: resolved, callId: spawnCallId });
           ctx.delegatedOut.push(child.runId);
           ctx.childTraces.push(child.trace);
           ctx.outputArtifacts.push(...child.trace.artifacts); // hand-off graph: handles the child produced
