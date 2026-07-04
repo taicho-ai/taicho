@@ -23,7 +23,7 @@ import { searchKnowledge } from "../knowledge/retrieval";
 import { getActiveSkills, mkSkillId, writeSkill } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
 import { Skill } from "../schemas/skill";
-import { classifyCommand, runShell } from "./command-guard";
+import { classifyCommand, runShell, runSandboxed } from "./command-guard";
 import { argsPreview, capJson } from "./instrument";
 
 // read_artifact body cap: default returns metadata + summary only; a body read is capped so an
@@ -492,17 +492,53 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
 
   if (agent.tools.includes("run_command"))
     set.run_command = tool({
-      description: "Run a shell command in the workspace. Commands the safety guard clears run automatically; anything it flags is sent to the captain for approval first. Returns { exitCode, stdout, stderr }.",
+      description: "Run a shell command in the workspace. It runs in a restricted SANDBOX first (no network; writes confined to the workspace) — a command the sandbox completes returns straight away. The safety guard clears benign commands; anything it flags — OR any command proposed after UNTRUSTED content (a fetched web page or an MCP tool result) has entered this run — needs the captain's approval first. A command the sandbox can't complete escalates to a captain-approved unsandboxed run. Returns { exitCode, stdout, stderr, sandbox }.",
       inputSchema: z.object({ command: z.string(), cwd: z.string().optional() }),
       execute: async ({ command, cwd }) => {
         const classify = ctx.classifyCommand ?? classifyCommand;
+        const sandboxed = ctx.runSandboxed ?? runSandboxed;
         const run = ctx.runShell ?? runShell;
+        const workdir = cwd ?? ctx.ws;
         const v = classify(command);
-        if (v.decision !== "allow") {
-          const d = await ctx.requestApproval({ kind: "run_command", command, reason: v.reason });
+        const tainted = ctx.untrusted?.entered === true;
+
+        // Explicit-review path — a dcg `block` verdict, OR the injection guard (untrusted content has
+        // already entered this run), routes the command to the captain's approval card. Critically, a
+        // dcg `allow` does NOT bypass the injection guard: ingest-untrusted-then-run-shell is the
+        // classic prompt-injection→execution chain, so once tainted the human MUST see the command.
+        // On approve it runs as the captain reviewed it (they inspected the exact command); on reject,
+        // nothing runs. No sandbox dance here — the human IS the gate for these.
+        if (v.decision !== "allow" || tainted) {
+          const reason = tainted
+            ? `untrusted content (${ctx.untrusted.sources.join(", ") || "external source"}) entered this run before this command — possible prompt-injection→execution; ${v.reason ?? "confirm to run"}`
+            : v.reason;
+          const d = await ctx.requestApproval({ kind: "run_command", command, reason });
           if (d.type !== "approve") return { rejected: true };
+          return { ...run(command, workdir), sandbox: "approved" as const };
         }
-        return run(command, cwd ?? ctx.ws);
+
+        // Auto-run path (dcg cleared it AND no untrusted content) — sandbox-then-escalate. Contain the
+        // command FIRST (least privilege: no network, writes confined to the workspace). A clean run —
+        // OR a benign non-zero exit the sandbox did NOT cause (e.g. `grep` no-match) — returns straight
+        // to the model with ZERO human friction. We ESCALATE (ask the captain to approve an unsandboxed
+        // run, never silently) only when either: the sandbox couldn't be enforced on this host, or it
+        // actively DENIED the command a privilege ("Operation not permitted" — a write-escape outside
+        // the workspace). NOTE (declared limitation): a network denial surfaces as an ordinary network
+        // error, indistinguishable from a real outage, so it is NOT auto-escalated — the model sees the
+        // failure and should reach the network via read_url / an MCP tool, not raw shell.
+        const sb = sandboxed(command, workdir);
+        const sandboxDenied = sb.enforced && sb.exitCode !== 0 && /operation not permitted|sandbox/i.test(sb.stderr);
+        if (sb.enforced && !sandboxDenied)
+          return { exitCode: sb.exitCode, stdout: sb.stdout, stderr: sb.stderr, sandbox: "enforced" as const };
+        const escalateReason = sb.enforced
+          ? `the sandbox DENIED this command an operation it needs (exit ${sb.exitCode}: "operation not permitted" — it tried to write outside the workspace). Approve to re-run WITHOUT the sandbox.`
+          : "no OS sandbox is enforced on this host — approve to run this command WITHOUT a sandbox.";
+        const d = await ctx.requestApproval({ kind: "run_command", command, reason: escalateReason });
+        if (d.type !== "approve")
+          return sb.enforced
+            ? { exitCode: sb.exitCode, stdout: sb.stdout, stderr: sb.stderr, sandbox: "enforced" as const, escalationDeclined: true }
+            : { rejected: true };
+        return { ...run(command, workdir), sandbox: "unsandboxed" as const };
       },
     });
 
@@ -524,15 +560,27 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
     },
   });
 
-  // Every agent gets every connected MCP server's tools (global defaults like Firecrawl + any
-  // deck-added server) — no per-agent opt-in for now; gatekeeping can come later. Built-ins already
-  // in `set` win (first-wins), so an MCP tool can't shadow a privileged built-in (e.g. a server
-  // "create" with a tool "agent" namespacing to create_agent).
+  // Per-agent MCP allowlist (Plan 08 security hardening). An agent opts into MCP capability the same
+  // way it opts into a built-in: a `mcp:<server>` entry in agent.tools grants EVERY tool that server
+  // exposes; `mcp:<server>/<tool>` grants exactly one. Ungranted MCP tools are NEVER handed to this
+  // agent — previously every connected server's tools went to every agent ("gatekeeping can come
+  // later"); this IS that gate. Built-ins already in `set` win (first-wins), so an MCP tool still
+  // can't shadow a privileged built-in (e.g. a server tool namespacing to create_agent).
+  const mcpToolNames = new Set<string>();
   if (mcp)
-    for (const [k, v] of Object.entries(mcp.allTools()))
-      if (!(k in set)) set[k] = v;
+    for (const ref of agent.tools) {
+      if (!ref.startsWith("mcp:")) continue;
+      for (const [k, v] of Object.entries(mcp.toolsForRef(ref.slice("mcp:".length))))
+        if (!(k in set)) { set[k] = v; mcpToolNames.add(k); }
+    }
 
-  return instrument(set, ctx);
+  // Untrusted-content sources (Plan 08 injection guard): a fetched web page (read_url) or ANY MCP
+  // tool result is attacker-influenceable text entering this run. instrument() arms ctx.untrusted the
+  // moment one of these returns; run_command then forces the captain's approval (see run_command).
+  const untrustedSources = new Set<string>(mcpToolNames);
+  if ("read_url" in set) untrustedSources.add("read_url");
+
+  return instrument(set, ctx, untrustedSources);
 }
 
 /** Wrap every tool's `execute()` — the ONE seam Plan 02 (accurate span bars) and Plan 10 (live
@@ -540,8 +588,14 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
  *  argsPreview) into the run's `spanEvents` (→ transcript.jsonl → waterfall) and a live typed phase
  *  via `ctx.emitStep`. Rebuilds each tool object (never mutates the shared MCP tool instances). A
  *  `delegate_task` result's `runId` is captured on `tool_end` so the waterfall can nest the child
- *  run under its delegating tool span. */
-function instrument(set: ToolSet, ctx: RunContext): ToolSet {
+ *  run under its delegating tool span.
+ *
+ *  Plan 08: this is also where the injection guard arms. When a tool in `untrustedSources` (read_url
+ *  or any granted MCP tool) RETURNS, we flip ctx.untrusted.entered — attacker-influenceable content
+ *  has now entered the run, so a later run_command must be human-confirmed. Deliberately conservative:
+ *  touching an untrusted source at all arms the guard (even an error return means the run reacted to
+ *  external I/O), which errs toward MORE approval, never less. */
+function instrument(set: ToolSet, ctx: RunContext, untrustedSources?: Set<string>): ToolSet {
   let seq = 0;
   const out: ToolSet = {};
   for (const [name, t] of Object.entries(set)) {
@@ -557,6 +611,12 @@ function instrument(set: ToolSet, ctx: RunContext): ToolSet {
       let result: unknown, err: string | undefined;
       try {
         result = await orig(input, options);
+        // Arm the injection guard once an untrusted source returns (see fn doc). Guarded on
+        // ctx.untrusted so partial unit-test contexts without the field don't crash.
+        if (ctx.untrusted && untrustedSources?.has(name)) {
+          ctx.untrusted.entered = true;
+          if (!ctx.untrusted.sources.includes(name)) ctx.untrusted.sources.push(name);
+        }
         return result;
       } catch (e) {
         err = e instanceof Error ? e.message : String(e);
