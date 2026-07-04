@@ -328,7 +328,7 @@ test("read_artifact body is size-capped and truncated with a marker when include
   const c = { ws: w, agentId: "root", runId: "root/1" } as unknown as RunContext;
   const set = toolsForAgent(agent(["read_artifact"]), c);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const out = await set.read_artifact!.execute!({ id: "big", includeBody: true, maxBytes: 1000 }, { toolCallId: "1", messages: [] } as any) as any;
+  const out = await set.read_artifact!.execute!({ id: "big", includeBody: true, maxChars: 1000 }, { toolCallId: "1", messages: [] } as any) as any;
   expect(out.truncated).toBe(true);
   expect(out.body.length).toBeLessThan(1200);                    // ~1000 + a short marker, NOT the full 5000
   expect(out.body).toContain("truncated");
@@ -364,8 +364,9 @@ test("write_artifact (legacy) routes through the store: versioned + provenance, 
   const set = toolsForAgent(agent(["write_artifact"]), c);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const out = await set.write_artifact!.execute!({ topicSlug: "hello", markdown: "# Hi" }, { toolCallId: "1", messages: [] } as any) as any;
-  expect(existsSync(out.path)).toBe(true);                       // back-compat: a real file path
-  expect(c.artifacts).toEqual([out.path]);
+  expect(existsSync(out.path)).toBe(true);                       // back-compat: the model still gets a real file path
+  // hand-off graph records the HANDLE (id@vN) like save_artifact, NOT an un-resolvable absolute path.
+  expect(c.artifacts).toEqual(["hello@v1"]);
   const stored = listArtifacts(w);
   expect(stored.length).toBe(1);
   expect(stored[0]).toMatchObject({ id: "hello", version: 1, producer: "writer" });

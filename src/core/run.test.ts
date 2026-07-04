@@ -58,7 +58,9 @@ test("worker run writes an immutable artifact and a completed trace", async () =
   expect(res.text).toBe("done");
   expect(res.trace.outcome).toBe("completed");
   expect(res.trace.artifacts.length).toBe(1);
-  expect(existsSync(res.trace.artifacts[0])).toBe(true);
+  // the trace records a resolvable HANDLE (id@vN), not an un-resolvable absolute path
+  expect(res.trace.artifacts[0]).toBe("hello@v1");
+  expect(readArtifact(ws, res.trace.artifacts[0])!.id).toBe("hello");
   expect(existsSync(join(ws, "runs", "writer", `${res.runId.split("/")[1]}.json`))).toBe(true);
 });
 
@@ -171,7 +173,9 @@ test("root delegate_task spawns a child run that produces its own trace", async 
   expect(child.agent).toBe("writer");
   expect(child.triggeredBy).toBe(res.runId);
   expect(child.artifacts.length).toBe(1);
-  expect(existsSync(child.artifacts[0])).toBe(true);
+  // the child's trace hands the parent a resolvable HANDLE (id@vN), not an absolute path
+  expect(child.artifacts[0]).toBe("hello@v1");
+  expect(readArtifact(ws, child.artifacts[0])!.id).toBe("hello");
 });
 
 test("an agent whose iteration budget is exhausted yields a blocked-outcome trace", async () => {

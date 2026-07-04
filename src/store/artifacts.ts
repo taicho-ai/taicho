@@ -7,8 +7,8 @@
  *  Layout:  artifacts/<id>/v<N>.json   — the envelope (metadata + summary + location)
  *           artifacts/<id>/v<N>.<ext>  — the body bytes (local-file artifacts only)
  *           artifacts/_index.json      — manifest: the latest version of every id (rebuildable) */
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, renameSync } from "node:fs";
+import { join, basename } from "node:path";
 import { Artifact, type ArtifactLocation, parseHandle } from "../schemas/artifact";
 import { paths } from "./files";
 
@@ -99,11 +99,17 @@ export function readArtifact(ws: string, handle: string): Artifact | null {
   try { return Artifact.parse(JSON.parse(readFileSync(file, "utf8"))); } catch { return null; }
 }
 
-/** Raw body bytes for a local-file artifact; null if external or missing. Payload-agnostic (Buffer). */
+/** Raw body bytes for a local-file artifact; null if external or missing. Payload-agnostic (Buffer).
+ *  RELOCATABLE addressing: the body path is recomputed from the CURRENT ws + the artifact's id + the
+ *  stored filename (v<N>.<ext>), exactly as envelopeFile recomputes the envelope path. The absolute
+ *  path baked into the envelope goes stale the moment the workspace dir is renamed/moved, but the
+ *  bytes still live at ws/artifacts/<id>/v<N>.<ext> — so we address them by ws, not by the baked path. */
 export function readArtifactBody(ws: string, handle: string): Buffer | null {
   const a = readArtifact(ws, handle);
-  if (!a || a.location.kind !== "file" || !existsSync(a.location.path)) return null;
-  return readFileSync(a.location.path);
+  if (!a || a.location.kind !== "file") return null;
+  const file = join(idDir(ws, a.id), basename(a.location.path));
+  if (!existsSync(file)) return null;
+  return readFileSync(file);
 }
 
 export interface ArtifactFilter {
@@ -136,15 +142,38 @@ function readManifestRaw(ws: string): Artifact[] {
   } catch { return []; }
 }
 
-/** The manifest (latest version per id); rebuilt from envelopes when the file is missing/empty. */
+/** The manifest (latest version per id). _index.json is a REBUILDABLE cache, never authoritative:
+ *  rebuilt from the canonical envelopes when it's missing/empty, and RECONCILED against a cheap dir
+ *  scan so a valid-but-stale manifest (an id dropped by a cross-process last-writer-wins upsert)
+ *  self-heals — we union in any on-disk id the manifest is missing. The common case is a single
+ *  readdir + set-membership check (no file reads); recovery only touches ids the manifest lacks. */
 export function readManifest(ws: string): Artifact[] {
   const raw = readManifestRaw(ws);
-  return raw.length ? raw : rebuildArtifactIndex(ws);
+  if (!raw.length) return rebuildArtifactIndex(ws);
+  const dir = paths.artifactDir(ws);
+  if (!existsSync(dir)) return raw;
+  const known = new Set(raw.map((a) => a.id));
+  const recovered: Artifact[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || known.has(entry.name)) continue;
+    const top = artifactVersions(ws, entry.name).at(-1);
+    if (!top) continue;
+    const a = readArtifact(ws, `${entry.name}@v${top}`);
+    if (a) recovered.push(a);
+  }
+  if (!recovered.length) return raw;
+  const healed = [...raw, ...recovered];
+  writeManifest(ws, healed);   // make the heal durable
+  return healed;
 }
 
 function writeManifest(ws: string, arr: Artifact[]): void {
   mkdirSync(paths.artifactDir(ws), { recursive: true });
-  writeFileSync(manifestPath(ws), JSON.stringify(arr, null, 2));
+  // atomic publish (temp + rename) so a concurrent reader never observes a half-written manifest.
+  const dest = manifestPath(ws);
+  const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(arr, null, 2));
+  renameSync(tmp, dest);
 }
 
 /** `a` is always the newest version of its id (saveArtifact only ever appends), so it replaces any

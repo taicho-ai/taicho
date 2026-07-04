@@ -47,8 +47,8 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           producer: ctx.agentId, runId: ctx.runId, body: markdown,
         });
         const path = a.location.kind === "file" ? a.location.path : artifactHandle(a);
-        ctx.artifacts.push(path);
-        return { path };
+        ctx.artifacts.push(artifactHandle(a)); // hand off by handle (id@vN) like save_artifact — an absolute path is un-resolvable to the parent
+        return { path };                       // model still gets the concrete path for back-compat
       },
     });
 
@@ -86,9 +86,9 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       inputSchema: z.object({
         id: z.string().describe("artifact handle: 'id' (latest) or 'id@vN'"),
         includeBody: z.boolean().default(false).describe("pull the body too (size-capped) — off by default"),
-        maxBytes: z.number().int().positive().max(READ_ARTIFACT_HARD_MAX).default(READ_ARTIFACT_CAP).describe(`body cap in chars (max ${READ_ARTIFACT_HARD_MAX})`),
+        maxChars: z.number().int().positive().max(READ_ARTIFACT_HARD_MAX).default(READ_ARTIFACT_CAP).describe(`body cap in characters (max ${READ_ARTIFACT_HARD_MAX})`),
       }),
-      execute: async ({ id, includeBody, maxBytes }) => {
+      execute: async ({ id, includeBody, maxChars }) => {
         const a = readArtifact(ctx.ws, id);
         if (!a) return { error: `no artifact "${id}"` };
         const meta = {
@@ -101,13 +101,13 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           return { ...meta, external: a.location.uri, note: "external artifact — its body lives in the fronting system; use that system's tools to fetch it" };
         const buf = readArtifactBody(ctx.ws, id);
         if (!buf) return { ...meta, error: "body bytes missing" };
-        const cap = Math.min(maxBytes, READ_ARTIFACT_HARD_MAX);
+        const cap = Math.min(maxChars, READ_ARTIFACT_HARD_MAX);
         const text = buf.toString("utf8");
         const truncated = text.length > cap;
         return {
           ...meta, bytes: buf.length, truncated,
           body: truncated
-            ? text.slice(0, cap) + `\n…[truncated ${text.length - cap} of ${text.length} chars — raise maxBytes up to ${READ_ARTIFACT_HARD_MAX} or read a narrower artifact]`
+            ? text.slice(0, cap) + `\n…[truncated ${text.length - cap} of ${text.length} chars — raise maxChars up to ${READ_ARTIFACT_HARD_MAX} or read a narrower artifact]`
             : text,
         };
       },
