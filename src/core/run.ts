@@ -79,6 +79,11 @@ export interface RunContext {
   notes: string[];
   workItems: { n: number };
   childSpend: { tokens: number; costUsd: number };
+  /** Spend from THIS run's own delegation-checker calls (Plan 06). Kept separate from childSpend
+   *  (which is child RUNS) but folded into trace.aggregate the same way — the checker makes real,
+   *  metered model calls this run caused, so the aggregate must include them to stay honest. costUsd
+   *  is 0 for subscription runs (unpriced), and aggregate.costUsd is null there anyway. */
+  verifierSpend: { tokens: number; costUsd: number };
   childTraces: RunTrace[];
   delegationGuard: (to: string) => { ok: true } | { ok: false; error: string };
   /** Criteria→verdict records for this run's delegations; written to trace.verification + transcript. */
@@ -207,6 +212,7 @@ export async function executeRun(
     notes: [],
     workItems: { n: 0 },
     childSpend: { tokens: 0, costUsd: 0 },
+    verifierSpend: { tokens: 0, costUsd: 0 },
     childTraces: [],
     delegationGuard: (to) => {
       if (!canDelegate(opts.agent, to)) return { ok: false, error: `not permitted to delegate to "${to}"` };
@@ -309,7 +315,12 @@ export async function executeRun(
     artifacts: ctx.artifacts, delegatedOut: ctx.delegatedOut, verification: ctx.verifications, outcome,
     tokens: result.tokens, costUsd: subscription ? null : result.costUsd,
     costNote: subscription ? "subscription" : undefined,
-    aggregate: { tokens: result.tokens + ctx.childSpend.tokens, costUsd: subscription ? null : result.costUsd + ctx.childSpend.costUsd },
+    // aggregate = this run's own loop + child RUNS + this run's delegation-checker calls. All three
+    // are real model spend this run caused; verifier spend is 0 for subscription (costUsd stays null).
+    aggregate: {
+      tokens: result.tokens + ctx.childSpend.tokens + ctx.verifierSpend.tokens,
+      costUsd: subscription ? null : result.costUsd + ctx.childSpend.costUsd + ctx.verifierSpend.costUsd,
+    },
     notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };

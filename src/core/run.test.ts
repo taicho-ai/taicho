@@ -9,6 +9,7 @@ import { openDb } from "../store/db";
 import { seedRoot, reindex, loadIndex, loadAgent, createAgent, serializeAgent } from "../store/roster";
 import { AgentDef } from "../schemas/agent";
 import { makeDeps, executeRun } from "./run";
+import { runChecker } from "./verification";
 import { readTrace } from "../store/trace";
 import { writePolicy } from "../store/policy";
 import { PolicyNote } from "../schemas/policy";
@@ -332,7 +333,8 @@ test("a delegating run's aggregate includes child spend", async () => {
   const childId = res.trace.delegatedOut[0];
   const child = readTrace(ws, childId);
   expect(res.trace.aggregate).toBeTruthy();
-  expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + child.tokens); // exact: locks out double-counting
+  expect(res.trace.verification.length).toBe(0);                              // no criteria ⇒ no checker call ⇒ zero verifier spend
+  expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + child.tokens); // exact: own loop + child run, no verifier, no double-count
 });
 
 test("delegation is refused once the per-request run ceiling is hit", async () => {
@@ -389,6 +391,7 @@ test("aggregate sums the whole run-tree exactly (root + mid + leaf)", async () =
   const mid = readTrace(ws, midId);
   const leafId = mid.delegatedOut[0];
   const leaf = readTrace(ws, leafId);
+  expect(res.trace.verification.length).toBe(0);                                         // no criteria anywhere ⇒ no verifier spend in the tree
   expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + mid.tokens + leaf.tokens); // exact tree sum, no double-count
 });
 
@@ -597,4 +600,70 @@ test("the verification retry consumes a work item — a budget-exhausted retry i
   expect(res.trace.verification[0].verdict.pass).toBe(false);
   expect(res.trace.notes.some((n) => /retry refused|work item/i.test(n))).toBe(true);
   expect((model as any).doGenerateCalls.length).toBe(4);         // delegate + worker + checker + boss final — no retry child, no 2nd checker
+});
+
+test("aggregate folds checker spend: with criteria it equals own loop + child runs + verifier calls (cost-honesty)", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  // Criteria fails once then passes ⇒ 2 child runs (initial + retry) AND 2 independent checker calls,
+  // both real, metered model spend this run caused. The aggregate must include ALL of it.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // boss
+    text("attempt one, no Y"),                                    // worker (1st)
+    text('{"pass": false, "reasons": ["missing Y"]}'),           // checker (1st) — independent model call
+    text("attempt two, mentions Y"),                             // worker (retry)
+    text('{"pass": true, "reasons": []}'),                       // checker (2nd)
+    text("boss done"),                                           // boss final
+  ) as any });
+  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+
+  // two child runs and two checker calls happened
+  expect(res.trace.delegatedOut.length).toBe(2);
+  expect(res.trace.verification.length).toBe(2);
+  // child-run spend (workers have no sub-delegation, so trace.tokens == its aggregate.tokens)
+  const childTokens = res.trace.delegatedOut.reduce((s, id) => s + readTrace(ws, id).tokens, 0);
+  // verifier spend is recorded on the verification records (same numbers folded into the aggregate)
+  const verifierTokens = res.trace.verification.reduce((s, v) => s + v.tokens, 0);
+  expect(verifierTokens).toBeGreaterThan(0);                     // the checker really spent metered tokens
+  // THE INVARIANT (strengthened): aggregate = own loop + child runs + verifier calls — nothing under-reported
+  expect(res.trace.aggregate!.tokens).toBe(res.trace.tokens + childTokens + verifierTokens);
+  // and it changes the number: dropping verifier spend would under-report by verifierTokens
+  expect(res.trace.aggregate!.tokens).toBeGreaterThan(res.trace.tokens + childTokens);
+
+  // cost mirrors tokens under the identity pricer, and verifier cost is really folded in (not just tokens)
+  const childCost = res.trace.delegatedOut.reduce((s, id) => s + (readTrace(ws, id).aggregate?.costUsd ?? 0), 0);
+  const verifierCost = res.trace.verification.reduce((s, v) => s + (v.costUsd ?? 0), 0);
+  expect(verifierCost).toBeGreaterThan(0);
+  expect(res.trace.aggregate!.costUsd).toBeCloseTo(res.trace.costUsd! + childCost + verifierCost, 6);
+});
+
+test("subscription checker is cost-honest: costUsd is 0 (never fabricated) even with a pricer, tokens still metered so they fold", async () => {
+  const { ws } = await boot();
+  const agent = await loadAgent(ws, "root");
+  // subscription:true ⇒ Codex backend ⇒ the checker streams (doStream) and its USD is unpriced.
+  const model = new MockLanguageModelV3({ doStream: textStream('{"pass": true, "reasons": []}') });
+  const r = await runChecker({
+    model, agent, subscription: true,
+    priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens, // present, but must be ignored on subscription
+    goal: "g", criteria: "must mention Y", output: "mentions Y",
+  });
+  expect(r.verdict.pass).toBe(true);
+  expect(r.costUsd).toBe(0);            // subscription: real USD is never invented, even though a pricer exists
+  expect(r.tokens).toBeGreaterThan(0);  // tokens ARE metered — this is what folds into the aggregate honestly
+});
+
+test("non-subscription checker prices its real spend: runChecker returns a USD cost the aggregate now folds in", async () => {
+  const { ws } = await boot();
+  const agent = await loadAgent(ws, "root");
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text('{"pass": true, "reasons": []}')) as any });
+  const r = await runChecker({
+    model, agent, subscription: false,
+    priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens,
+    goal: "g", criteria: "c", output: "o",
+  });
+  expect(r.verdict.pass).toBe(true);
+  expect(r.costUsd).toBeGreaterThan(0); // a real cost — folding it is exactly what closes the cost-honesty gap
+  expect(r.tokens).toBeGreaterThan(0);
 });
