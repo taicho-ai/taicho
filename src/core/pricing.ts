@@ -1,5 +1,7 @@
 /** Per-model USD pricing for advisory cost accounting. Tokens are the hard budget; cost is
  *  secondary. Values are USD per 1,000,000 tokens. Unknown models price to 0 (never throw). */
+import { log } from "./logger";
+
 export interface ModelPrice { inUsdPerMTok: number; outUsdPerMTok: number; }
 
 const TABLE: Record<string, ModelPrice> = {
@@ -13,7 +15,7 @@ let warned = false;
 export function priceUsd(model: string, usage: { inputTokens: number; outputTokens: number }): number {
   const p = TABLE[model];
   if (!p) {
-    if (!warned) { warned = true; console.warn(`taicho: no price for model "${model}" — cost reported as 0`); }
+    if (!warned) { warned = true; log.warn(`no price for model "${model}" — cost reported as 0`); }
     return 0;
   }
   return (usage.inputTokens / 1_000_000) * p.inUsdPerMTok + (usage.outputTokens / 1_000_000) * p.outUsdPerMTok;

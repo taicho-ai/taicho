@@ -5,6 +5,7 @@ import { z } from "zod";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { McpServerConfig } from "./config";
+import { log } from "../core/logger";
 
 const StoreSchema = z.record(z.string(), McpServerConfig);
 export type McpStore = z.infer<typeof StoreSchema>;
@@ -23,7 +24,7 @@ export function readMcpStore(ws: string): McpStore {
   for (const [name, spec] of Object.entries(raw as Record<string, unknown>)) {
     const parsed = McpServerConfig.safeParse(spec);
     if (parsed.success) out[name] = parsed.data;
-    else console.warn(`taicho: skipping invalid MCP server "${name}" in mcp-store`);
+    else log.warn(`skipping invalid MCP server "${name}" in mcp-store`);
   }
   return out;
 }

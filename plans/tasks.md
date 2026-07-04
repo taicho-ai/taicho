@@ -142,18 +142,26 @@ thin failure diagnosis, "is it done?", "why did it do that?"). **Residual → Pl
 
 ---
 
-## Plan 03 — Structured logging & headless surface *(placeholder)*
+## Plan 03 — Structured logging & headless surface
+
+**Detail:** [`../docs/events.md`](../docs/events.md) — event schema + headless/tail reference.
 
 Residual observability gaps the waterfall does **not** cover, plus the headless half it enables:
-- [ ] **Structured file logging** that doesn't fight Ink — replace scattered `console.error/warn`
-      (which corrupt/​vanish under the full-screen TUI) with a leveled, file-captured `taicho.log`;
-      a general `--verbose`/debug mode (today only codex-specific `TAICHO_DEBUG`).
-- [ ] **Documented event schema + live tail** for headless/external observers (the e2e harness polls
-      files by hand today).
-- [ ] **Headless run mode** — a `taicho run "<goal>"` (or programmatic) entry that drives `executeRun`
-      without Ink. `RunDeps` is already the seam (model, approval, onStep are all injectable); the only
-      real design point is the approval channel (auto-reject / policy-driven / prompt-on-stdin). Also
-      makes real-binary e2e far cheaper, and is a prerequisite for Plan 04's scheduled triggers (v2).
+- [x] **Structured file logging** that doesn't fight Ink — replaced the scattered `console.error/warn`
+      (which corrupt/​vanish under the full-screen TUI) with a leveled, file-captured `taicho.log`
+      (`src/core/logger.ts`, redaction-central); a general `--verbose`/`-v` debug mode
+      (`TAICHO_VERBOSE`/`TAICHO_LOG_LEVEL`, historical codex-only `TAICHO_DEBUG` now raises the
+      general level).
+- [x] **Documented event schema + tail** for headless/external observers — `docs/events.md` documents
+      the `transcript.jsonl`/ledger/`RunTrace` schema; `taicho tail [runId] [--follow]` streams a run's
+      events (`src/core/events.ts`). *(Live per-event streaming within one in-flight run waits on Plan
+      04 Phase 5's incremental transcript flush — the reader already handles it; see docs/events.md §1a.)*
+- [x] **Headless run mode** — `taicho run "<goal>"` drives `executeRun` without Ink (`src/core/headless.ts`;
+      `index.tsx` dispatches on argv before the Ink render). Approval channel decision: **auto-reject by
+      default** (a headless run is unattended — auto-approving would let a model spawn agents / run shell
+      unsupervised), with `--approve auto` and `--approve prompt` opt-ins. Also makes real-binary e2e far
+      cheaper (`scripts/e2e-headless.ts`, no VHS tape), and is a prerequisite for Plan 04's scheduled
+      triggers (v2).
 
 ---
 
@@ -415,8 +423,8 @@ the tracking view; the runbook is the build view.
 - [x] Delete `e2e/record-agent-flow.expect` + the rendered-MP4 flow once the tape passes. *Deleted the expect recorder; CLI_TESTING.md rewritten to drop the rendered-MP4 flow. `e2e/agent-flow.tui.ts` (Layer 2) kept.*
 
 ### Phase 3 — Scenario roster
-- [ ] `conversation-audit` tape (port the interrupted-turn scenario from `e2e/conversation-audit.tui.ts`).
-- [ ] Convention: every headline capability (Plans 01, 04, 06, 10) adds its proof scenario (e2e-model mode + tape + assertions) in its own test phase.
+- [x] `conversation-audit` tape (port the interrupted-turn scenario from `e2e/conversation-audit.tui.ts`). *`conversation-audit` e2e-model mode (model call hangs until the run's abort fires, so Esc mid-run deterministically marks the turn `interrupted`) + `e2e/scenarios/conversation-audit.ts` (tape: chat turn → Esc mid-run; 7 assertions on the preserved audit trail — interrupted trace, input.json, ledger, context `interrupted_run_not_safe_as_context`, transcript, failure.md, task). Run ids discovered dynamically.*
+- [x] Convention: every headline capability (Plans 01, 04, 06, 10) adds its proof scenario (e2e-model mode + tape + assertions) in its own test phase. *Established by the two shipped scenarios (`agent-flow`, `conversation-audit`): each is a self-contained `Scenario` (mode + tape + assertions) under `e2e/scenarios/`; future headline plans follow the same shape in their own phase.*
 
 ### Phase 4 — Docs & CI
 - [x] Rewrite `CLI_TESTING.md` around the new harness; add Layer 4 to `TESTING.md`'s table; update `CLAUDE.md`. *CLI_TESTING.md rewritten (assertion contract kept, manifest = deliverable, gotchas documented); TESTING.md now four layers + a Layer 4 section; CLAUDE.md testing line updated.*

@@ -28,6 +28,7 @@ import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
 import type { Verdict } from "./command-guard";
+import { log } from "./logger";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -286,7 +287,7 @@ export async function executeRun(
     const globals = cache.notes.filter((n) => n.agent !== opts.agent.id);
     applied = [...own, ...globals];
   } catch (e) {
-    console.error(`policy load failed for ${opts.agent.id}:`, e);
+    log.error(`policy load failed for ${opts.agent.id}`, e);
   }
 
   // Auto-inject relevant deck knowledge for agents that use the KB (like coaching notes): keyword+
@@ -303,7 +304,7 @@ export async function executeRun(
           knowledgeBlock = "## Relevant knowledge (shared deck memory — call recall for more)\n" +
             kb.hits.map((h) => `- [${h.id}] ${h.title}${h.summary ? " — " + h.summary : ""}`).join("\n");
         }
-      } catch (e) { console.error(`kb recall failed for ${opts.agent.id}:`, e); }
+      } catch (e) { log.error(`kb recall failed for ${opts.agent.id}`, e); }
     }
   }
 
@@ -329,7 +330,7 @@ export async function executeRun(
       skillIds = shown.map((s) => s.id);
       skillsBlock = header + "\n" + shown.map((s) => `- ${s.name}: ${s.description}`).join("\n");
     }
-  } catch (e) { console.error(`skill inject failed for ${opts.agent.id}:`, e); }
+  } catch (e) { log.error(`skill inject failed for ${opts.agent.id}`, e); }
 
   // Input artifacts handed in by a delegating parent: render HANDLES + summaries, never inline the
   // body — the child pulls what it needs with read_artifact (size-capped). This is hand-off by reference.
@@ -367,7 +368,7 @@ export async function executeRun(
   });
   const outcome: RunTrace["outcome"] =
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";
-  if (result.error) console.error(`run ${runId} failed:`, result.error);
+  if (result.error) log.error(`run ${runId} failed`, result.error);
 
   const trace: RunTrace = {
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,

@@ -9,6 +9,7 @@ import { AgentDef } from "../schemas/agent";
 import { paths } from "./files";
 import { syncRegistry } from "../core/registry";
 import type { TaichoConfig } from "./config";
+import { log } from "../core/logger";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
@@ -125,7 +126,7 @@ export async function reindex(ws: string, db: Database): Promise<void> {
     const file = paths.agentFile(ws, id);
     if (!existsSync(file)) continue;
     try { agents.push(parseAgent(await readFile(file, "utf8"))); }
-    catch (e) { console.error(`skipping ${id}: ${String(e)}`); }
+    catch (e) { log.warn(`skipping agent ${id}`, e); }
   }
   if (agents.length) syncRegistry(db, agents);
 }

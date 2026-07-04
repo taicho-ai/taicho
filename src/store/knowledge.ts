@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { KbNode } from "../schemas/knowledge";
 import { paths } from "./files";
 import { putVector } from "./vectors";
+import { log } from "../core/logger";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
@@ -47,7 +48,7 @@ export function listNodes(ws: string): KbNode[] {
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".md")) continue;
     try { out.push(parseNode(readFileSync(join(dir, f), "utf8"))); }
-    catch (e) { console.error(`skipping kb node ${f}: ${String(e)}`); }
+    catch (e) { log.warn(`skipping kb node ${f}`, e); }
   }
   return out;
 }
@@ -173,7 +174,7 @@ export async function reembedAll(db: Database, embed: (t: string) => Promise<Flo
   let n = 0;
   for (const r of rows) {
     try { putVector(db, r.id, "kb", await embed(`${r.title}\n${r.summary ?? ""}\n${r.content}`)); n++; }
-    catch (e) { console.error(`reembed ${r.id} failed: ${String(e)}`); }
+    catch (e) { log.error(`reembed ${r.id} failed`, e); }
   }
   return n;
 }
