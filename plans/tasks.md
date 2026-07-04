@@ -5,6 +5,19 @@ and a detail doc under `reference/`. This file is the index; `reference/` carrie
 
 Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[?]` open **decision** (needs a call before build)
 
+## How these plans get built (read first if you're an implementing agent)
+
+**[`reference/agent-execution-workflow.md`](reference/agent-execution-workflow.md)** — the
+operating contract. Short version: one workflow agent per plan (or phase group), each in **its
+own git worktree** branched off `main` (`git worktree add ../taicho-plan-NN -b plan-NN-<slug>
+main` + `bun install`; the repo root is the captain's LIVE workspace — never work or run there),
+implement per the plan + reference doc (all Phase 0 decisions are closed — don't re-open them),
+**test your own work** (typecheck + `bun test` + Layer-1 for UI + the evidence harness for video
+proof), flip your checkboxes here in the same PR, and ship **one PR per unit of work** with the
+evidence manifest pasted in. Suggested PR order: **Plan 11 first** (so later PRs can prove
+themselves), then 01 (Ph 1–3), then 02 Ph 0 + 10 Ph 1 together, then the rest as interlocks
+clear. Review happens against the plan docs, in the captain's main session.
+
 ---
 
 ## Plan 01 — Hand-Off Artifacts
