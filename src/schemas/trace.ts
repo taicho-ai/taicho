@@ -46,6 +46,9 @@ export const RunTrace = z.object({
   verification: z.array(VerificationRecord).default([]), // criteria→verdict records for this run's delegations (default keeps old traces parseable)
   outcome: z.enum(["completed", "blocked", "failed", "interrupted"]),
   tokens: z.number().default(0),
+  // Plan 05: peak estimated context size (system + messages, chars/4) actually sent to the model this
+  // run — post-compaction. Advisory (a gate estimate, not billed tokens). Default keeps old traces parseable.
+  contextTokens: z.number().default(0),
   costUsd: z.number().nullable().default(0),
   costNote: z.string().optional(),
   aggregate: z.object({ tokens: z.number(), costUsd: z.number().nullable() }).optional(),

@@ -14,7 +14,7 @@ export type SpanStatus = "ok" | "error" | "running" | "blocked" | "interrupted";
 
 export type SpanDetail =
   | { kind: "run"; outcome: RunTrace["outcome"]; task: string; tokens: number; costUsd: number | null; aggregate?: RunTrace["aggregate"]; notes: string[]; ledger: RunTrace["ledger"]; verification: RunTrace["verification"]; inputMessages?: unknown }
-  | { kind: "llm"; iteration: number; tokens?: number; finishReason?: string; responseText?: string; error?: string }
+  | { kind: "llm"; iteration: number; tokens?: number; finishReason?: string; responseText?: string; error?: string; contextTokens?: number; compacted?: boolean }
   | { kind: "tool"; tool: string; argsPreview?: string; args?: string; result?: string; error?: string; childRunId?: string }
   | { kind: "approval"; label: string; approvalKind: string };
 
@@ -78,6 +78,7 @@ function childSpansOf(ws: string, trace: RunTrace): Span[] {
     const done = resp.get(iter) ?? err.get(iter);
     const errored = !resp.get(iter) && !!err.get(iter);
     const d = asObj(done?.data);
+    const rd = asObj(r.data); // model_request carries Plan 05's context estimate + compaction flag
     const toolCalls = Array.isArray(d.toolCalls) ? d.toolCalls : [];
     spans.push({
       id: `${trace.id}#llm${iter}`,
@@ -97,6 +98,8 @@ function childSpansOf(ws: string, trace: RunTrace): Span[] {
         finishReason: errored ? undefined : toolCalls.length ? "tool-calls" : "stop",
         responseText: str(d.text),
         error: errored ? str(d.error) : undefined,
+        contextTokens: num(rd.contextTokens),
+        compacted: rd.compacted === true,
       },
     });
   }
