@@ -29,7 +29,8 @@ issues tsc won't).
   model/resolver/pricer (`buildFromAuth`), renders the Ink `App`. Boot failures (e.g. a
   misconfigured provider) print a `taicho: …` line and `process.exit(1)`.
 - **`src/ui/`** — `App.tsx` is the REPL (chat, `@agent` direct messages, `/slash` commands,
-  Esc-to-cancel/steer, approval cards). `slash.ts`, `input.ts`, `ProposalCard.tsx`.
+  Esc-to-cancel/steer, approval cards). `slash.ts`, `input.ts`, `ProposalCard.tsx`,
+  `TraceInspector.tsx` (the `/trace` waterfall — see **Observability** below).
 - **`src/core/`** — the engine:
   - `loop.ts` — the single metered agent loop. Model proposes, config disposes: budgets/caps and
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.
@@ -62,6 +63,8 @@ issues tsc won't).
   - `providers/openai-codex.ts` — ChatGPT-subscription (Codex backend) provider: a `createOpenAI`
     instance with a custom `fetch` that injects the OAuth bearer + Codex headers and refreshes on 401.
   - `auth/` — OAuth PKCE login, token refresh, profile store, constants, status.
+  - `trace-tree.ts` / `trace-layout.ts` — the pure derivation + layout behind the `/trace` waterfall
+    (see **Observability** below); `TraceInspector.tsx` is the view.
   - `prompt.ts`, `tools.ts`, `registry.ts`, `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
 - **`src/store/`** — persistence: `config.ts` (provider/model/auth resolution + `taicho.yaml`),
   `db.ts` (SQLite), `roster.ts`, `thread.ts`, `trace.ts`, `policy.ts`, `files.ts`, `vectors.ts`,
@@ -69,6 +72,42 @@ issues tsc won't).
   chat turns + background dispatches, `reconcileTasks`/`reindexTasks` on boot).
 - **`src/coaching/`** — corrections → durable, conditional, approval-gated policy notes.
 - **`src/schemas/`** — zod schemas (`agent`, `brief`, `policy`, `trace`).
+
+## Observability — the `/trace` waterfall (Plan 02)
+
+taicho already produces rich per-run evidence (traces, `transcript.jsonl`, the coaching ledger,
+verification verdicts, `failure.md`) — but it was **write-only**. The **`/trace` inspector is the
+reader** for it: a LangSmith-style waterfall (a span tree with absolute-time bars, drill-into-span),
+native to the terminal, **no external service**.
+
+- **Command surface.** `/trace` (no arg) opens the **latest** `triggeredBy:"user"` run; `/trace <id>`
+  opens that run. `/runs` is the picker (rows carry duration). A trace = **one root user run plus its
+  delegation subtree** — exactly like one LangSmith trace. Wired in `App.tsx` (`setInspect`); the
+  post-run `trace: <id>` breadcrumb carries a `· /trace to inspect` hint.
+- **`deriveTrace(ws, rootRunId): Span[]`** (`src/core/trace-tree.ts`) — **pure** (files in → `Span[]`
+  out, no Ink; unit-tested over real-engine fixtures in `trace-tree.test.ts`). Walks `delegatedOut`
+  recursively into **run** spans; reads each run's `transcript.jsonl` into **llm** spans (pair
+  `model_request`→`model_response`/`model_error` by `iteration`), **tool** spans (`tool_start`→
+  `tool_end` by `callId`), and **approval** spans (`approval_start`→`approval_end`); a `delegate_task`
+  tool span **adopts** its child run span via the captured `childRunId` (a verification retry's failed
+  first attempt nests under the same tool span). Tokens/cost roll up onto run spans (reuses
+  `aggregate`).
+- **The `Span` model** — `kind: run|llm|tool|approval`, `parentId`, `startMs`/`endMs`, `tokens`,
+  `costUsd`, `status`, `detail` — is the single unit everything renders from. `trace-layout.ts` (pure)
+  maps `[traceStart, traceEnd]` onto a fixed column budget with a **≥1-cell min-width floor** (so
+  sub-second llm/tool spans never vanish) and a duration-adaptive scale; expand/collapse is a set of
+  collapsed span ids → visible-rows.
+- **`TraceInspector.tsx`** — the Ink view. Keys: `↑↓` move · `→/←` expand/collapse · `⏎` open detail ·
+  `q`/esc close. It owns the keyboard while open via the **`cardKeyRef` pattern** (App's one
+  boot-registered `useInput` forwards keys — dodges the first-keystroke race). Detail per kind: **llm**
+  (response, tokens, finish reason, context estimate) · **tool** (args/result/error) · **run**
+  (outcome, rolled-up cost, notes, the **coaching ledger** = policies/KB/skills
+  retrieved·applied·skipped, verification verdicts).
+- **Span capture (Phase 0).** The bars' durations need `tool_start`/`tool_end` and
+  `approval_start`/`approval_end` in the transcript — emitted by the tool `execute()` wrapper and the
+  `requestApproval` wrapper (the **same seam Plan 10's live status uses**). Approval waits are **core**
+  spans, not optional: human latency dominates wall-clock here, so a waterfall without them would
+  misattribute the wait.
 
 ## Models, providers & auth
 

@@ -130,8 +130,8 @@ gap at once (see `reference/observability-waterfall.md` §2 for the gap→featur
 - [x] Update `COMMANDS` + `/help`.
 
 ### Phase 5 — Tests & docs
-- [ ] Real-binary e2e (tui-test): run a delegation, open `/trace`, assert the tree renders + a drill-in works.
-- [ ] Update `TESTING.md`, `CLAUDE.md` (an observability section), `prompt.ts` if needed.
+- [x] Real-binary e2e (tui-test): run a delegation, open `/trace`, assert the tree renders + a drill-in works. *(shipped as a Layer-4 VHS evidence scenario per Plan 11 — video is evidence, workspace files are the assertion — rather than a tui-test: `e2e/scenarios/trace-inspector.ts` reuses the `agent-flow` e2e model to produce a real delegation, then drives `/trace` → the waterfall tree (`Wait+Screen /TRACE/`) → `⏎` drill-in on the root run span → its detail (`Wait+Screen /coaching ledger/`), screenshotting both. 6 file assertions call `deriveTrace` on the produced workspace and assert the delegation tree (root run span + `delegate_task` tool span with `childRunId` + nested proof-agent run span) + the run-span coaching ledger. Deterministic screen-gating: the `/trace` submit gates on "waterfall inspector" (the command's suggester summary — unambiguous, unlike the bare "trace" already on screen in the post-run hint); ran twice, no flake. Needed `Set Height 1000` so the tree + detail box fit without Ink clipping the lower detail lines.)*
+- [x] Update `TESTING.md`, `CLAUDE.md` (an observability section), `prompt.ts` if needed. *(TESTING.md: new "Observability: testing the `/trace` waterfall" section + `trace-inspector` in the Layer-4 examples. CLAUDE.md: new "Observability — the `/trace` waterfall" section (deriveTrace, the Span model, layout floor, the coaching-ledger drill-in, the Phase-0 capture seam) + `TraceInspector.tsx`/`trace-tree.ts`/`trace-layout.ts` in the file lists. prompt.ts: `/trace` slash line updated to `[id] (waterfall inspector; no arg = latest run)`.)*
 
 ### Phase 6 — v2 (deferred)
 - [ ] **Live mode:** stream spans into a redrawing waterfall as the run executes, replacing the flat `↳` breadcrumbs; reuse the same span tree.
