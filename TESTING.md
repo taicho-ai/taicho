@@ -163,6 +163,37 @@ because its derivation is **pure**, most of it needs no terminal at all.
     else); the drill-in gates on **"coaching ledger"** (rendered only in the run-span detail). All
     three proved stable across repeated runs; none is a load-bearing fixed `Sleep`.
 
+## Squad UI: the live status bar + split panes (Plan 10)
+
+While a run executes, two surfaces render the live per-agent status (`core/agent-status.ts`, folded
+from the one typed `onStep` event stream): the **status bar** (`ui/StatusBar.tsx`, one compact
+segment per live agent, pinned above the input) and the **split panes** (`ui/SquadPanes.tsx`, one
+pane per live agent — a status line plus its recent tool lines with `argsPreview`). `/view bar` ·
+`/view panes` · `/view both` (default **both**) switches which surface(s) show; the choice persists
+via `store/prefs.ts` (`<ws>/agents/.prefs.json`, the same file-under-`agents/` mechanism the MCP
+store uses). Both surfaces render from the SAME status model — panes are the detail, the bar the
+complete summary.
+
+- **Pure units** — `ui/SquadPanes.test.tsx` covers `resolveLayout(mode, cols, rows)` (which surfaces
+  show per mode; a too-small terminal degrades EVERY mode to bar-only) and `paneOneLine` (strips the
+  inline markdown markers the REPL hides). `store/prefs.test.ts` covers the `/view` persistence
+  round-trip and the malformed-file fallback.
+- **Layer 1 (Ink)** — the Plan 10 Phase 4 tests in `App.test.tsx` render the real `<App>`: a pane
+  appears on a **delegation** (parent `delegating` + child live at once), streams the tool line with
+  its `argsPreview`, and collapses after completion; `/view` toggles bar/panes/both and the choice
+  round-trips through `getViewMode(ws)`; a `terminalSize={{columns,rows}}` prop (the size seam — else
+  the App tracks live `stdout` + its `resize` event) drives the below-minimum **degrade-to-bar-only**.
+  - **Two non-obvious things for the next author.** (1) The pane deliberately does **not** echo the
+    streamed/final REPLY text — that lives in the scrollback (the reply channel). Duplicating it made
+    the reply appear in the pane *before* the scrollback committed and the trace persisted, so every
+    "`waitFor` the reply, then assert the trace" test returned early and read a not-yet-written trace.
+    The pane's live state + tool lines carry the transparency; the bar + scrollback carry the text.
+    (2) The panes render on **every** event during a run, so keep them cheap: no Ink `borderStyle`
+    box (its yoga re-layout perturbed a timing-sensitive steering test), and the elapsed-ticker runs
+    **only while panes are up** (`hasPanes` gate) — an always-on interval re-rendered the whole App
+    at rest and pushed that same test over its per-test timeout. A left-accent rule (`▎`) is the
+    pane-only marker the Layer-1 tests key on.
+
 ## Adding a dependency (testing-adjacent gotcha)
 
 `bun add <pkg>` re-resolves the whole tree and hits a broken upstream publish (`@vercel/ai-tsconfig@0.0.0`, 404). **Instead: edit `package.json` and run `bun install`**, keeping the `overrides` block intact (it pins the transitive `@ai-sdk/*` packages; never override a *direct* dep — npm's `EOVERRIDE` would then break `npx`, which launches stdio MCP servers). See the note in `package.json`.

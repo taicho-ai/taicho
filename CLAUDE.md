@@ -30,7 +30,12 @@ issues tsc won't).
   misconfigured provider) print a `taicho: …` line and `process.exit(1)`.
 - **`src/ui/`** — `App.tsx` is the REPL (chat, `@agent` direct messages, `/slash` commands,
   Esc-to-cancel/steer, approval cards). `slash.ts`, `input.ts`, `ProposalCard.tsx`,
-  `TraceInspector.tsx` (the `/trace` waterfall — see **Observability** below).
+  `TraceInspector.tsx` (the `/trace` waterfall — see **Observability** below). `StatusBar.tsx` +
+  `SquadPanes.tsx` (Plan 10) are the **live squad view**: the bar is a one-line summary of every live
+  agent; the panes are one-per-agent detail (status line + recent tool lines with `argsPreview`).
+  Both render from `core/agent-status.ts` (the reducer over the `onStep` event stream); `/view
+  bar|panes|both` (default `both`) switches surfaces and persists via `store/prefs.ts`. Panes are
+  display-only — the REPL always owns the keyboard.
 - **`src/core/`** — the engine:
   - `loop.ts` — the single metered agent loop. Model proposes, config disposes: budgets/caps and
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.
