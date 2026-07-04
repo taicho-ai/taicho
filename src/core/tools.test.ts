@@ -16,6 +16,7 @@ import { KbNode } from "../schemas/knowledge";
 import { writeSkill, getActiveSkills } from "../store/skills";
 import { Skill } from "../schemas/skill";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
+import { createBackgroundTask, setTaskFields, mkTaskId } from "../store/task-state";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
 const fakeMcp = {
@@ -72,6 +73,70 @@ test("an MCP tool cannot shadow a privileged built-in", () => {
 test("read_url: present only when granted", () => {
   expect("read_url" in toolsForAgent(agent(["read_url"]), ctx)).toBe(true);
   expect("read_url" in toolsForAgent(agent(["write_artifact"]), ctx)).toBe(false);
+});
+
+// ── Plan 04: background delegation tools (dispatch / check / await) ──
+
+const invoke = (t: unknown, args: object) =>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (t as any).execute(args, { toolCallId: "1", messages: [] });
+
+test("dispatch_task: fires to ctx.dispatchTask, consumes a work item, returns { taskId, status: queued }", async () => {
+  const briefs: Array<Record<string, unknown>> = [];
+  const c = {
+    ws: "/nope", agentId: "boss", runId: "boss/1", workItems: { n: 0 }, notes: [] as string[],
+    delegationGuard: () => ({ ok: true } as const),
+    dispatchTask: async (b: Record<string, unknown>) => { briefs.push(b); return { taskId: "task_bg_1" }; },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any as RunContext;
+  const set = toolsForAgent(agent(["dispatch_task"]), c);
+  const out = await invoke(set.dispatch_task, { to: "worker", goal: "do it later" });
+  expect(out).toMatchObject({ taskId: "task_bg_1", status: "queued", to: "worker" });
+  expect(briefs).toEqual([{ to: "worker", goal: "do it later", context: undefined, criteria: undefined, inputArtifacts: [] }]);
+  expect(c.workItems.n).toBe(1);
+});
+
+test("dispatch_task: reports unavailable when no scheduler is wired (ctx.dispatchTask undefined)", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const c = { ws: "/nope", workItems: { n: 0 }, notes: [] } as any as RunContext;
+  const set = toolsForAgent(agent(["dispatch_task"]), c);
+  const out = await invoke(set.dispatch_task, { to: "w", goal: "g" });
+  expect((out as { error: string }).error).toMatch(/not available/);
+  expect((c as RunContext).workItems.n).toBe(0); // refused before consuming budget
+});
+
+test("check_task: returns status + reference (summary/resultRef) from the persisted record, never a payload", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-tools-"));
+  const db = openDb(ws);
+  const taskId = mkTaskId();
+  createBackgroundTask(ws, db, { taskId, agent: "worker", goal: "g" });
+  setTaskFields(ws, db, taskId, { status: "completed", resultRef: "doc@v1", summary: "the short summary" });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const set = toolsForAgent(agent(["check_task"]), { ws } as any as RunContext);
+  const out = await invoke(set.check_task, { taskId }) as { status: string; resultRef: string; summary: string };
+  expect(out.status).toBe("completed");
+  expect(out.resultRef).toBe("doc@v1");
+  expect(out.summary).toBe("the short summary");
+});
+
+test("check_task: unknown taskId → actionable error", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-tools-"));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const set = toolsForAgent(agent(["check_task"]), { ws } as any as RunContext);
+  const out = await invoke(set.check_task, { taskId: "task_nope" });
+  expect((out as { error: string }).error).toMatch(/no task/);
+});
+
+test("await_task: blocks via ctx.awaitTask and returns its status + reference", async () => {
+  const c = {
+    ws: "/nope",
+    awaitTask: async (id: string) => ({ status: "completed", summary: "s", resultRef: "r", runId: `${id}/run1` }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any as RunContext;
+  const set = toolsForAgent(agent(["await_task"]), c);
+  const out = await invoke(set.await_task, { taskId: "task_x" }) as { status: string; resultRef: string };
+  expect(out.status).toBe("completed");
+  expect(out.resultRef).toBe("r");
 });
 
 test("read_url: returns an actionable error when FIRECRAWL_API_KEY is unset", async () => {

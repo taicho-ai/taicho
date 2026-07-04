@@ -77,6 +77,28 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS skills_status ON skills(status);
       `),
   },
+  // v5: task queue index (Plan 04). Files (tasks/*.json) are canon; this is a rebuildable index so
+  // `/tasks` can list/query fast and background tasks survive restarts. reindexTasks() rebuilds it.
+  {
+    version: 5,
+    up: (db) =>
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tasks (
+          id          TEXT PRIMARY KEY,
+          agent       TEXT,
+          goal        TEXT,
+          status      TEXT NOT NULL,
+          kind        TEXT NOT NULL DEFAULT 'chat',   -- 'chat' (a watched turn) | 'background' (dispatched)
+          root_run_id TEXT,
+          result_ref  TEXT,
+          summary     TEXT,
+          created     TEXT,
+          updated     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);
+        CREATE INDEX IF NOT EXISTS tasks_kind   ON tasks(kind);
+      `),
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

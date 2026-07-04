@@ -41,6 +41,7 @@ const PartialBudgets = z.object({
   maxWorkItemsPerRequest: z.number().int().positive().optional(),
   maxTokensPerRun: z.number().int().positive().optional(),
   maxCostPerRunUsd: z.number().positive().optional(),
+  maxConcurrentRuns: z.number().int().positive().optional(), // Plan 04: per-agent background concurrency cap
 }).optional();
 
 const AgentOverride = z.object({

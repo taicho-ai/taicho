@@ -12,7 +12,9 @@ import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy } from "../store/policy";
 import { appendTurn, shouldPersistTurn } from "../store/thread";
 import { appendLedgerTurn, newTurnId, recordContextDecision, statusFromOutcome } from "../store/conversation";
-import { createTaskState, taskIdForRun, updateTaskFromTrace } from "../store/task-state";
+import { createTaskState, taskIdForRun, updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId } from "../store/task-state";
+import { TaskScheduler } from "../core/tasks";
+import type { RunResult, TaskAwaitResult, RunDeps } from "../core/run";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { isStdioServer } from "../store/config";
@@ -127,7 +129,16 @@ export function App(props: {
   const [model, setModel] = useState<Model | null>(props.model);
   const [resolveModel, setResolveModel] = useState<ResolveModelFn | undefined>(() => props.resolveModel);
   const [priceUsd, setPriceUsd] = useState<PriceFn | undefined>(() => props.priceUsd);
-  const steerQueue = useRef<string[]>([]);
+  // Plan 04 Phase 4: per-run steer routing replaces the single global queue. steerRoutes maps a
+  // runId → its pending steers; activeRuns tracks which agent each live run belongs to (for @agent
+  // routing); foregroundRootRef is the current watched turn's root run (plain steer target).
+  const steerRoutes = useRef<Map<string, string[]>>(new Map());
+  const activeRuns = useRef<Map<string, { agent: string; triggeredBy: string }>>(new Map());
+  const foregroundRootRef = useRef<string | null>(null);
+  // Plan 04 Phase 2/3: the background task scheduler (persistent queue + per-agent concurrency cap).
+  const schedulerRef = useRef<TaskScheduler | null>(null);
+  if (!schedulerRef.current) schedulerRef.current = new TaskScheduler();
+  const scheduler = schedulerRef.current;
   const thread = useRef<ModelMessage[]>(props.rootThread ?? []);
   const aborter = useRef<AbortController | null>(null);
   // The active approval/question card publishes its key handler here (during its render). App's one
@@ -199,7 +210,73 @@ export function App(props: {
   const requestApproval = (req: ApprovalRequest) =>
     new Promise<ApprovalDecision>((resolve) => setPending({ req, resolve }));
 
-  const deps = (model: Model) => makeDeps({
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  const TERMINAL_TASK = new Set(["completed", "failed", "interrupted", "cancelled", "partial", "blocked"]);
+  const taskSummary = (id: string): TaskAwaitResult => {
+    const t = readTaskState(props.ws, id);
+    if (!t) return { status: "unknown", error: `no task "${id}"` };
+    return { status: t.status, summary: t.summary, resultRef: t.resultRef, runId: t.rootRunId || undefined };
+  };
+
+  // A background task settled — record its outcome + a reference (NOT the payload) and notify the
+  // captain. A cancelled task keeps its cancelled status (the interrupted outcome doesn't override it).
+  const settleTask = (taskId: string, agentId: string, res: RunResult) => {
+    const wasCancelled = readTaskState(props.ws, taskId)?.status === "cancelled";
+    const children = res.trace.delegatedOut.map((id) => readTrace(props.ws, id));
+    updateTaskFromTrace(props.ws, taskId, res.trace, children, props.db);
+    const resultRef = res.trace.artifacts[0] ?? res.runId; // hand-off BY REFERENCE (handle or run id)
+    setTaskFields(props.ws, props.db, taskId, { resultRef, summary: res.text, rootRunId: res.runId, ...(wasCancelled ? { status: "cancelled" } : {}) });
+    const status = readTaskState(props.ws, taskId)?.status ?? "completed";
+    const icon = status === "completed" ? "✓" : status === "cancelled" ? "⊗" : "⚠";
+    say({ kind: "system", text: `  ${icon} background task ${taskId} (${agentId}) ${status} — /tasks or check_task` });
+  };
+  const failTask = (taskId: string, agentId: string, e: unknown) => {
+    setTaskFields(props.ws, props.db, taskId, { status: "failed", stepStatus: "failed", summary: e instanceof Error ? e.message : String(e) });
+    say({ kind: "system", text: `  ⚠ background task ${taskId} (${agentId}) failed — /tasks` });
+  };
+
+  // Fire-and-forget a goal onto another agent (dispatch_task). Returns the taskId immediately; the
+  // scheduler starts it when the agent is under its maxConcurrentRuns cap (else it stays queued).
+  const dispatch: NonNullable<RunDeps["dispatch"]> = (o) => {
+    const activeModel = model;
+    if (!activeModel) return { error: "no model configured" };
+    const taskId = mkTaskId();
+    createBackgroundTask(props.ws, props.db, { taskId, agent: o.agent.id, goal: o.goal });
+    say({ kind: "system", text: `  ⇢ dispatched ${taskId} → ${o.agent.id} (background)` });
+    const start = () => {
+      const controller = new AbortController();
+      setTaskFields(props.ws, props.db, taskId, { status: "running", stepStatus: "running" });
+      const childDeps = deps(activeModel, { signal: controller.signal });
+      const messages: ModelMessage[] = [{ role: "user", content: o.context ? `${o.goal}\n\nContext: ${o.context}` : o.goal }];
+      const brief = { from: o.parentAgentId, goal: o.goal, context: o.context, criteria: o.criteria, fromRun: o.parentRunId };
+      const promise = executeRun(childDeps, { agent: o.agent, messages, brief, inputArtifacts: o.inputArtifacts, triggeredBy: taskId })
+        .then((res) => { settleTask(taskId, o.agent.id, res); return res; }, (e) => { failTask(taskId, o.agent.id, e); });
+      return { controller, promise };
+    };
+    scheduler.submit({ taskId, agentId: o.agent.id, cap: o.agent.budgets.maxConcurrentRuns, start });
+    return { taskId };
+  };
+
+  // Block until a background task settles (bounded). Awaits the scheduler promise when it's running,
+  // else polls the persisted record (covers already-settled and still-queued tasks).
+  const awaitTask = async (taskId: string, timeoutMs = 120_000): Promise<TaskAwaitResult> => {
+    const existing = readTaskState(props.ws, taskId);
+    if (!existing) return { status: "unknown", error: `no task "${taskId}"` };
+    if (TERMINAL_TASK.has(existing.status)) return taskSummary(taskId);
+    const running = scheduler.awaitRunning(taskId);
+    if (running) await Promise.race([running, sleep(timeoutMs)]);
+    else {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const t = readTaskState(props.ws, taskId);
+        if (t && TERMINAL_TASK.has(t.status)) break;
+        await sleep(50);
+      }
+    }
+    return taskSummary(taskId);
+  };
+
+  const deps = (model: Model, over?: { signal?: AbortSignal }) => makeDeps({
     ws: props.ws, db: props.db, model,
     requestApproval,
     onStep: ({ tool, agent, delta, note }) => {
@@ -216,14 +293,19 @@ export function App(props: {
       if (note) { flushStream(); say({ kind: "system", text: `  ${note}` }); return; }
       if (tool) { flushStream(); setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); }
     },
-    pollSteer: () => steerQueue.current.shift() ?? null,
-    signal: aborter.current?.signal,
+    // Per-run steer routing (Phase 4): a run polls only ITS own queued steers.
+    pollSteerFor: ({ runId }) => steerRoutes.current.get(runId)?.shift() ?? null,
+    signal: over?.signal ?? aborter.current?.signal,
     priceUsd,
     resolveModel,
     configDefaults: props.configDefaults,
     mcp: props.mcp,
     embed: props.embed,
+    dispatch,
+    awaitTask,
     onRunStart: ({ runId, agent, triggeredBy }) => {
+      activeRuns.current.set(runId, { agent, triggeredBy });
+      if (triggeredBy === "user" && !foregroundRootRef.current) foregroundRootRef.current = runId;
       const pendingAudit = pendingAuditRef.current;
       if (!pendingAudit || triggeredBy !== "user" || agent !== pendingAudit.agent) return;
       const userTurnId = newTurnId(agent, runId, "user");
@@ -239,14 +321,41 @@ export function App(props: {
         content: pendingAudit.text,
         status: "submitted",
       });
-      createTaskState(props.ws, { runId, title: pendingAudit.text, userTurnId });
+      createTaskState(props.ws, { runId, title: pendingAudit.text, userTurnId }, props.db);
+    },
+    onRunEnd: ({ runId }) => {
+      activeRuns.current.delete(runId);
+      steerRoutes.current.delete(runId);
+      if (foregroundRootRef.current === runId) foregroundRootRef.current = null;
     },
   });
+
+  // Route a steer while a run is in flight: `@agent …` → that agent's active run; plain text → the
+  // watched (foreground) root run, falling back to any single active run.
+  const routeSteer = (value: string) => {
+    const push = (runId: string, text: string) => {
+      const q = steerRoutes.current.get(runId) ?? [];
+      q.push(text);
+      steerRoutes.current.set(runId, q);
+    };
+    const parsed = parseInput(value);
+    if (parsed.kind === "address") {
+      const hit = [...activeRuns.current.entries()].find(([, v]) => v.agent === parsed.to);
+      if (!hit) { say({ kind: "system", text: `  no active run for @${parsed.to} to steer` }); return; }
+      push(hit[0], parsed.text);
+      say({ kind: "user", text: `(steer @${parsed.to}) ${parsed.text}` });
+      return;
+    }
+    const target = foregroundRootRef.current ?? [...activeRuns.current.keys()][0];
+    if (!target) { say({ kind: "system", text: "  nothing running to steer" }); return; }
+    push(target, parsed.kind === "chat" ? parsed.text : value);
+    say({ kind: "user", text: `(steer) ${value}` });
+  };
 
   const submit = async (value: string) => {
     if (!value.trim()) return;
 
-    if (busy) { setInputValue(""); steerQueue.current.push(value); say({ kind: "user", text: `(steer) ${value}` }); return; }
+    if (busy) { setInputValue(""); routeSteer(value); return; }
 
     const matches = suggestCommands(value);
     if (matches.length > 0) { acceptSuggestion(matches); return; } // Enter selects the highlighted command
@@ -263,7 +372,7 @@ export function App(props: {
 
     setBusy(true);
     setActivity(parsed.kind === "address" ? `${parsed.to} · thinking…` : "root · thinking…");
-    steerQueue.current = [];
+    foregroundRootRef.current = null; // the next user-triggered onRunStart claims this turn's root
     aborter.current = new AbortController();
     streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
     try {
@@ -299,7 +408,7 @@ export function App(props: {
             runId: res.runId,
             reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
           });
-          updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)));
+          updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)), props.db);
         }
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
@@ -345,7 +454,7 @@ export function App(props: {
             runId: res.runId,
             reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
           });
-          updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)));
+          updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)), props.db);
         }
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
@@ -512,6 +621,22 @@ export function App(props: {
       // reindex
       reindexSkills(props.ws, props.db);
       say({ kind: "system", text: `  reindexed ${listSkills(props.ws).length} skill(s) from files` });
+      return;
+    }
+    if (cmd === "tasks") {
+      const parts = arg.trim().split(/\s+/).filter(Boolean);
+      if (parts[0] === "cancel") {
+        const id = parts[1];
+        if (!id) { say({ kind: "system", text: "  usage: /tasks cancel <taskId>" }); return; }
+        const rec = cancelTaskState(props.ws, props.db, id);
+        if (!rec) { say({ kind: "system", text: `  no task "${id}"` }); return; }
+        const wasLive = scheduler.cancel(id); // abort if running / drop if queued
+        say({ kind: "system", text: `  ⊗ cancelled ${id}${wasLive ? "" : " (was not running)"}` });
+        return;
+      }
+      const rows = listTaskIndex(props.db, { activeOrBackground: true });
+      if (!rows.length) { say({ kind: "system", text: "  (no background tasks)" }); return; }
+      rows.forEach((r) => say({ kind: "system", text: `  [${r.id}] ${r.status} · ${r.agent ?? "?"} · ${r.goal ?? ""}${r.result_ref ? ` → ${r.result_ref}` : ""}` }));
       return;
     }
     runSlashPure(cmd, arg, {

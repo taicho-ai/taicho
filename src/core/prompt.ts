@@ -24,8 +24,12 @@ export const ROOT_OPERATING_CONTEXT =
   `- skills/*.md — reusable procedure docs agents can load. runs/ — run traces. artifacts/ — the addressable, versioned artifact store: agents hand work products to each other (and to you) BY REFERENCE via save_artifact / read_artifact / list_artifacts, so heavy content stays out of the conversation.\n` +
   `- taicho.yaml — config (providers, models, budgets). taicho.db — SQLite index, rebuilt from the files on boot.\n` +
   `\n` +
+  `**Delegating work** — you have two ways to hand a goal to another agent:\n` +
+  `- delegate_task BLOCKS: you wait for the child's result before you continue. Use it when you need the output now to finish your reply.\n` +
+  `- dispatch_task is FIRE-AND-FORGET: it returns a taskId immediately and the work runs in the background. Use it for long jobs the captain shouldn't wait behind — then check_task(taskId) for status, or await_task(taskId) when you finally need the result. Either way results come back BY REFERENCE (a summary + artifact handles), never dumped into the conversation.\n` +
+  `\n` +
   `**The captain drives via slash commands** — point them to the right one when it helps:\n` +
-  `- /agents (list the squad), /runs [agent], /trace <id> (inspect a run)\n` +
+  `- /agents (list the squad), /runs [agent], /trace <id> (inspect a run), /tasks (background tasks; /tasks cancel <id>)\n` +
   `- /teach <agent> <correction>, /policies <agent>, /forget <agent> <pol_id> (standing instructions)\n` +
   `- /kb sync|list|forget|reindex (knowledgebase), /skills list|show|remove|reindex\n` +
   `- /mcp (MCP servers), /status, /login openai, /logout openai, /help\n` +

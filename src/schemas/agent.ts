@@ -13,6 +13,10 @@ export const AgentDef = z.object({
     maxWorkItemsPerRequest: z.number().int().positive().default(20),
     maxTokensPerRun: z.number().int().positive().optional(),
     maxCostPerRunUsd: z.number().positive().optional(),
+    // Plan 04 Phase 3: how many background tasks this agent may have RUNNING at once (config
+    // disposes the concurrency the model proposes via dispatch_task). Undefined ⇒ unbounded;
+    // extra dispatches sit in the persistent queue (status "queued") until a slot frees.
+    maxConcurrentRuns: z.number().int().positive().optional(),
   }).prefault({}),
   isRoot: z.boolean().default(false),
   created: z.string().datetime(),

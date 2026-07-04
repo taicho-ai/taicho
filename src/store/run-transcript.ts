@@ -31,6 +31,15 @@ export function appendRunTranscript(ws: string, runId: string, event: RunTranscr
   appendFileSync(join(dir, "transcript.jsonl"), JSON.stringify(event) + "\n");
 }
 
+/** Plan 04 Phase 5: overwrite the resume checkpoint each iteration with the loop's message array
+ *  (its only real state) + the iteration index. A crashed run's last checkpoint is where a future
+ *  resume would restart. Overwritten (not appended) — only the latest matters. */
+export function writeRunCheckpoint(ws: string, runId: string, state: { iteration: number; messages: ModelMessage[] }): void {
+  const dir = paths.runRecordDir(ws, runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "checkpoint.json"), JSON.stringify({ runId, ...state, updated: new Date().toISOString() }, null, 2));
+}
+
 export function writeRunFinal(ws: string, runId: string, text: string): void {
   const dir = paths.runRecordDir(ws, runId);
   mkdirSync(dir, { recursive: true });

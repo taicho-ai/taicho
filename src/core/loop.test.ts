@@ -215,6 +215,30 @@ test("codexBackend forwards streamed text deltas via onStep (so the UI can rende
   expect(deltas.join("")).toBe(res.text);            // and they reconstruct the final text
 });
 
+test("onEvent flushes each transcript event live (incremental evidence, not buffered to run end)", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(toolCallResp, finalResp) as any });
+  const kinds: string[] = [];
+  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, onEvent: (e) => kinds.push(e.kind) });
+  expect(kinds).toContain("model_request");
+  expect(kinds).toContain("model_response");
+  expect(kinds).toContain("tool_call");
+  // every returned transcript event was also flushed live (same set, in order)
+  expect(kinds).toEqual(res.transcript.map((e) => e.kind));
+});
+
+test("checkpoint is called once per iteration with the loop's message array (the resume point)", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(toolCallResp, finalResp) as any });
+  const snaps: Array<{ iteration: number; msgCount: number }> = [];
+  await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
+    checkpoint: ({ iteration, messages }) => snaps.push({ iteration, msgCount: messages.length }),
+  });
+  expect(snaps.map((s) => s.iteration)).toEqual([1, 2]);        // two iterations (tool round, then final)
+  expect(snaps[1].msgCount).toBeGreaterThan(snaps[0].msgCount); // the message array grew across the round-trip
+});
+
 test("does NOT time out a streaming call that keeps making progress (idle timer resets per chunk)", async () => {
   // ~8 chunks at 20ms each ≈ 160ms total > the 100ms idle window, but each text-delta resets the
   // idle timer, so a steadily-progressing response is never falsely killed.

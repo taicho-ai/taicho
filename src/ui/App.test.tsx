@@ -20,7 +20,7 @@ import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "../sto
 import { listTraces } from "../store/trace";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { loadContext, loadLedger } from "../store/conversation";
-import { readTaskState, taskIdForRun } from "../store/task-state";
+import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { KbNode } from "../schemas/knowledge";
@@ -566,6 +566,51 @@ test("a non-streaming agent reply renders markdown (bold stripped of ** markers)
   await waitFor(lastFrame, "bold");
   expect(lastFrame()).toContain("bold");
   expect(lastFrame()).not.toContain("**bold**"); // markdown was rendered, not shown raw
+});
+
+// ── Plan 04: background dispatch (dispatch_task → keep chatting → settle notification → /tasks) ──
+
+test("dispatch_task runs in the BACKGROUND: root returns immediately, the captain keeps chatting, then a settle notification + /tasks show the finished task", async () => {
+  const GOAL = "research the fusion timeline";
+  const dispatchCall = toolCall("dispatch_task", { to: "bgworker", goal: GOAL });
+  // One model, branching by prompt content, so the root run and the detached worker run each get a
+  // deterministic response no matter how their calls interleave. The worker is delayed so its
+  // completion clearly lands AFTER the foreground turns (proving dispatch never blocked the captain).
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("BACKGROUND-WORKER-IDENTITY")) { await sleep(300); return finalText("background work complete"); } // the detached worker run
+      if (s.includes("what else")) return finalText("still here — that task runs in the background");                    // a 2nd foreground chat turn
+      if (s.includes("task_bg_")) return finalText("kicked it off in the background");                                   // root, after dispatch returned a taskId
+      return dispatchCall;                                                                                                // root, first turn
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "bgworker", role: "Background worker", identity: "BACKGROUND-WORKER-IDENTITY — you do detached work.", tools: [] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "kick off a background research job", ENTER);
+  await waitFor(lastFrame, "dispatched");                       // the ⇢ dispatch breadcrumb
+  await waitFor(lastFrame, "kicked it off in the background");  // root replied WITHOUT waiting on the worker
+
+  // The captain keeps chatting while the background task is still running.
+  await send(stdin, "what else can you do", ENTER);
+  await waitFor(lastFrame, "still here");                       // a second turn ran while the task was in flight
+
+  // The background task settles → a REPL notification appears (notify + /tasks per Phase 0).
+  await waitFor(lastFrame, "background task", 4000);
+  expect(lastFrame()).toContain("completed");
+
+  // /tasks lists the finished background task (the index survived across the turns).
+  await send(stdin, "/tasks", ENTER);
+  await waitFor(lastFrame, GOAL);                               // the goal shows only in the /tasks list row
+
+  // …and it is durably recorded as a completed background task.
+  const rows = listTaskIndex(db, { activeOrBackground: true });
+  const bg = rows.find((r) => r.agent === "bgworker");
+  expect(bg?.status).toBe("completed");
+  expect(bg?.kind).toBe("background");
 });
 
 test("delegation with acceptance criteria: a twice-failed verdict is surfaced to the captain and recorded (Plan 06)", async () => {
