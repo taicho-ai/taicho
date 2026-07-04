@@ -282,8 +282,8 @@ question (recommended: rename → `verifications[]` and populate, or cut — dec
 - [x] Record verdicts on the trace (`trace.verification`) + transcript → waterfall span + ledger answer to "why did it retry?".
 
 ### Phase 3 — Artifact & coaching tie-in
-- [ ] Verdict = annotation on the artifact version (Plan 01 Phase 4's same annotation → revision path).
-- [ ] Repeated failure patterns feed coaching (propose a policy note).
+- [x] Verdict = annotation on the artifact version (Plan 01 Phase 4's same annotation → revision path). *(a FAILED criteria-gated `delegate_task` verdict is written via `annotateArtifact` — author `checker`, kind `verification` — onto the child's OUTPUT artifact version, else the INPUT it was revising; version-pinned `id@vN`, surfaces to the next revision run exactly like human feedback.)*
+- [x] Repeated failure patterns feed coaching (propose a policy note). *(`src/coaching/patterns.ts`: a deck-level failure ledger keyed on (target agent, normalized criteria); the 2nd distinct failing delegation of a pattern PROPOSES a coaching note — `status: "proposed"`, inert until the captain approves, never auto-applied.)*
 - [x] Populate `verifications[]` on the task (per Phase 0 decision). *(renamed `verifiedClaims` → `verifications[]` in `task-state.ts`; `updateTaskFromTrace` populates it from `trace.verification` on root + children.)*
 
 ### Phase 4 — Tests & docs
