@@ -137,7 +137,9 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
   const agent = AgentDef.parse({
     id: draft.id, role: draft.role, identity: draft.identity,
     // Default worker grant: the structured artifact trio (produce + hand off + consume by reference)
-    // plus write_artifact (legacy simple-markdown wrapper). Explicit draft.tools overrides.
+    // plus write_artifact (legacy simple-markdown wrapper). NO MCP grant by default (Plan 08 least
+    // privilege — MCP tools are opt-in via an explicit "mcp:<server>" ref). To wire a worker to an
+    // MCP server, pass it in draft.tools (e.g. root proposes create_agent with tools incl. mcp:web).
     tools: draft.tools ?? ["write_artifact", "save_artifact", "read_artifact", "list_artifacts"],
     canSee: ["*"], canDelegateTo: [], isRoot: false,
     created: new Date().toISOString(),

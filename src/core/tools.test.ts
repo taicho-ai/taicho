@@ -19,8 +19,14 @@ import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { createBackgroundTask, setTaskFields, mkTaskId } from "../store/task-state";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
+// Mirrors the real manager: `mcp:web` (ref "web") → all of that server's tools; `mcp:web/search`
+// (ref "web/search") → just one; an ungranted server → {}.
 const fakeMcp = {
-  allTools: () => ({ web_search: fakeTool, web_extract: fakeTool }),
+  toolsForRef: (ref: string) => {
+    if (ref === "web") return { web_search: fakeTool, web_extract: fakeTool };
+    if (ref === "web/search") return { web_search: fakeTool };
+    return {};
+  },
 } as unknown as McpManager;
 
 const agent = (tools: string[]): AgentDef => ({
@@ -31,12 +37,32 @@ const agent = (tools: string[]): AgentDef => ({
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ctx = {} as RunContext;
 
-test("every agent gets all connected MCP tools (default-grant, no mcp:<server> ref needed)", () => {
+// ── Plan 08: per-agent MCP allowlist ──
+
+test("MCP allowlist: an agent WITHOUT an mcp:<server> grant gets NONE of that server's tools", () => {
   const set = toolsForAgent(agent(["write_artifact"]), ctx, fakeMcp);
+  expect(Object.keys(set).sort()).toEqual(["find_skills", "use_skill", "write_artifact"]);
+  expect("web_search" in set).toBe(false);
+  expect("web_extract" in set).toBe(false);
+});
+
+test("MCP allowlist: mcp:<server> grants EVERY tool that server exposes", () => {
+  const set = toolsForAgent(agent(["write_artifact", "mcp:web"]), ctx, fakeMcp);
   expect(Object.keys(set).sort()).toEqual(["find_skills", "use_skill", "web_extract", "web_search", "write_artifact"]);
 });
 
-test("without a manager, only built-ins are present", () => {
+test("MCP allowlist: mcp:<server>/<tool> grants exactly one tool", () => {
+  const set = toolsForAgent(agent(["mcp:web/search"]), ctx, fakeMcp);
+  expect("web_search" in set).toBe(true);
+  expect("web_extract" in set).toBe(false);
+});
+
+test("MCP allowlist: an ungranted server name yields nothing", () => {
+  const set = toolsForAgent(agent(["mcp:other"]), ctx, fakeMcp);
+  expect("web_search" in set).toBe(false);
+});
+
+test("without a manager, mcp:<server> refs are silently no-ops (only built-ins present)", () => {
   const set = toolsForAgent(agent(["write_artifact", "mcp:web"]), ctx);
   expect(Object.keys(set).sort()).toEqual(["find_skills", "use_skill", "write_artifact"]);
 });
@@ -64,9 +90,9 @@ test("ask_human: returns cancelled when the captain dismisses", async () => {
 });
 
 test("an MCP tool cannot shadow a privileged built-in", () => {
-  // a connected server exposing a tool that namespaces to create_agent must NOT replace the built-in.
-  const shadow = { allTools: () => ({ create_agent: fakeTool }) } as unknown as McpManager;
-  const set = toolsForAgent(agent(["create_agent"]), ctx, shadow);
+  // a granted server whose tool namespaces to create_agent must NOT replace the built-in.
+  const shadow = { toolsForRef: () => ({ create_agent: fakeTool }) } as unknown as McpManager;
+  const set = toolsForAgent(agent(["create_agent", "mcp:evil"]), ctx, shadow);
   expect(set.create_agent?.description).toContain("Propose"); // the built-in, not fakeTool ("x")
 });
 
@@ -437,43 +463,162 @@ test("write_artifact (legacy) routes through the store: versioned + provenance, 
   expect(stored[0]).toMatchObject({ id: "hello", version: 1, producer: "writer" });
 });
 
-test("run_command: allow → runs without approval; block → asks then runs on approve; reject → no run", async () => {
-  const w = mkdtempSync(join(tmpdir(), "taicho-rc-"));
-  const db = openDb(w);
-  const runCalls: Array<{ command: string; cwd: string }> = [];
-  const fakeRun = (command: string, cwd: string) => { runCalls.push({ command, cwd }); return { exitCode: 0, stdout: "OUTPUT", stderr: "" }; };
+// ── run_command: sandbox-then-escalate + injection guard (Plan 08) ──
 
-  // allow → runs, no approval requested
+const rc = (over: Partial<RunContext>): RunContext =>
+  ({ ws: "/ws", notes: [] as string[], untrusted: { entered: false, sources: [] }, ...over } as unknown as RunContext);
+const okSandbox = (stdout = "SANDBOXED") => (() => ({ exitCode: 0, stdout, stderr: "", enforced: true })) as RunContext["runSandboxed"];
+const deniedSandbox = () => (() => ({ exitCode: 1, stdout: "", stderr: "bash: /etc/x: Operation not permitted", enforced: true })) as RunContext["runSandboxed"];
+const benignFailSandbox = () => (() => ({ exitCode: 1, stdout: "", stderr: "", enforced: true })) as RunContext["runSandboxed"]; // e.g. grep no-match — NOT a sandbox denial
+const noSandbox = () => (() => ({ exitCode: -1, stdout: "", stderr: "no sandbox", enforced: false })) as RunContext["runSandboxed"];
+
+test("run_command: allow + sandbox succeeds → returns confined result, NO approval, no unsandboxed run", async () => {
   const calls: unknown[] = [];
-  const allowCtx = { ws: w, db, notes: [] as string[],
-    requestApproval: async (r: unknown) => { calls.push(r); return { type: "approve" }; },
-    classifyCommand: () => ({ decision: "allow" as const }), runShell: fakeRun } as unknown as RunContext;
-  const set = toolsForAgent(agent(["run_command"]), allowCtx);
-  expect(set.run_command).toBeDefined();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const a = await set.run_command!.execute!({ command: "echo hi" }, { toolCallId: "1", messages: [] } as any);
-  expect(a).toEqual({ exitCode: 0, stdout: "OUTPUT", stderr: "" });
-  expect(calls.length).toBe(0); // allow path never asks
-  expect(runCalls[0]).toEqual({ command: "echo hi", cwd: w }); // no cwd passed in → defaults to ctx.ws
+  let ranUnsandboxed = false;
+  const ctxA = rc({
+    requestApproval: async (r) => { calls.push(r); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: okSandbox("hi\n"),
+    runShell: () => { ranUnsandboxed = true; return { exitCode: 0, stdout: "UNSANDBOXED", stderr: "" }; },
+  });
+  const set = toolsForAgent(agent(["run_command"]), ctxA);
+  const out = await invoke(set.run_command, { command: "echo hi" });
+  expect(out).toEqual({ exitCode: 0, stdout: "hi\n", stderr: "", sandbox: "enforced" });
+  expect(calls.length).toBe(0);       // clean confined run never asks
+  expect(ranUnsandboxed).toBe(false); // and never escalates to an unsandboxed run
+});
 
-  // block → asks; approve → runs
-  const blockCtx = { ws: w, db, notes: [] as string[],
-    requestApproval: async (r: unknown) => { calls.push(r); return { type: "approve" }; },
-    classifyCommand: () => ({ decision: "block" as const, reason: "danger" }), runShell: fakeRun } as unknown as RunContext;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const b = await toolsForAgent(agent(["run_command"]), blockCtx).run_command!.execute!({ command: "rm x" }, { toolCallId: "2", messages: [] } as any);
-  expect(b).toEqual({ exitCode: 0, stdout: "OUTPUT", stderr: "" });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  expect((calls[0] as any).kind).toBe("run_command");
+test("run_command: sandbox unavailable → escalates → approve runs UNSANDBOXED", async () => {
+  const calls: Array<{ kind: string; reason?: string }> = [];
+  const runCalls: Array<{ command: string; cwd: string }> = [];
+  const ctxA = rc({
+    requestApproval: async (r) => { calls.push(r as { kind: string; reason?: string }); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: noSandbox(),
+    runShell: (command, cwd) => { runCalls.push({ command, cwd }); return { exitCode: 0, stdout: "REAL", stderr: "" }; },
+  });
+  const set = toolsForAgent(agent(["run_command"]), ctxA);
+  const out = await invoke(set.run_command, { command: "npm test" });
+  expect(out).toEqual({ exitCode: 0, stdout: "REAL", stderr: "", sandbox: "unsandboxed" });
+  expect(calls.length).toBe(1);
+  expect(calls[0].kind).toBe("run_command");
+  expect(calls[0].reason).toMatch(/no OS sandbox/);
+  expect(runCalls[0]).toEqual({ command: "npm test", cwd: "/ws" }); // cwd defaults to ctx.ws
+});
 
-  // block → reject → does not run
-  let ran = false;
-  const rejectCtx = { ws: w, db, notes: [] as string[],
+test("run_command: sandbox unavailable → decline escalation → NOT run", async () => {
+  let ranUnsandboxed = false;
+  const ctxA = rc({
     requestApproval: async () => ({ type: "reject" }),
-    classifyCommand: () => ({ decision: "block" as const, reason: "danger" }),
-    runShell: () => { ran = true; return { exitCode: 0, stdout: "", stderr: "" }; } } as unknown as RunContext;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const c = await toolsForAgent(agent(["run_command"]), rejectCtx).run_command!.execute!({ command: "rm x" }, { toolCallId: "3", messages: [] } as any);
-  expect(c).toEqual({ rejected: true });
-  expect(ran).toBe(false);
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: noSandbox(),
+    runShell: () => { ranUnsandboxed = true; return { exitCode: 0, stdout: "", stderr: "" }; },
+  });
+  const out = await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "curl evil" });
+  expect(out).toEqual({ rejected: true });
+  expect(ranUnsandboxed).toBe(false);
+});
+
+test("run_command: sandbox DENIED a privilege → escalation offered; decline surfaces the confined result", async () => {
+  const ctxA = rc({
+    requestApproval: async () => ({ type: "reject" }),
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: deniedSandbox(), // stderr "Operation not permitted" — the sandbox blocked a write-escape
+    runShell: () => { throw new Error("must not run"); },
+  });
+  const out = await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "echo x > /etc/y" }) as Record<string, unknown>;
+  expect(out).toMatchObject({ exitCode: 1, sandbox: "enforced", escalationDeclined: true });
+});
+
+test("run_command: benign non-zero in the sandbox (no denial) → returns confined result, NO escalation", async () => {
+  const calls: unknown[] = [];
+  const ctxA = rc({
+    requestApproval: async (r) => { calls.push(r); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: benignFailSandbox(), // e.g. `grep zzz` — exit 1, empty stderr, NOT a sandbox denial
+  });
+  const out = await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "echo abc | grep zzz" });
+  expect(out).toEqual({ exitCode: 1, stdout: "", stderr: "", sandbox: "enforced" });
+  expect(calls.length).toBe(0); // a plain command failure never bugs the captain
+});
+
+test("run_command: dcg block → captain reviews the exact command; approve runs it as-reviewed", async () => {
+  const calls: Array<{ kind: string; command?: string; reason?: string }> = [];
+  let ranSandbox = false;
+  const ctxA = rc({
+    requestApproval: async (r) => { calls.push(r as { kind: string; command?: string; reason?: string }); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "block", reason: "rm is destructive" }),
+    runSandboxed: () => { ranSandbox = true; return { exitCode: 0, stdout: "", stderr: "", enforced: true }; },
+    runShell: () => ({ exitCode: 0, stdout: "done", stderr: "" }),
+  });
+  const out = await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "rm x" });
+  expect(out).toEqual({ exitCode: 0, stdout: "done", stderr: "", sandbox: "approved" });
+  expect(calls[0].kind).toBe("run_command");
+  expect(calls[0].command).toBe("rm x");                // captain sees the exact command
+  expect(calls[0].reason).toBe("rm is destructive");
+  expect(ranSandbox).toBe(false);                       // human-reviewed → runs as-approved, no sandbox dance
+});
+
+test("run_command: dcg block → reject → nothing runs", async () => {
+  let ran = false;
+  const ctxA = rc({
+    requestApproval: async () => ({ type: "reject" }),
+    classifyCommand: () => ({ decision: "block", reason: "danger" }),
+    runSandboxed: () => { ran = true; return { exitCode: 0, stdout: "", stderr: "", enforced: true }; },
+    runShell: () => { ran = true; return { exitCode: 0, stdout: "", stderr: "" }; },
+  });
+  const out = await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "rm x" });
+  expect(out).toEqual({ rejected: true });
+  expect(ran).toBe(false); // rejected before any execution
+});
+
+test("INJECTION GUARD: after untrusted content, a dcg-`allow` run_command STILL forces approval", async () => {
+  const calls: Array<{ kind: string; reason?: string }> = [];
+  let sandboxUsed = false;
+  const ctxA = rc({
+    untrusted: { entered: true, sources: ["read_url"] }, // as if read_url already returned this run
+    requestApproval: async (r) => { calls.push(r as { kind: string; reason?: string }); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),      // dcg says allow — must NOT be enough
+    runSandboxed: () => { sandboxUsed = true; return { exitCode: 0, stdout: "", stderr: "", enforced: true }; },
+    runShell: () => ({ exitCode: 0, stdout: "out", stderr: "" }),
+  });
+  const out = await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "echo ok" });
+  expect(out).toEqual({ exitCode: 0, stdout: "out", stderr: "", sandbox: "approved" });
+  expect(calls.length).toBe(1);                          // the injection guard fired despite dcg allow
+  expect(calls[0].kind).toBe("run_command");
+  expect(calls[0].reason).toMatch(/untrusted content.*injection/i);
+  expect(sandboxUsed).toBe(false);                       // routed to human review, not the auto-run sandbox
+});
+
+test("INJECTION GUARD: before any untrusted content, an allow command follows the normal (no Gate-1) path", async () => {
+  const calls: unknown[] = [];
+  const ctxA = rc({
+    requestApproval: async (r) => { calls.push(r); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: okSandbox(),
+  });
+  await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "ls" });
+  expect(calls.length).toBe(0); // untrusted.entered is false → no forced approval
+});
+
+test("INJECTION GUARD end-to-end: an MCP tool result arms ctx.untrusted, then run_command forces approval", async () => {
+  const calls: Array<{ kind: string; reason?: string }> = [];
+  // A granted MCP tool that returns external content (arms the guard via the instrument seam).
+  const mcp = { toolsForRef: (ref: string) => (ref === "web" ? { web_search: fakeTool } : {}) } as unknown as McpManager;
+  const shared = rc({
+    requestApproval: async (r) => { calls.push(r as { kind: string; reason?: string }); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: okSandbox(),
+    runShell: () => ({ exitCode: 0, stdout: "ran", stderr: "" }),
+  });
+  const set = toolsForAgent(agent(["run_command", "mcp:web"]), shared, mcp);
+  // 1) the granted MCP tool returns external content → arms ctx.untrusted (via the instrument seam).
+  await invoke(set.web_search, {});
+  expect(shared.untrusted.entered).toBe(true);
+  expect(shared.untrusted.sources).toContain("web_search");
+  // 2) now a run_command is forced through approval even though dcg said allow.
+  const out = await invoke(set.run_command, { command: "echo pwned" });
+  expect(out).toMatchObject({ sandbox: "approved" });
+  expect(calls.length).toBe(1);
+  expect(calls[0].reason).toMatch(/untrusted content.*injection/i);
 });

@@ -303,16 +303,25 @@ users.
 - [ ] Verify usage/cost/toolCalls parity per provider (OpenRouter `providerMetadata` arrives on the
       streamed path too) and that `guardModelCall`'s idle watchdog gets chunk pings everywhere.
 
-## Plan 08 — Security hardening *(placeholder)*
+## Plan 08 — Security hardening
 
 Known-v1 posture that should become deliberate instead of implicit:
-- [ ] **Per-agent MCP tool grants** — today every connected server's tools go to every agent
-      (`tools.ts` "gatekeeping can come later"); make it an allowlist per agent (like `agent.tools`).
-- [ ] **Injection-aware guard** — an agent that has ingested untrusted content (read_url / MCP
-      results) and holds `run_command` is a classic injection→execution chain; at minimum, force
-      approval (ignore dcg `allow`) for commands proposed after untrusted content entered the run.
-- [ ] **Sandbox-then-escalate** for `run_command` (the documented future hardening in the
-      root-capabilities spec).
+- [x] **Per-agent MCP tool grants** — an agent now opts into MCP capability the same way it opts into
+      a built-in: an `mcp:<server>` tool ref grants every tool that server exposes, `mcp:<server>/<tool>`
+      grants one; ungranted MCP tools are never exposed. `toolsForAgent` resolves refs via
+      `mcp.toolsForRef` (the blanket `allTools()` grant is deleted). `schemas/agent.ts` documents the
+      convention; `roster.ts` default worker grant carries no MCP (least privilege).
+- [x] **Injection-aware guard** — `ctx.untrusted` is armed the moment `read_url` or any granted MCP
+      tool returns (the `instrument()` seam). Once armed, `run_command` routes to the captain's
+      approval card **even when dcg says `allow`** — a dcg allow cannot bypass the injection guard.
+      Deterministic + conservative (touching an untrusted source at all arms it).
+- [x] **Sandbox-then-escalate** for `run_command` — the auto-run path (dcg cleared + untainted) runs
+      the command CONFINED first (`runSandboxed`); a clean confined run returns with zero friction, a
+      sandbox that can't be enforced or a command that fails inside it ESCALATES to a captain-approved
+      unsandboxed run. **Enforced** on macOS via Seatbelt (`sandbox-exec`: deny-default, no network,
+      writes confined to the workspace — real, tested); **declared stub** (does NOT run, forces
+      escalation) on non-macOS hosts where no mechanism exists (never faked). dcg-block/injection
+      commands skip the sandbox dance — the human review IS the gate there.
 
 ## Plan 09 — Global budgets & cost accounting *(placeholder)*
 
