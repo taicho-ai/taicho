@@ -8,8 +8,10 @@
  *
  *  Pairing mirrors deriveTrace: llm spans pair model_start→(the next phase transition); tool spans
  *  pair tool_start→tool_end by `callId` (added to the live event for this — deterministic even when
- *  tools run concurrently); approvals FIFO-pair; a delegated child run nests under its parent's open
- *  delegate/dispatch tool span (like the post-hoc childRunId link) so the cascade reads identically. */
+ *  tools run concurrently); approvals FIFO-pair; a delegated child run nests under the EXACT
+ *  `delegate_task` tool span that spawned it, keyed by the spawning callId (threaded through
+ *  onRunStart, mirroring the post-hoc childRunId link) so the cascade reads identically — and two
+ *  concurrent delegations in one turn never swap children. */
 import type { Span, SpanStatus, SpanDetail } from "./trace-tree";
 import type { StepEvent } from "./step-events";
 import type { RunTrace } from "../schemas/trace";
@@ -17,7 +19,9 @@ import type { RunTrace } from "../schemas/trace";
 export interface LiveRunInfo {
   runId: string;
   agent: string;
-  triggeredBy: string; // "user" | parent runId | a task id — resolves the parent edge
+  triggeredBy: string;    // "user" | parent runId | a task id — resolves the parent edge
+  spawnCallId?: string;   // the delegate_task callId that spawned this child (parent-run delegations
+                          //   only) → adopt the EXACT tool span, mirroring the post-hoc childRunId link
 }
 export interface LiveRunEndInfo extends LiveRunInfo {
   outcome: RunTrace["outcome"];
@@ -35,8 +39,6 @@ export interface LiveTraceState {
                                          //   pairing; runId-scoped so the engine's per-run fallback
                                          //   callId `name#seq` can't collide across concurrent runs)
   toolStack: Map<string, string[]>;      // runId → open tool span ids (LIFO fallback when no callId)
-  openDeleg: Map<string, string[]>;      // runId → its open, unadopted delegate/dispatch tool spans
-                                         //   (a STACK: two delegations in one turn each adopt one child)
   openApproval: Map<string, string[]>;   // runId → open approval span ids (FIFO)
   approvalCount: Map<string, number>;    // runId → approvals seen (approval span numbering)
 }
@@ -49,13 +51,10 @@ export function emptyLiveTrace(): LiveTraceState {
     llmCount: new Map(),
     toolByCall: new Map(),
     toolStack: new Map(),
-    openDeleg: new Map(),
     openApproval: new Map(),
     approvalCount: new Map(),
   };
 }
-
-const isDelegation = (tool?: string) => tool === "delegate_task" || tool === "dispatch_task";
 
 /** Append to a Map<key, T[]>, creating the array on first use. */
 function pushInto<K>(map: Map<K, string[]>, key: K, value: string): void {
@@ -83,18 +82,20 @@ function closeLlm(st: LiveTraceState, runId: string, now: number): void {
   st.openLlm.delete(runId);
 }
 
-/** Open a run span. Idempotent (a re-fired onRunStart is ignored). Parent: a child run whose
- *  `triggeredBy` is a known run nests under that run's open delegate/dispatch tool span (mirroring the
- *  post-hoc childRunId link) — else directly under the run; a "user"/task root has no parent. */
+/** Open a run span. Idempotent (a re-fired onRunStart is ignored). Parent: a delegated child nests
+ *  under the EXACT `delegate_task` tool span that spawned it, addressed directly by the spawning
+ *  callId (threaded through onRunStart) — `${parentRunId}#tool:${spawnCallId}`, the same id tool_start
+ *  built. This is deterministic (no LIFO/FIFO queue that only accidentally pairs concurrent
+ *  delegations), and a `dispatch_task`'s detached child (triggeredBy = a task id) simply never
+ *  addresses a span, so it can't be mis-adopted. No callId (or the span isn't there) ⇒ nest directly
+ *  under the run; a "user"/task root has no parent. */
 export function liveRunStart(st: LiveTraceState, info: LiveRunInfo, now: number): LiveTraceState {
   if (st.spans.has(info.runId)) return st;
   let parentId: string | undefined;
   if (st.spans.has(info.triggeredBy)) {
-    // Adopt (claim) the parent's most-recent open delegation tool span — pop it so a SECOND concurrent
-    // delegation in the same turn adopts a DIFFERENT child, instead of every child nesting under the
-    // last one. No open delegation span (or a non-delegation trigger) ⇒ nest directly under the run.
-    const stack = st.openDeleg.get(info.triggeredBy);
-    parentId = (stack && stack.length ? stack.pop() : undefined) ?? info.triggeredBy;
+    const delegId = info.spawnCallId ? `${info.triggeredBy}#tool:${info.spawnCallId}` : undefined;
+    const deleg = delegId ? st.spans.get(delegId) : undefined;
+    parentId = deleg && deleg.kind === "tool" ? deleg.id : info.triggeredBy;
   }
   const detail: SpanDetail = {
     kind: "run", outcome: "interrupted", task: "(running)", tokens: 0, costUsd: null,
@@ -151,7 +152,6 @@ export function liveStep(st: LiveTraceState, ev: StepEvent, now: number): LiveTr
       });
       st.toolByCall.set(`${runId}::${callId}`, id);
       pushInto(st.toolStack, runId, id);
-      if (isDelegation(tool)) pushInto(st.openDeleg, runId, id);
       break;
     }
     case "tool_end": {
@@ -163,8 +163,6 @@ export function liveStep(st: LiveTraceState, ev: StepEvent, now: number): LiveTr
       if (id) {
         const s = st.spans.get(id);
         if (s && s.status === "running") { s.endMs = Math.max(s.endMs, now); s.status = ev.ok === false ? "error" : "ok"; }
-        const dstack = st.openDeleg.get(runId);
-        if (dstack) { const di = dstack.lastIndexOf(id); if (di >= 0) dstack.splice(di, 1); } // an unadopted delegation that ended (no child spawned)
         if (key) st.toolByCall.delete(key);
       }
       break;
@@ -215,7 +213,6 @@ export function liveRunEnd(st: LiveTraceState, info: LiveRunEndInfo, now: number
     if (a && a.status === "running") { a.endMs = Math.max(a.endMs, now); a.status = settle; }
   }
   st.toolStack.delete(info.runId);
-  st.openDeleg.delete(info.runId);
   st.openApproval.delete(info.runId);
   return st;
 }

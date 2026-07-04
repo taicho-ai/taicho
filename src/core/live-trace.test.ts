@@ -80,8 +80,9 @@ test("a delegated child run nests UNDER the parent's open delegate_task tool spa
   liveRunStart(st, { runId: P, agent: "root", triggeredBy: "user" }, 0);
   liveStep(st, ev({ phase: "model_start", runId: P, agent: "root" }), 1);
   liveStep(st, ev({ phase: "tool_start", runId: P, agent: "root", tool: "delegate_task", callId: "d1" }), 2);
-  // the delegate tool blocks while the child runs (its onRunStart fires mid-tool)
-  liveRunStart(st, { runId: C, agent: "writer", triggeredBy: P }, 3);
+  // the delegate tool blocks while the child runs (its onRunStart fires mid-tool, carrying the
+  // spawning callId so it adopts the EXACT delegate_task span)
+  liveRunStart(st, { runId: C, agent: "writer", triggeredBy: P, spawnCallId: "d1" }, 3);
   liveStep(st, ev({ phase: "model_start", runId: C, agent: "writer" }), 4);
   liveStep(st, ev({ phase: "final", runId: C, agent: "writer", text: "child done" }), 5);
   liveRunEnd(st, { runId: C, agent: "writer", triggeredBy: P, outcome: "completed" }, 6);
@@ -127,23 +128,43 @@ test("run-end settles any still-open child span (interrupted cascade)", () => {
   expect(tool.endMs).toBe(3);
 });
 
-test("TWO delegations in one turn each adopt a distinct child (openDeleg is a stack, not a slot)", () => {
+test("TWO delegations in one turn: each child adopts ITS OWN delegate_task span, by callId (order-independent)", () => {
   const st = emptyLiveTrace();
   const P = "root/run1", C1 = "a/run1", C2 = "b/run1";
   liveRunStart(st, { runId: P, agent: "root", triggeredBy: "user" }, 0);
   liveStep(st, ev({ phase: "model_start", runId: P, agent: "root" }), 1);
-  // both delegate_task tool calls open (concurrent execution) BEFORE either child starts
+  // both delegate_task tool calls open (concurrent execution) BEFORE either child starts…
   liveStep(st, ev({ phase: "tool_start", runId: P, agent: "root", tool: "delegate_task", callId: "d1" }), 2);
   liveStep(st, ev({ phase: "tool_start", runId: P, agent: "root", tool: "delegate_task", callId: "d2" }), 3);
-  liveRunStart(st, { runId: C1, agent: "a", triggeredBy: P }, 4);
-  liveRunStart(st, { runId: C2, agent: "b", triggeredBy: P }, 5);
+  // …and the children's onRunStart arrive in the OPPOSITE order (async IO resolves out of order). A
+  // LIFO/FIFO queue would swap them; callId-keyed adoption maps each to ITS OWN spawning span.
+  liveRunStart(st, { runId: C2, agent: "b", triggeredBy: P, spawnCallId: "d2" }, 4);
+  liveRunStart(st, { runId: C1, agent: "a", triggeredBy: P, spawnCallId: "d1" }, 5);
 
   const spans = liveSpans(st, 10);
   const c1 = byId(spans, C1)!, c2 = byId(spans, C2)!;
   const d1 = byId(spans, `${P}#tool:d1`)!, d2 = byId(spans, `${P}#tool:d2`)!;
-  // each child hangs off a DISTINCT delegation span (not both under the last one)
-  expect(new Set([c1.parentId, c2.parentId])).toEqual(new Set([d1.id, d2.id]));
-  expect(c1.parentId).not.toBe(c2.parentId);
+  expect(c1.parentId).toBe(d1.id); // C1 under d1 (its spawning call), NOT swapped to d2
+  expect(c2.parentId).toBe(d2.id); // C2 under d2
+});
+
+test("a dispatch_task's detached background child never adopts a delegate_task span (Finding 2)", () => {
+  const st = emptyLiveTrace();
+  const P = "root/run1";
+  liveRunStart(st, { runId: P, agent: "root", triggeredBy: "user" }, 0);
+  liveStep(st, ev({ phase: "model_start", runId: P, agent: "root" }), 1);
+  // a dispatch_task fires-and-returns (its child runs detached, triggeredBy = a task id — NOT the
+  // parent runId), then a delegate_task opens in the SAME run
+  liveStep(st, ev({ phase: "tool_start", runId: P, agent: "root", tool: "dispatch_task", callId: "disp1" }), 2);
+  liveStep(st, ev({ phase: "tool_end", runId: P, agent: "root", tool: "dispatch_task", callId: "disp1", ok: true }), 3);
+  liveStep(st, ev({ phase: "tool_start", runId: P, agent: "root", tool: "delegate_task", callId: "d1" }), 4);
+  const bg = "bgworker/run1", child = "writer/run1";
+  liveRunStart(st, { runId: bg, agent: "bgworker", triggeredBy: "task_bg_x" }, 5);        // detached bg run
+  liveRunStart(st, { runId: child, agent: "writer", triggeredBy: P, spawnCallId: "d1" }, 6); // the delegate child
+
+  const spans = liveSpans(st, 10);
+  expect(byId(spans, bg)!.parentId).toBeUndefined();                    // bg run roots at top level, adopts nothing
+  expect(byId(spans, child)!.parentId).toBe(byId(spans, `${P}#tool:d1`)!.id); // delegate child under delegate_task (not the dispatch span)
 });
 
 test("concurrent runs with the SAME fallback callId don't cross-settle (toolByCall is runId-scoped)", () => {

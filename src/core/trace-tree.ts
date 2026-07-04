@@ -250,7 +250,10 @@ export function deriveTrace(ws: string, rootRunId: string): Span[] {
 function taskRootRunIds(ws: string, task: TaskState | null, taskId: string): string[] {
   const ids = new Set<string>();
   if (task?.rootRunId) ids.add(task.rootRunId);
-  for (const t of listTraces(ws)) if (t.triggeredBy === taskId) ids.add(t.id);
+  // Guard the empty task id: a reserved/crashed run's placeholder trace carries triggeredBy:"" (the
+  // reserveRunId sentinel), so a blank taskId would sweep unrelated in-flight/crashed runs into a
+  // bogus task trace. Only match a NON-EMPTY task id.
+  if (taskId) for (const t of listTraces(ws)) if (t.triggeredBy === taskId) ids.add(t.id);
   const roots = [...ids].filter(Boolean);
   const startOf = (id: string) => { try { return Date.parse(readTrace(ws, id).started); } catch { return Number.POSITIVE_INFINITY; } };
   return roots.sort((a, b) => startOf(a) - startOf(b));
@@ -262,6 +265,7 @@ function taskRootRunIds(ws: string, task: TaskState | null, taskId: string): str
  *  span on a shared time axis. Reuses the same walker + layout as deriveTrace, so the task waterfall
  *  renders identically (the task row sits above its per-run subtrees). Returns [] when nothing walks. */
 export function deriveTaskTrace(ws: string, taskId: string): Span[] {
+  if (!taskId || !taskId.trim()) return []; // a blank task id (e.g. `/trace task:`) roots at nothing
   const task = readTaskState(ws, taskId);
   const roots = taskRootRunIds(ws, task, taskId);
   if (!roots.length) return [];

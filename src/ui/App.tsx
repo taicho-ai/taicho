@@ -506,10 +506,11 @@ export function App(props: {
     awaitTask,
     // Live-run bookkeeping only. The per-turn AUDIT (ledger user turn + task open) now lives in the
     // engine seam (recordUserTurn in executeRun, guarded by triggeredBy === "user") — Plan 01 Ph5.
-    onRunStart: ({ runId, agent, triggeredBy }) => {
+    onRunStart: ({ runId, agent, triggeredBy, spawnCallId }) => {
       activeRuns.current.set(runId, { agent, triggeredBy });
-      // Plan 02 Phase 6: open the run's span in the live waterfall (parent linkage comes from triggeredBy).
-      liveRunStart(liveTraceRef.current, { runId, agent, triggeredBy }, Date.now());
+      // Plan 02 Phase 6: open the run's span in the live waterfall. A delegated child nests under the
+      // EXACT delegate_task span that spawned it (addressed by spawnCallId); else parent by triggeredBy.
+      liveRunStart(liveTraceRef.current, { runId, agent, triggeredBy, spawnCallId }, Date.now());
       pushLiveTrace();
       if (triggeredBy === "user" && !foregroundRootRef.current) foregroundRootRef.current = runId;
     },

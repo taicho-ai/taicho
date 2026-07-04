@@ -13,6 +13,7 @@ import { seedRoot, reindex, loadAgent, createAgent } from "../store/roster";
 import { makeDeps, executeRun } from "./run";
 import { deriveTrace, deriveTaskTrace, traceSummary, type Span } from "./trace-tree";
 import { createTaskState, createBackgroundTask, setTaskFields, taskIdForRun } from "../store/task-state";
+import { reserveRunId } from "../store/trace";
 
 const usage = { inputTokens: { total: 3 }, outputTokens: { total: 2 } } as const;
 const text = (t: string) =>
@@ -222,4 +223,14 @@ test("deriveTaskTrace groups MULTIPLE runs of a task (the multi-turn/run general
 test("deriveTaskTrace on an unknown task returns no spans (never throws)", async () => {
   const { ws } = await boot();
   expect(deriveTaskTrace(ws, "task_ghost")).toEqual([]);
+});
+
+test("deriveTaskTrace on an EMPTY task id returns [] and never sweeps placeholder (triggeredBy:'') runs", async () => {
+  const { ws } = await boot();
+  // reserveRunId writes an in-flight placeholder trace whose triggeredBy is "" (the sentinel). An
+  // empty task id must NOT match it and pull unrelated in-flight/crashed runs into a bogus trace.
+  reserveRunId(ws, "root");
+  reserveRunId(ws, "root");
+  expect(deriveTaskTrace(ws, "")).toEqual([]);
+  expect(deriveTaskTrace(ws, "   ")).toEqual([]);
 });

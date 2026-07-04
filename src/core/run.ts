@@ -105,7 +105,7 @@ export interface RunContext {
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   createAgent: (draft: NewAgentDraft) => Promise<AgentDef>;
   canDelegate: (toId: string) => boolean;
-  runChild: (brief: { to: string; goal: string; context?: string; criteria?: string; inputArtifacts?: string[] }) => Promise<RunResult>;
+  runChild: (brief: { to: string; goal: string; context?: string; criteria?: string; inputArtifacts?: string[]; callId?: string }) => Promise<RunResult>;
   findAgents: (query: string, k: number) => AgentHit[];
   agentExists: (id: string) => boolean;
   notes: string[];
@@ -161,7 +161,7 @@ export interface RunDeps {
   globalPolicyCache?: { notes?: PolicyNote[] };
   mcp?: McpManager;
   embed?: (text: string) => Promise<Float32Array>; // semantic KB embedder; undefined ⇒ keyword+graph
-  onRunStart?: (info: { runId: string; agent: string; triggeredBy: string; messages: ModelMessage[] }) => void;
+  onRunStart?: (info: { runId: string; agent: string; triggeredBy: string; messages: ModelMessage[]; spawnCallId?: string }) => void;
   /** Plan 04 Phase 4: called when a run finishes (any outcome) so the host can drop it from its
    *  active-run map / steer routing table. */
   onRunEnd?: (info: { runId: string; agent: string; triggeredBy: string; outcome: RunTrace["outcome"] }) => void;
@@ -215,7 +215,7 @@ export function makeDeps(opts: {
 
 export async function executeRun(
   deps: RunDeps,
-  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; criteria?: string; fromRun: string }; inputArtifacts?: string[]; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string; taintedContext?: boolean },
+  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; criteria?: string; fromRun: string }; inputArtifacts?: string[]; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string; taintedContext?: boolean; spawnCallId?: string },
 ): Promise<RunResult> {
   const depth = opts.depth ?? 0;
   const ancestry = opts.ancestry ?? [];
@@ -228,7 +228,7 @@ export async function executeRun(
   const runId = reserveRunId(deps.ws, opts.agent.id);
   const started = new Date().toISOString();
   const t0 = performance.now();
-  deps.onRunStart?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, messages: opts.messages });
+  deps.onRunStart?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, messages: opts.messages, spawnCallId: opts.spawnCallId });
   writeRunInput(deps.ws, runId, {
     runId,
     triggeredBy: opts.triggeredBy,
@@ -302,7 +302,7 @@ export async function executeRun(
     requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
     canDelegate: (toId) => canDelegate(opts.agent, toId),
-    runChild: async ({ to, goal, context, criteria, inputArtifacts }) => {
+    runChild: async ({ to, goal, context, criteria, inputArtifacts, callId }) => {
       const child = await loadAgent(deps.ws, to);
       return executeRun(deps, {
         agent: child,
@@ -312,6 +312,9 @@ export async function executeRun(
         triggeredBy: runId,
         depth: depth + 1,
         ancestry: [...ancestry, opts.agent.id],
+        // Plan 02 Ph6: the spawning delegate_task callId, so the LIVE waterfall nests this child under
+        // that EXACT tool span (deterministic even for concurrent delegations in one turn).
+        spawnCallId: callId,
         // Plan 08 injection guard: if THIS run has ingested untrusted content by the time it delegates,
         // the brief it hands down is itself untrusted — pre-arm the child so its run_command is gated.
         taintedContext: ctx.untrusted.entered,
