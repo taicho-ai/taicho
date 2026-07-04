@@ -22,8 +22,23 @@ import { readMcpStore } from "./store/mcp-store";
 import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
 import { createE2eModel } from "./core/e2e-model";
+import { parseCli, runHeadless, runTail } from "./core/headless";
+import { configureLogger, log } from "./core/logger";
 
 const ws = process.cwd();
+const cli = parseCli(process.argv);
+// Point the file logger at this workspace and raise the level when --verbose (a general debug mode;
+// historically only the codex path honored TAICHO_DEBUG). All diagnostics now land in taicho.log
+// instead of fighting the Ink render.
+configureLogger({ ws, level: cli.verbose ? "debug" : undefined });
+
+// `taicho tail [runId]` only reads the runs/ event stream — short-circuit before the heavy boot
+// (DB, seeds, MCP connect) so an external observer's tail starts instantly.
+if (cli.command?.kind === "tail") {
+  await runTail(ws, cli.command);
+  process.exit(0);
+}
+
 const config = await loadConfig(ws);
 await ensureWorkspace(ws);
 await seedRoot(ws, config.defaults);
@@ -136,6 +151,21 @@ async function onLogin(): Promise<AuthSource> {
   const profile = await runLoginFlow({ onUrl: (u) => console.error("Open to sign in:\n" + u) });
   writeProfile(profile);
   return { kind: "oauth-openai-codex", accountId: profile.account_id, expiresAt: profile.expires_at };
+}
+
+// `taicho run "<goal>"` drives ONE run to completion without Ink, then exits with the run's status.
+// Approvals default to auto-reject (unattended-safe; see core/headless.ts) — override with --approve.
+if (cli.command?.kind === "run") {
+  const res = await runHeadless(
+    {
+      ws, db, model: initial.model,
+      resolveModel: initial.resolveModel, priceUsd: initial.priceUsd,
+      configDefaults: config.defaults, mcp, embed: embedder?.embed,
+    },
+    { goal: cli.command.goal, agent: cli.command.agent, approve: cli.command.approve },
+  );
+  if (mcp) await mcp.closeAll().catch((e) => log.warn("mcp closeAll failed", e));
+  process.exit(res.ok ? 0 : 1);
 }
 
 const rootThread = loadThread(ws, "root");

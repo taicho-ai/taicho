@@ -142,18 +142,26 @@ thin failure diagnosis, "is it done?", "why did it do that?"). **Residual → Pl
 
 ---
 
-## Plan 03 — Structured logging & headless surface *(placeholder)*
+## Plan 03 — Structured logging & headless surface
+
+**Detail:** [`../docs/events.md`](../docs/events.md) — event schema + headless/tail reference.
 
 Residual observability gaps the waterfall does **not** cover, plus the headless half it enables:
-- [ ] **Structured file logging** that doesn't fight Ink — replace scattered `console.error/warn`
-      (which corrupt/​vanish under the full-screen TUI) with a leveled, file-captured `taicho.log`;
-      a general `--verbose`/debug mode (today only codex-specific `TAICHO_DEBUG`).
-- [ ] **Documented event schema + live tail** for headless/external observers (the e2e harness polls
-      files by hand today).
-- [ ] **Headless run mode** — a `taicho run "<goal>"` (or programmatic) entry that drives `executeRun`
-      without Ink. `RunDeps` is already the seam (model, approval, onStep are all injectable); the only
-      real design point is the approval channel (auto-reject / policy-driven / prompt-on-stdin). Also
-      makes real-binary e2e far cheaper, and is a prerequisite for Plan 04's scheduled triggers (v2).
+- [x] **Structured file logging** that doesn't fight Ink — replaced the scattered `console.error/warn`
+      (which corrupt/​vanish under the full-screen TUI) with a leveled, file-captured `taicho.log`
+      (`src/core/logger.ts`, redaction-central); a general `--verbose`/`-v` debug mode
+      (`TAICHO_VERBOSE`/`TAICHO_LOG_LEVEL`, historical codex-only `TAICHO_DEBUG` now raises the
+      general level).
+- [x] **Documented event schema + tail** for headless/external observers — `docs/events.md` documents
+      the `transcript.jsonl`/ledger/`RunTrace` schema; `taicho tail [runId] [--follow]` streams a run's
+      events (`src/core/events.ts`). *(Live per-event streaming within one in-flight run waits on Plan
+      04 Phase 5's incremental transcript flush — the reader already handles it; see docs/events.md §1a.)*
+- [x] **Headless run mode** — `taicho run "<goal>"` drives `executeRun` without Ink (`src/core/headless.ts`;
+      `index.tsx` dispatches on argv before the Ink render). Approval channel decision: **auto-reject by
+      default** (a headless run is unattended — auto-approving would let a model spawn agents / run shell
+      unsupervised), with `--approve auto` and `--approve prompt` opt-ins. Also makes real-binary e2e far
+      cheaper (`scripts/e2e-headless.ts`, no VHS tape), and is a prerequisite for Plan 04's scheduled
+      triggers (v2).
 
 ---
 

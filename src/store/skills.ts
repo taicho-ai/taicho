@@ -7,6 +7,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync
 import { join } from "node:path";
 import { Skill } from "../schemas/skill";
 import { paths } from "./files";
+import { log } from "../core/logger";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
@@ -45,7 +46,7 @@ export function listSkills(ws: string): Skill[] {
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".md")) continue;
     try { out.push(parseSkill(readFileSync(join(dir, f), "utf8"))); }
-    catch (e) { console.error(`skipping skill ${f}: ${String(e)}`); }
+    catch (e) { log.warn(`skipping skill ${f}`, e); }
   }
   return out;
 }
@@ -81,7 +82,7 @@ export function reindexSkills(ws: string, db: Database): void {
   db.exec("DELETE FROM skills");
   const seen = new Map<string, string>(); // name -> id, to warn on duplicate names
   for (const s of listSkills(ws)) {
-    if (seen.has(s.name)) console.error(`duplicate skill name "${s.name}" (${seen.get(s.name)} and ${s.id}); use_skill resolves the first match`);
+    if (seen.has(s.name)) log.warn(`duplicate skill name "${s.name}" (${seen.get(s.name)} and ${s.id}); use_skill resolves the first match`);
     seen.set(s.name, s.id);
     indexSkill(db, s);
   }
