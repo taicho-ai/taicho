@@ -24,7 +24,7 @@ import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { loadContext, loadLedger } from "../store/conversation";
 import { loadThread } from "../store/thread";
 import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
-import { listSchedules } from "../store/schedules";
+import { listSchedules, createSchedule } from "../store/schedules";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { getViewMode } from "../store/prefs";
@@ -704,6 +704,27 @@ test("/schedules add persists a durable schedule, /schedules list shows it, /sch
   expect(listSchedules(ws).length).toBe(0);
 });
 
+// ── Fix 2: /schedules run routes through the runner's inFlight-guarded fireNow (not the raw closure) ──
+
+test("/schedules run goes through the runner guard — an on-disk schedule NOT armed in this session is refused, not fired", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  // A synchronous (non-busy) slash command first proves the app is mounted and the boot arming effect
+  // has flushed over an EMPTY schedule set — so the schedule we write next is NOT armed this session.
+  await send(stdin, "/schedules list", ENTER);
+  await waitFor(lastFrame, "no schedules");
+
+  // Put a schedule on disk WITHOUT arming it (bypass `/schedules add`, which calls schedRunner.add).
+  // Pre-fix, `/schedules run` fired the raw fire closure regardless of the runner (bypassing the
+  // inFlight guard); post-fix it routes through fireNow, which refuses an id not armed this session.
+  createSchedule(ws, { id: "ext", goal: "audit", trigger: { kind: "interval", everyMs: 3600_000 } });
+
+  await send(stdin, "/schedules run ext", ENTER);
+  await waitFor(lastFrame, "not armed in this session"); // fireNow refused it (the guarded path)
+  expect(lastFrame()).not.toContain("firing →");          // it did NOT bypass the guard and fire
+});
+
 test("delegation with acceptance criteria: a twice-failed verdict is surfaced to the captain and recorded (Plan 06)", async () => {
   // root delegates WITH criteria; the independent checker (same mock model) fails both the first
   // attempt and the one bounded retry, so the result comes back with the failed verdict attached.
@@ -781,6 +802,43 @@ test("waterfall renders an error span (✗) for a failed run and shows the error
   await send(stdin, DOWN);                            // onto the errored llm span
   await send(stdin, ENTER);
   await waitFor(lastFrame, "kaboom-trace");           // the error detail
+});
+
+// ── Plan 02 Phase 6: the LIVE waterfall (Layer-1, through the real App) ──
+
+test("live waterfall (/view waterfall): the redrawing span tree lights up as model/tool/delegation events arrive mid-run", async () => {
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "write the thing" }),
+    finalText("root done"),
+  ) as any });
+  // A slow child so the delegation is observable mid-flight (the waterfall redraws while it runs).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slowWriter = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(350); return finalText("writer done"); }) as any });
+  const { ws, db, props } = await setup({ model: rootModel });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (props as any).resolveModel = (id: string) => id === "writer" ? { model: slowWriter, modelId: "m" } : { model: rootModel, modelId: "m" };
+  const { stdin, lastFrame } = render(<App {...props} viewMode="waterfall" terminalSize={{ columns: 120, rows: 40 }} />);
+  await send(stdin, "have writer do it", ENTER);
+  await waitFor(lastFrame, "WATERFALL (live)");        // the live waterfall surface, not the panes/bar
+  await waitFor(lastFrame, "delegate_task");           // a TOOL span row — proves tool events redraw the tree
+  const mid = lastFrame() ?? "";
+  expect(mid).toContain("root · chat");                // the foreground root run span, live
+  expect(mid).toContain("writer");                     // the delegated child run nested + live at the same time
+  await waitFor(lastFrame, "root done");               // the cascade completes → reply lands
+  await waitForGone(lastFrame, "WATERFALL (live)");    // …and the live waterfall clears
+});
+
+test("live waterfall shows a single run's llm span while the model is thinking", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(300); return finalText("thought"); }) as any });
+  const { props } = await setup({ model: slow });
+  const { stdin, lastFrame } = render(<App {...props} viewMode="waterfall" terminalSize={{ columns: 120, rows: 40 }} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "WATERFALL (live)");
+  await waitFor(lastFrame, "llm #1");                  // the llm span derived from the live model_start event
+  await waitFor(lastFrame, "thought");
+  await waitForGone(lastFrame, "WATERFALL (live)");
 });
 
 // ── Plan 10: the live status bar (Layer-1, through the real App) ──

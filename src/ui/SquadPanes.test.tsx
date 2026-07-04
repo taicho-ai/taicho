@@ -5,21 +5,25 @@ import { test, expect } from "bun:test";
 import { resolveLayout, paneOneLine, MIN_PANE_COLS, MIN_PANE_ROWS } from "./SquadPanes";
 
 test("resolveLayout: `both` shows both surfaces on a roomy terminal", () => {
-  expect(resolveLayout("both", 120, 40)).toEqual({ showPanes: true, showBar: true });
+  expect(resolveLayout("both", 120, 40)).toEqual({ showPanes: true, showBar: true, showWaterfall: false });
 });
 
 test("resolveLayout: `bar` hides the panes", () => {
-  expect(resolveLayout("bar", 120, 40)).toEqual({ showPanes: false, showBar: true });
+  expect(resolveLayout("bar", 120, 40)).toEqual({ showPanes: false, showBar: true, showWaterfall: false });
 });
 
 test("resolveLayout: `panes` hides the bar (on a terminal large enough to render panes)", () => {
-  expect(resolveLayout("panes", 120, 40)).toEqual({ showPanes: true, showBar: false });
+  expect(resolveLayout("panes", 120, 40)).toEqual({ showPanes: true, showBar: false, showWaterfall: false });
+});
+
+test("resolveLayout: `waterfall` shows the live waterfall and hides bar+panes (Plan 02 Phase 6)", () => {
+  expect(resolveLayout("waterfall", 120, 40)).toEqual({ showPanes: false, showBar: false, showWaterfall: true });
 });
 
 test("resolveLayout: a too-small terminal degrades EVERY mode to bar-only", () => {
-  for (const mode of ["bar", "panes", "both"] as const) {
-    expect(resolveLayout(mode, MIN_PANE_COLS - 1, 40)).toEqual({ showPanes: false, showBar: true }); // too narrow
-    expect(resolveLayout(mode, 120, MIN_PANE_ROWS - 1)).toEqual({ showPanes: false, showBar: true }); // too short
+  for (const mode of ["bar", "panes", "both", "waterfall"] as const) {
+    expect(resolveLayout(mode, MIN_PANE_COLS - 1, 40)).toEqual({ showPanes: false, showBar: true, showWaterfall: false }); // too narrow
+    expect(resolveLayout(mode, 120, MIN_PANE_ROWS - 1)).toEqual({ showPanes: false, showBar: true, showWaterfall: false }); // too short
   }
 });
 

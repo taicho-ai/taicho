@@ -7,8 +7,9 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { log } from "../core/logger";
 
-/** The live-view surfaces: the status bar (summary), the split panes (per-agent detail), or both. */
-export const VIEW_MODES = ["bar", "panes", "both"] as const;
+/** The live-view surfaces: the status bar (summary), the split panes (per-agent detail), both, or the
+ *  live waterfall (Plan 02 Phase 6 — the redrawing span tree of the in-flight run). */
+export const VIEW_MODES = ["bar", "panes", "both", "waterfall"] as const;
 export type ViewMode = (typeof VIEW_MODES)[number];
 export const DEFAULT_VIEW_MODE: ViewMode = "both";
 

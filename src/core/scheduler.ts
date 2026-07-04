@@ -135,7 +135,16 @@ export class SchedulerRunner {
     const now = this.deps.now();
     const entry: Armed = { schedule, inFlight: false };
     try {
-      if (schedule.trigger.kind === "interval") entry.nextDueMs = now + schedule.trigger.everyMs;
+      if (schedule.trigger.kind === "interval") {
+        // Resume from the PERSISTED next-due so a nightly REPL restart / hot-reload doesn't reset the
+        // cadence — otherwise a long `--every 24h` under nightly restarts would never fire, and
+        // `/schedules list` would show a stale `next:`. A next-due already in the PAST (a window missed
+        // while the REPL was down) collapses to a SINGLE catch-up fire on the next tick via
+        // `max(persisted, now)` — never a boot storm. No persisted value yet (a fresh schedule this
+        // session) → the usual `now + everyMs`.
+        const persisted = schedule.nextDueAt ? Date.parse(schedule.nextDueAt) : NaN;
+        entry.nextDueMs = Number.isNaN(persisted) ? now + schedule.trigger.everyMs : Math.max(persisted, now);
+      }
       else if (schedule.trigger.kind === "cron") entry.nextDueMs = nextCronAfter(schedule.trigger.expr, now);
       else entry.lastMtimeMs = this.deps.statMtimeMs?.(schedule.trigger.path) ?? undefined; // watch baseline
     } catch (e) {
@@ -163,19 +172,39 @@ export class SchedulerRunner {
     const now = this.deps.now();
     for (const entry of this.armed.values()) {
       if (!entry.schedule.enabled || entry.inFlight) continue;
-      const trigger = entry.schedule.trigger;
-      if (trigger.kind === "watch") {
-        const m = this.deps.statMtimeMs?.(trigger.path) ?? null;
-        if (m == null || m === entry.lastMtimeMs) { entry.lastMtimeMs = m ?? entry.lastMtimeMs; continue; }
-        entry.lastMtimeMs = m;
-        this.fireEntry(entry, now, { lastMtimeMs: m });
-      } else {
-        if (entry.nextDueMs == null || now < entry.nextDueMs) continue;
-        const nextDueMs = trigger.kind === "interval" ? now + trigger.everyMs : nextCronAfter(trigger.expr, now);
-        entry.nextDueMs = nextDueMs;
-        this.fireEntry(entry, now, { nextDueAt: new Date(nextDueMs).toISOString() });
+      // Per-entry isolation: one schedule's failure must NEVER unwind the whole loop and starve its
+      // siblings. The classic poison is a cron whose next match is beyond the year-long scan window
+      // (e.g. Feb-29 `0 0 29 2 *`): it passes create-time validation but `nextCronAfter` THROWS at
+      // fire time. Without this try/catch that throw escapes tick(), the host's tick wrapper swallows
+      // it, and every schedule after the poison is silently never evaluated again. Catch here, disable
+      // the offender (so it can't re-throw every tick with a stale nextDueMs), and log it.
+      try {
+        const trigger = entry.schedule.trigger;
+        if (trigger.kind === "watch") {
+          const m = this.deps.statMtimeMs?.(trigger.path) ?? null;
+          if (m == null || m === entry.lastMtimeMs) { entry.lastMtimeMs = m ?? entry.lastMtimeMs; continue; }
+          entry.lastMtimeMs = m;
+          this.fireEntry(entry, now, { lastMtimeMs: m });
+        } else {
+          if (entry.nextDueMs == null || now < entry.nextDueMs) continue;
+          const nextDueMs = trigger.kind === "interval" ? now + trigger.everyMs : nextCronAfter(trigger.expr, now);
+          entry.nextDueMs = nextDueMs;
+          this.fireEntry(entry, now, { nextDueAt: new Date(nextDueMs).toISOString() });
+        }
+      } catch (e) {
+        this.disableEntry(entry, e);
       }
     }
+  }
+
+  /** Disable + flag a schedule whose evaluation threw (an unfireable cron surfaced at fire time), so it
+   *  can't re-throw every tick or starve its siblings. Persisted (so the disable survives a restart)
+   *  and logged — a dead schedule is surfaced, never silently dropped. */
+  private disableEntry(entry: Armed, e: unknown): void {
+    const reason = e instanceof Error ? e.message : String(e);
+    entry.schedule = { ...entry.schedule, enabled: false, lastStatus: "error" };
+    this.deps.persist?.(entry.schedule.id, { enabled: false, lastStatus: "error" });
+    this.deps.log?.(`schedule ${entry.schedule.id} disabled — ${reason}`);
   }
 
   /** Force-fire an armed schedule now (the `/schedules run` / `taicho schedule run` path), regardless
@@ -197,7 +226,21 @@ export class SchedulerRunner {
     Promise.resolve()
       .then(() => this.deps.fire(entry.schedule))
       .catch((e) => this.deps.log?.(`schedule ${entry.schedule.id} fire failed: ${e instanceof Error ? e.message : String(e)}`))
-      .finally(() => { entry.inFlight = false; });
+      .finally(() => {
+        entry.inFlight = false;
+        // Watch self-trigger guard: re-baseline the mtime AFTER the run settles, so writes the run
+        // ITSELF made to the watched path don't re-fire it. A `--watch <path>` on a path the run writes
+        // would otherwise self-sustain ~1 run/tick forever. Trade-off: a change that lands DURING the
+        // run is folded into the new baseline (treated as already-seen) — acceptable for the
+        // watch-then-process use case, where the run has just consumed the path's current state.
+        if (entry.schedule.trigger.kind === "watch") {
+          const m = this.deps.statMtimeMs?.(entry.schedule.trigger.path) ?? null;
+          if (m != null && m !== entry.lastMtimeMs) {
+            entry.lastMtimeMs = m;
+            this.deps.persist?.(entry.schedule.id, { lastMtimeMs: m });
+          }
+        }
+      });
   }
 }
 

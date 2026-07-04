@@ -19,6 +19,8 @@ export interface StepInfo {
   delta?: string;      // legacy alias for a streamed delta (kept so App streaming reads it directly)
   tool?: string;       // tool name (tool_start/tool_end) or an approval label (approval_*)
   argsPreview?: string;// one-line, redacted, length-capped render of the tool args
+  callId?: string;     // Plan 02 Phase 6: the tool's call id — lets the LIVE waterfall pair a
+                       // tool_start with its tool_end deterministically (mirrors the persisted spanEvents)
   note?: string;       // a run-level breadcrumb (e.g. a verification verdict) — not a phase
   ok?: boolean;        // tool_end / approval_end success flag
 }

@@ -18,6 +18,7 @@ bun run test:e2e               # Layer 2 — builds, then runs tui-test
 bun scripts/e2e-evidence.ts agent-flow       # Layer 4 — records real-binary video proof (needs vhs)
 bun scripts/e2e-evidence.ts artifact-handoff # Layer 4 — Plan 01 hand-off by reference (parent stays thin)
 bun scripts/e2e-evidence.ts trace-inspector  # Layer 4 — the /trace waterfall, opened over a real trace
+bun scripts/e2e-evidence.ts live-waterfall   # Layer 4 — the LIVE /view waterfall, redrawing mid-delegation
 ```
 There is no `npm test` script — use `bun test` (Bun's built-in runner discovers `src/**/*.test.ts`).
 
@@ -165,6 +166,24 @@ because its derivation is **pure**, most of it needs no terminal at all.
     typed and is unambiguous. The tree render gates on **"TRACE"** (the inspector header, nowhere
     else); the drill-in gates on **"coaching ledger"** (rendered only in the run-span detail). All
     three proved stable across repeated runs; none is a load-bearing fixed `Sleep`.
+
+### Live mode + task-level traces (Plan 02 Phase 6)
+
+- **Pure unit** — `src/core/live-trace.test.ts` feeds an **event sequence** (`liveRunStart` /
+  `liveStep` / `liveRunEnd`) into the live reducer and asserts the redrawing tree: llm spans pair
+  model_start→transition; tool spans pair by `callId` even when two overlap; a delegated child nests
+  under its parent's open `delegate_task` span; a still-open span stays `running` and its bar grows to
+  `now`; run-end settles any open child. `src/core/trace-tree.test.ts` also covers
+  `deriveTaskTrace(ws, taskId)` (roots at a Task, groups multiple runs of one task, unknown task → []).
+- **Layer 1 (Ink)** — `App.test.tsx` renders `<App viewMode="waterfall">` with a **slow mock** and
+  asserts the `WATERFALL (live)` surface lights up with the run/tool/delegation spans (`delegate_task`,
+  the nested child) **mid-run**, then clears on completion — the live redraw is observable because the
+  mock holds the model call in-flight.
+- **Layer 4 (VHS evidence)** — `bun scripts/e2e-evidence.ts live-waterfall` reuses the slow-mode
+  `squad-panes` e2e model (holds the child ~4s) and gates on **`/WATERFALL/`** (a header string unique
+  to the live waterfall, never in the `↳` scrollback breadcrumb) then **`/delegate_task/`** during the
+  delegation, screenshotting the redrawing tree (`waterfall.png`) before it completes. A seventh
+  assertion runs `deriveTrace` on the produced workspace so the same reader decides pass/fail.
 
 ## Squad UI: the live status bar + split panes (Plan 10)
 

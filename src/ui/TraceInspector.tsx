@@ -20,12 +20,25 @@ function selectionLine(span: Span): string {
   if (span.detail.kind === "tool") return `[${span.name}] ${span.detail.argsPreview ?? ""}${span.detail.error ? " ✗ " + span.detail.error : ""}`.trim();
   if (span.detail.kind === "llm") return `[${span.name}] ${span.detail.finishReason ?? ""}${span.detail.tokens != null ? " · " + span.detail.tokens + " tok" : ""}${span.detail.contextTokens != null ? " · ctx ~" + span.detail.contextTokens : ""}${span.detail.compacted ? " · compacted" : ""}${span.detail.error ? " ✗ " + span.detail.error : ""}`.trim();
   if (span.detail.kind === "approval") return `[approval] ${span.detail.label}`;
+  if (span.detail.kind === "task") return `[task] ${span.detail.title} · ${span.detail.status} · ${span.detail.runCount} run(s) · ${span.detail.tokens} tok · ${cost(span.detail.costUsd)}`;
   return `[${span.name}] ${span.detail.outcome} · ${span.detail.tokens} tok · ${cost(span.detail.costUsd)}`;
 }
 
 /** Build the per-kind detail body (array of lines) for the ⏎ drill-in. */
 function detailLines(span: Span): string[] {
   const d = span.detail;
+  if (d.kind === "task") {
+    return [
+      `task: ${d.taskId}`,
+      `title: ${d.title}`,
+      `status: ${d.status}`,
+      `agent: ${d.agent ?? "—"}`,
+      `runs: ${d.runCount}`,
+      `tokens: ${d.tokens}`,
+      `cost: ${cost(d.costUsd)}`,
+      ...(d.summary ? ["", "summary:", d.summary.slice(0, 1200)] : []),
+    ];
+  }
   if (d.kind === "run") {
     const lines = [
       `outcome: ${d.outcome}`,
