@@ -34,8 +34,3 @@ export async function ensureWorkspace(ws: string) {
   await mkdir(join(ws, "kb", "sources"), { recursive: true });
   await mkdir(join(ws, "skills"), { recursive: true });
 }
-
-/** Artifacts are immutable: new file per run, never overwrite. */
-export function artifactPath(ws: string, topicSlug: string, runId: string) {
-  return join(ws, "artifacts", `${topicSlug}-${runId.replace("/", "-")}.md`);
-}

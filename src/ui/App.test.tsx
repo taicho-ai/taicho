@@ -18,6 +18,7 @@ import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "../store/roster";
 import { listTraces } from "../store/trace";
+import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { loadContext, loadLedger } from "../store/conversation";
 import { readTaskState, taskIdForRun } from "../store/task-state";
 import { readMcpStore } from "../store/mcp-store";
@@ -486,6 +487,76 @@ test("/skills list and /skills show render seeded skills", async () => {
   expect(lastFrame()).toContain("ship to prod");
   await send(stdin, "/skills show deploy", ENTER);
   await waitFor(lastFrame, "1. build");
+});
+
+// ── Plan 01: hand-off artifacts (save / read / list + delegation hand-off) ──
+
+const toolCall = (name: string, input: object) =>
+  ({ content: [{ type: "tool-call", toolCallId: "c1", toolName: name, input: JSON.stringify(input) }],
+     finishReason: { unified: "tool-calls", raw: "tool_use" }, usage }) as unknown as LanguageModelV3GenerateResult;
+
+test("save_artifact end-to-end: root saves a structured artifact and it persists in the store", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("save_artifact", { title: "Research dossier", type: "dossier", summary: "on the topic", body: "the full body" }),
+    finalText("Saved research-dossier@v1"),
+  ) as any });
+  const { ws, props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "save a research dossier", ENTER);
+  await waitFor(lastFrame, "Saved research-dossier");
+  const stored = listArtifacts(ws);
+  expect(stored.length).toBe(1);
+  expect(stored[0]).toMatchObject({ id: "research-dossier", version: 1, producer: "root", type: "dossier" }); // provenance from ctx
+});
+
+test("read_artifact end-to-end: root reads a pre-seeded artifact and the run completes (tool actually executed)", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("read_artifact", { id: "seeded" }),
+    finalText("read the artifact"),
+  ) as any });
+  const { ws, props } = await setup({ model });
+  saveArtifact(ws, { id: "seeded", title: "Seeded", summary: "the summary", body: "the body", producer: "human", runId: "human/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "read the seeded artifact", ENTER);
+  await waitFor(lastFrame, "read the artifact");
+  const done = listTraces(ws, "root").find((t) => t.outcome === "completed");
+  expect(done?.toolCalls.some((c) => c.tool === "read_artifact")).toBe(true); // wiring proven: the tool ran in-loop
+});
+
+test("list_artifacts end-to-end: root lists the store and the run completes", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("list_artifacts", {}),
+    finalText("here are the artifacts"),
+  ) as any });
+  const { ws, props } = await setup({ model });
+  saveArtifact(ws, { id: "one", title: "One", body: "1", producer: "human", runId: "human/1" });
+  saveArtifact(ws, { id: "two", title: "Two", body: "2", producer: "human", runId: "human/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "list artifacts", ENTER);
+  await waitFor(lastFrame, "here are the artifacts");
+  const done = listTraces(ws, "root").find((t) => t.outcome === "completed");
+  expect(done?.toolCalls.some((c) => c.tool === "list_artifacts")).toBe(true);
+});
+
+test("delegation hand-off end-to-end: root hands an artifact to a worker by reference; the graph is recorded", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "write from the dossier", inputArtifacts: ["research-foo"] }), // root step 1
+    toolCall("save_artifact", { title: "Script", type: "script", summary: "a 30s script", body: "SCENE 1..." }),   // child step 1
+    finalText("child saved the script"),                                                                          // child step 2
+    finalText("root done — see script@v1"),                                                                       // root step 2
+  ) as any });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write.", tools: ["save_artifact", "read_artifact"] }, "root");
+  saveArtifact(ws, { id: "research-foo", title: "Foo dossier", summary: "foo summary", body: "THE ENORMOUS BODY", producer: "human", runId: "human/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "have writer turn the dossier into a script", ENTER);
+  await waitFor(lastFrame, "root done", 8000);
+  const root = listTraces(ws, "root").find((t) => t.outcome === "completed" && t.delegatedOut.length === 1);
+  expect(root).toBeTruthy();
+  expect(root!.inputArtifacts).toEqual(["research-foo"]);   // handed DOWN by reference
+  expect(root!.outputArtifacts).toEqual(["script@v1"]);      // received UP from the child
+  const art = readArtifact(ws, "script@v1")!;
+  expect(art.producer).toBe("writer");                       // the child really produced it
 });
 
 test("a non-streaming agent reply renders markdown (bold stripped of ** markers)", async () => {
