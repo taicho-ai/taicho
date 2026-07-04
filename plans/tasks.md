@@ -415,8 +415,8 @@ the tracking view; the runbook is the build view.
 - [x] Delete `e2e/record-agent-flow.expect` + the rendered-MP4 flow once the tape passes. *Deleted the expect recorder; CLI_TESTING.md rewritten to drop the rendered-MP4 flow. `e2e/agent-flow.tui.ts` (Layer 2) kept.*
 
 ### Phase 3 — Scenario roster
-- [ ] `conversation-audit` tape (port the interrupted-turn scenario from `e2e/conversation-audit.tui.ts`).
-- [ ] Convention: every headline capability (Plans 01, 04, 06, 10) adds its proof scenario (e2e-model mode + tape + assertions) in its own test phase.
+- [x] `conversation-audit` tape (port the interrupted-turn scenario from `e2e/conversation-audit.tui.ts`). *`conversation-audit` e2e-model mode (model call hangs until the run's abort fires, so Esc mid-run deterministically marks the turn `interrupted`) + `e2e/scenarios/conversation-audit.ts` (tape: chat turn → Esc mid-run; 7 assertions on the preserved audit trail — interrupted trace, input.json, ledger, context `interrupted_run_not_safe_as_context`, transcript, failure.md, task). Run ids discovered dynamically.*
+- [x] Convention: every headline capability (Plans 01, 04, 06, 10) adds its proof scenario (e2e-model mode + tape + assertions) in its own test phase. *Established by the two shipped scenarios (`agent-flow`, `conversation-audit`): each is a self-contained `Scenario` (mode + tape + assertions) under `e2e/scenarios/`; future headline plans follow the same shape in their own phase.*
 
 ### Phase 4 — Docs & CI
 - [x] Rewrite `CLI_TESTING.md` around the new harness; add Layer 4 to `TESTING.md`'s table; update `CLAUDE.md`. *CLI_TESTING.md rewritten (assertion contract kept, manifest = deliverable, gotchas documented); TESTING.md now four layers + a Layer 4 section; CLAUDE.md testing line updated.*
