@@ -25,6 +25,7 @@ import { reindexSkills } from "./store/skills";
 import { reindexTasks, reconcileTasks } from "./store/task-state";
 import { createE2eModel } from "./core/e2e-model";
 import { parseCli, runHeadless, runTail } from "./core/headless";
+import { runScheduleCli } from "./core/schedule-cli";
 import { configureLogger, log } from "./core/logger";
 
 const ws = process.cwd();
@@ -43,6 +44,15 @@ if (cli.command?.kind === "tail") {
 
 const config = await loadConfig(ws);
 await ensureWorkspace(ws);
+
+// `taicho schedule <add|list|remove>` only touches the durable schedule store — short-circuit before
+// the heavy boot (seeds, DB, MCP connect). `schedule run` needs a model, so it falls through to the
+// full boot and is fired via the headless path below.
+if (cli.command?.kind === "schedule" && cli.command.args[0] !== "run") {
+  const r = await runScheduleCli({ ws, out: (l) => process.stdout.write(l + "\n") }, cli.command.args);
+  process.exit(r.ok ? 0 : 1);
+}
+
 await seedRoot(ws, config.defaults);
 await seedLibrarian(ws, config.defaults);
 await seedSkills(ws);
@@ -182,6 +192,19 @@ if (cli.command?.kind === "run") {
   );
   if (mcp) await mcp.closeAll().catch((e) => log.warn("mcp closeAll failed", e));
   process.exit(res.ok ? 0 : 1);
+}
+
+// `taicho schedule run <id>` fires ONE schedule once through the same unattended headless path a live
+// scheduled run uses — the schedule's own approval mode (default reject) applies (no captain, so no
+// unsupervised privileged exec). add/list/remove already exited above; only `run` reaches here.
+if (cli.command?.kind === "schedule") {
+  const hd = { ws, db, model: initial.model, resolveModel: initial.resolveModel, priceUsd: initial.priceUsd, configDefaults: config.defaults, mcp, embed: embedder?.embed, deckLedger };
+  const r = await runScheduleCli(
+    { ws, out: (l) => process.stdout.write(l + "\n"), fire: (s) => runHeadless(hd, { goal: s.goal, agent: s.agent, approve: s.approve }) },
+    cli.command.args,
+  );
+  if (mcp) await mcp.closeAll().catch((e) => log.warn("mcp closeAll failed", e));
+  process.exit(r.ok ? 0 : 1);
 }
 
 const rootThread = loadThread(ws, "root");

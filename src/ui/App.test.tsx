@@ -23,6 +23,7 @@ import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { loadContext, loadLedger } from "../store/conversation";
 import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
+import { listSchedules } from "../store/schedules";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { getViewMode } from "../store/prefs";
@@ -658,6 +659,27 @@ test("dispatch_task runs in the BACKGROUND: root returns immediately, the captai
   const bg = rows.find((r) => r.agent === "bgworker");
   expect(bg?.status).toBe("completed");
   expect(bg?.kind).toBe("background");
+});
+
+// ── Plan 04 Phase 6: /schedules add → list → remove (durable, from the REPL) ──
+
+test("/schedules add persists a durable schedule, /schedules list shows it, /schedules remove deletes it", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/schedules add audit the logs --every 1h --id aud", ENTER);
+  await waitFor(lastFrame, "added schedule aud");
+  // It is DURABLE on disk (survives a restart — reconciled + armed on boot).
+  expect(listSchedules(ws).map((s) => s.id)).toEqual(["aud"]);
+  expect(listSchedules(ws)[0]!.approve).toBe("reject"); // unattended-safe default
+
+  await send(stdin, "/schedules list", ENTER);
+  await waitFor(lastFrame, "aud");
+  expect(lastFrame()).toContain("every 3600000ms");
+
+  await send(stdin, "/schedules remove aud", ENTER);
+  await waitFor(lastFrame, "removed schedule aud");
+  expect(listSchedules(ws).length).toBe(0);
 });
 
 test("delegation with acceptance criteria: a twice-failed verdict is surfaced to the captain and recorded (Plan 06)", async () => {

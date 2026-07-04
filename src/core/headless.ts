@@ -25,7 +25,11 @@ export type ApprovalMode = "reject" | "approve" | "prompt";
 
 export type CliCommand =
   | { kind: "run"; goal: string; agent: string; approve: ApprovalMode }
-  | { kind: "tail"; runId?: string; follow: boolean };
+  | { kind: "tail"; runId?: string; follow: boolean }
+  // Plan 04 Phase 6: manage/fire durable schedules. `args` are the raw tokens after `schedule`
+  // (--verbose already stripped); parsed by parseScheduleCommand in scheduler.ts so the CLI and the
+  // REPL's /schedules command share one grammar.
+  | { kind: "schedule"; args: string[] };
 
 export interface ParsedCli {
   /** `--verbose`/`-v` anywhere on the line → raise the log level to debug. */
@@ -45,11 +49,13 @@ function normalizeApprove(v: string | undefined): ApprovalMode {
  *  interpreter/executable path, everything after is the command's args. No subcommand ⇒ REPL. */
 export function parseCli(argv: string[]): ParsedCli {
   const verbose = argv.includes("--verbose") || argv.includes("-v");
-  const cmdIdx = argv.findIndex((a, i) => i > 0 && (a === "run" || a === "tail"));
+  const cmdIdx = argv.findIndex((a, i) => i > 0 && (a === "run" || a === "tail" || a === "schedule"));
   if (cmdIdx < 0) return { verbose, command: null };
 
   const cmd = argv[cmdIdx];
   const rest = argv.slice(cmdIdx + 1).filter((a) => a !== "--verbose" && a !== "-v");
+
+  if (cmd === "schedule") return { verbose, command: { kind: "schedule", args: rest } };
 
   if (cmd === "run") {
     let agent = "root";

@@ -210,8 +210,24 @@ until Phase 0 here is decided.
 - [~] Checkpoint the loop's message array per iteration; resume an interrupted run from the last completed iteration. *(checkpoint WRITING done — `checkpoint.json` per iteration via `loop.ts` `checkpoint`; automatic resume EXECUTION deferred, consistent with the closed Phase 0 "report-and-ask first" decision.)*
 - [x] Boot reconciliation of `tasks/`: `running`/`queued` → `interrupted`, then report-and-ask per Phase 0. *(`reconcileTasks` on boot → startupNotice lists the interrupted tasks; captain reviews via `/tasks`.)*
 
-### Phase 6 — v2 (deferred)
-- [ ] Scheduled/triggered runs (cron-style, watches) — needs Plan 03's headless mode. **DEFERRED (v2).**
+### Phase 6 — v2 (scheduled/triggered runs)
+- [x] Scheduled/triggered runs (cron-style, watches) — needs Plan 03's headless mode. *(Shipped. A
+      `Schedule` (`src/schemas/schedule.ts`) fires an UNATTENDED run through Plan 03's headless
+      `executeRun` seam (`runHeadless`) on a **cron** (5-field, UTC), **interval**, or file-**watch**
+      (mtime) trigger. The engine (`src/core/scheduler.ts`) is PURE — clock, file-stat, and the fire
+      action are all injected, so "is it time to fire" + "fire→run" are unit-tested with an injected
+      clock (no real timers): fires at its time not before, never double-fires one window, never
+      re-fires while its previous run is in flight (bounds concurrency to 1/schedule), disabled
+      schedules stay silent. **Approvals:** a scheduled run is unattended, so it reuses Plan 03's
+      auto-**reject** default (no captain → no unsupervised privileged exec); `--approve approve` is
+      the trusted-only opt-in (`prompt` is disallowed — nobody to answer). **Persistence:** durable
+      `schedules/<id>.json` (files are canon, `src/store/schedules.ts`), reconciled + armed on boot in
+      `App.tsx`; a bad cron is rejected at CREATE time, never silently dead. **Surface:** `/schedules
+      list|add|remove|run` in the REPL + a `taicho schedule <add|list|remove|run>` subcommand
+      (one shared parser). No runaway: one schedule fires bounded runs (per-run + deck budgets apply
+      via the headless deps) and the 15s REPL tick rate is the real firing floor. Tests:
+      `core/scheduler.test.ts`, `store/schedules.test.ts`, `core/schedule-cli.test.ts`, a `parseCli`
+      case in `core/headless.test.ts`, and a Layer-1 `/schedules` round-trip in `ui/App.test.tsx`.)*
 
 ### Phase 7 — Tests & docs
 - [x] Unit: task store lifecycle; steer routing; delegationGuard under interleaved dispatches. *(`task-state.test.ts`, `tasks.test.ts` (scheduler), `run.test.ts` (dispatch wiring/guards/steer/checkpoint), `tools.test.ts` (dispatch/check/await), `loop.test.ts` (onEvent/checkpoint).)*
