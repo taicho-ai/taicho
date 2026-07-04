@@ -16,7 +16,7 @@ import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/r
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy } from "../store/policy";
 import { appendTurn, shouldPersistTurn } from "../store/thread";
-import { appendLedgerTurn, newTurnId, recordContextDecision, statusFromOutcome } from "../store/conversation";
+import { appendLedgerTurn, newTurnId, recordContextDecision } from "../store/conversation";
 import { createTaskState, taskIdForRun, updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
 import { TaskScheduler } from "../core/tasks";
 import type { RunResult, TaskAwaitResult, RunDeps } from "../core/run";
@@ -32,7 +32,10 @@ import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
 import { addMcpServer, removeMcpServer } from "../store/mcp-store";
-import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand } from "./slash";
+import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand, parseArtifactsCommand } from "./slash";
+import { listArtifacts, readArtifact, artifactVersions, gcArtifacts } from "../store/artifacts";
+import { annotateArtifact, listAnnotations } from "../store/annotations";
+import { artifactHandle } from "../schemas/artifact";
 import { syncKnowledgeSources } from "../knowledge/sync";
 import { listNodeRows, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { listSkills, readSkill, deleteSkill, reindexSkills } from "../store/skills";
@@ -498,6 +501,26 @@ export function App(props: {
     say({ kind: "user", text: `(steer) ${value}` });
   };
 
+  // One seam for the per-turn audit both the chat and @agent branches share (Plan 01 Ph5, closing
+  // context-hygiene tension #3 — the two ~30-line blocks were near-identical). Appends the assistant
+  // turn to the ledger, records the include/exclude context decision for the user + assistant turns,
+  // and folds the run into its task record. A completed run is safe to replay as context; any other
+  // outcome is recorded but excluded. (The user turn + task record are opened at onRunStart.)
+  const recordTurnOutcome = (agent: string, res: RunResult) => {
+    const assistantTurnId = newTurnId(agent, res.runId, "assistant");
+    appendLedgerTurn(props.ws, agent, {
+      turnId: assistantTurnId, runId: res.runId, timestamp: new Date().toISOString(),
+      agent, role: "assistant", content: res.text, status: res.trace.outcome, // outcome ⊂ LedgerStatus (was statusFromOutcome, an identity)
+    });
+    const audit = pendingAuditRef.current;
+    if (!audit?.userTurnId) return;
+    const include = res.trace.outcome === "completed";
+    const reason = include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`;
+    recordContextDecision(props.ws, agent, { include, turnId: audit.userTurnId, runId: res.runId, reason });
+    recordContextDecision(props.ws, agent, { include, turnId: assistantTurnId, runId: res.runId, reason });
+    updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)), props.db);
+  };
+
   const submit = async (value: string) => {
     if (!value.trim()) return;
 
@@ -531,33 +554,7 @@ export function App(props: {
         const res = await executeRun(deps(activeModel), { agent: root, messages: [...thread.current], triggeredBy: "user" });
         flushStream(); // commit the final streamed turn; only fall back to res.text if nothing streamed
         if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text, rendered: true });
-        const audit = pendingAuditRef.current;
-        const assistantTurnId = newTurnId("root", res.runId, "assistant");
-        appendLedgerTurn(props.ws, "root", {
-          turnId: assistantTurnId,
-          runId: res.runId,
-          timestamp: new Date().toISOString(),
-          agent: "root",
-          role: "assistant",
-          content: res.text,
-          status: statusFromOutcome(res.trace.outcome),
-        });
-        if (audit?.userTurnId) {
-          const include = res.trace.outcome === "completed";
-          recordContextDecision(props.ws, "root", {
-            include,
-            turnId: audit.userTurnId,
-            runId: res.runId,
-            reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
-          });
-          recordContextDecision(props.ws, "root", {
-            include,
-            turnId: assistantTurnId,
-            runId: res.runId,
-            reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
-          });
-          updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)), props.db);
-        }
+        recordTurnOutcome("root", res);
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
           if (shouldPersistTurn(res.trace.outcome)) {
@@ -577,33 +574,7 @@ export function App(props: {
         const res = await executeRun(deps(activeModel), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
         flushStream();
         if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text, rendered: true });
-        const audit = pendingAuditRef.current;
-        const assistantTurnId = newTurnId(target.id, res.runId, "assistant");
-        appendLedgerTurn(props.ws, target.id, {
-          turnId: assistantTurnId,
-          runId: res.runId,
-          timestamp: new Date().toISOString(),
-          agent: target.id,
-          role: "assistant",
-          content: res.text,
-          status: statusFromOutcome(res.trace.outcome),
-        });
-        if (audit?.userTurnId) {
-          const include = res.trace.outcome === "completed";
-          recordContextDecision(props.ws, target.id, {
-            include,
-            turnId: audit.userTurnId,
-            runId: res.runId,
-            reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
-          });
-          recordContextDecision(props.ws, target.id, {
-            include,
-            turnId: assistantTurnId,
-            runId: res.runId,
-            reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
-          });
-          updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)), props.db);
-        }
+        recordTurnOutcome(target.id, res);
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s)) · /trace to inspect` });
       }
@@ -785,6 +756,50 @@ export function App(props: {
       // reindex
       reindexSkills(props.ws, props.db);
       say({ kind: "system", text: `  reindexed ${listSkills(props.ws).length} skill(s) from files` });
+      return;
+    }
+    if (cmd === "artifacts") {
+      const parsed = parseArtifactsCommand(arg);
+      if (parsed.kind === "error") { say({ kind: "system", text: `  ${parsed.message}` }); return; }
+      if (parsed.kind === "list") {
+        const all = listArtifacts(props.ws, parsed.q ? { q: parsed.q } : {});
+        if (!all.length) { say({ kind: "system", text: "  (no artifacts)" }); return; }
+        all.forEach((a) => {
+          const open = listAnnotations(props.ws, artifactHandle(a), { status: "open" }).length;
+          say({ kind: "system", text: `  [${artifactHandle(a)}] ${a.title} (${a.type}, ${a.role}) · ${a.producer}${open ? ` · ${open} open feedback` : ""}${a.summary ? ` — ${a.summary}` : ""}` });
+        });
+        return;
+      }
+      if (parsed.kind === "show") {
+        const a = readArtifact(props.ws, parsed.handle);
+        if (!a) { say({ kind: "system", text: `  no artifact "${parsed.handle}"` }); return; }
+        say({ kind: "system", text: `  [${artifactHandle(a)}] ${a.title}` });
+        say({ kind: "system", text: `  type=${a.type} role=${a.role} producer=${a.producer} run=${a.runId} versions=[${artifactVersions(props.ws, a.id).join(", ")}]` });
+        if (a.parents.length) say({ kind: "system", text: `  parents: ${a.parents.join(", ")}` });
+        if (a.summary) say({ kind: "system", text: `  summary: ${a.summary}` });
+        const anns = listAnnotations(props.ws, artifactHandle(a));
+        if (!anns.length) say({ kind: "system", text: "  (no annotations)" });
+        else anns.forEach((an) => say({ kind: "system", text: `  ✎ [${an.id}] (${an.status}) ${an.kind} · ${an.author}: ${an.body}${an.verdict ? ` [${an.verdict.pass ? "pass" : "FAIL"}]` : ""}` }));
+        return;
+      }
+      if (parsed.kind === "annotate") {
+        try {
+          const an = annotateArtifact(props.ws, { target: parsed.handle, author: "human", body: parsed.body, kind: "feedback" });
+          say({ kind: "system", text: `  ✎ annotated ${an.target} (${an.id}) — hand it to an agent to revise; the open feedback rides along.` });
+        } catch (e) { say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` }); }
+        return;
+      }
+      if (parsed.kind === "approve") {
+        try {
+          const an = annotateArtifact(props.ws, { target: parsed.handle, author: "human", body: "approved by captain", kind: "approval" });
+          say({ kind: "system", text: `  ✓ approved ${an.target}` });
+        } catch (e) { say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` }); }
+        return;
+      }
+      // gc — never archives a version referenced by a trace (keep-latest-N + lineage honored inside).
+      const referenced = listTraces(props.ws).flatMap((t) => [...t.artifacts, ...t.inputArtifacts, ...t.outputArtifacts]);
+      const r = gcArtifacts(props.ws, { referenced });
+      say({ kind: "system", text: `  gc: archived ${r.archived.length} version(s), kept ${r.kept}${r.archived.length ? ` — ${r.archived.join(", ")}` : " (nothing to collect)"}` });
       return;
     }
     if (cmd === "tasks") {

@@ -21,7 +21,11 @@ export const Exemplar = z.object({
   id: z.string(),                          // ex_xxxx
   agent: z.string(),
   pattern: z.string(),                     // request pattern this answers
-  artifact: z.string(),                    // immutable artifact path (stable ID)
+  artifact: z.string(),                    // artifact HANDLE ("id" ⇒ latest, or "id@vN") — resolves via the
+                                           // artifact store (store/artifacts.ts), NOT a raw filesystem path.
+                                           // Plan 01 Ph4c: keying on the stable, versioned, relocatable id
+                                           // (never an absolute path) is what lets an exemplar survive a
+                                           // revision/workspace move — same addressing as delegate hand-off.
   mode: z.enum(["serve", "imitate"]).default("imitate"),
   status: z.enum(["proposed", "approved", "rejected", "superseded"]),
   taughtBy: z.string(),

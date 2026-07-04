@@ -38,7 +38,7 @@ Your job is to TURN THE CAPTAIN'S INTENT INTO ACTION, never to do the domain wor
 
 /** Root's built-in capabilities. Kept in one place so existing roots get reconciled to the current
  *  set on boot (older roots drift — e.g. predate ask_human / the MCP tools). */
-export const ROOT_TOOLS = ["create_agent", "delegate_task", "dispatch_task", "check_task", "await_task", "find_agents", "ask_human", "read_url", "add_mcp_server", "remember", "recall", "propose_skill", "run_command", "save_artifact", "read_artifact", "list_artifacts"];
+export const ROOT_TOOLS = ["create_agent", "delegate_task", "dispatch_task", "check_task", "await_task", "find_agents", "ask_human", "read_url", "add_mcp_server", "remember", "recall", "propose_skill", "run_command", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations"];
 
 export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]): Promise<void> {
   const file = paths.agentFile(ws, "root");
@@ -140,7 +140,7 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
     // plus write_artifact (legacy simple-markdown wrapper). NO MCP grant by default (Plan 08 least
     // privilege — MCP tools are opt-in via an explicit "mcp:<server>" ref). To wire a worker to an
     // MCP server, pass it in draft.tools (e.g. root proposes create_agent with tools incl. mcp:web).
-    tools: draft.tools ?? ["write_artifact", "save_artifact", "read_artifact", "list_artifacts"],
+    tools: draft.tools ?? ["write_artifact", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations"],
     canSee: ["*"], canDelegateTo: [], isRoot: false,
     created: new Date().toISOString(),
     budgets: defaults?.budgets,

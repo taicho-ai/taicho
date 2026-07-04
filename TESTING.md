@@ -16,6 +16,7 @@ bun run typecheck              # bunx tsc --noEmit
 bun run build                  # compile dist/taicho
 bun run test:e2e               # Layer 2 — builds, then runs tui-test
 bun scripts/e2e-evidence.ts agent-flow       # Layer 4 — records real-binary video proof (needs vhs)
+bun scripts/e2e-evidence.ts artifact-handoff # Layer 4 — Plan 01 hand-off by reference (parent stays thin)
 bun scripts/e2e-evidence.ts trace-inspector  # Layer 4 — the /trace waterfall, opened over a real trace
 ```
 There is no `npm test` script — use `bun test` (Bun's built-in runner discovers `src/**/*.test.ts`).
@@ -109,7 +110,8 @@ human can watch: a **true session video** + screenshots + machine-checked assert
 the binary produced.
 
 ```bash
-bun scripts/e2e-evidence.ts agent-flow    # → evidence/agent-flow/{session.mp4, *.png, manifest.json}
+bun scripts/e2e-evidence.ts agent-flow        # → evidence/agent-flow/{session.mp4, *.png, manifest.json}
+bun scripts/e2e-evidence.ts artifact-handoff   # Plan 01 — A produces, B consumes BY REFERENCE, parent stays thin
 ```
 
 A **scenario** (`e2e/scenarios/<name>.ts`) = a VHS tape (drives the flow, waits gated on on-screen
@@ -117,7 +119,14 @@ text) + file assertions (decide pass/fail). The wrapper (`scripts/e2e-evidence.t
 the binary, records in a **fresh temp workspace** (never the repo root), and writes
 `evidence/<scenario>/manifest.json` — the deliverable. **Video is evidence, not assertion**:
 pass/fail comes only from the workspace-file assertions. Deterministic via
-`TAICHO_E2E_MODEL=agent-flow` (`src/core/e2e-model.ts`), same keystone as Layer 2.
+`TAICHO_E2E_MODEL=<mode>` (`src/core/e2e-model.ts`), same keystone as Layer 2.
+
+The **`artifact-handoff`** scenario (Plan 01) proves the hand-off store end-to-end: root creates a
+researcher (A) and a writer (B), A `save_artifact`s a dossier, root delegates it to B **by handle**
+(`inputArtifacts:[dossier@v1]`), and B `read_artifact`s it and derives a `brief` linked back via
+`parents`. Its keystone assertion: the dossier BODY payload marker appears in the artifact's body
+file but **NEVER** in the orchestrating root run's `transcript.jsonl`/`input.json` — heavy content
+stayed on disk, the parent context stayed thin.
 
 Needs `vhs` on PATH (`brew install vhs`) — verified on this machine with **vhs 0.11.0 / ttyd
 1.7.7** (ffmpeg already present). Full guide, the assertion contract, and the verified

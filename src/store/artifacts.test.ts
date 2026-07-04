@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   saveArtifact, readArtifact, readArtifactBody, listArtifacts,
-  artifactVersions, rebuildArtifactIndex, readManifest,
+  artifactVersions, rebuildArtifactIndex, readManifest, gcArtifacts,
 } from "./artifacts";
+import { annotateArtifact } from "./annotations";
 import { paths } from "./files";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-art-"));
@@ -139,4 +140,59 @@ test("the envelope on disk carries full provenance + lineage (readable without t
   const onDisk = JSON.parse(readFileSync(join(paths.artifactDir(w), "p", "v2.json"), "utf8"));
   expect(onDisk).toMatchObject({ id: "p", version: 2, producer: "writer", runId: "writer/2026-07-04-run3", parents: ["p@v1"] });
   expect(a.producer).toBe("writer");
+});
+
+// ── Phase 4b — retention & GC ──────────────────────────────────────────────
+
+test("gcArtifacts archives old unreferenced versions but keeps the latest N (default 3)", () => {
+  const w = ws();
+  for (let i = 1; i <= 5; i++) saveArtifact(w, { id: "doc", title: `Doc v${i}`, body: `${i}`, ...prov });
+  expect(artifactVersions(w, "doc")).toEqual([1, 2, 3, 4, 5]);
+  const r = gcArtifacts(w);                                   // keepLatest defaults to 3
+  expect(r.archived.sort()).toEqual(["doc@v1", "doc@v2"]);
+  expect(artifactVersions(w, "doc")).toEqual([3, 4, 5]);      // live scan no longer sees the archived versions
+  expect(readArtifact(w, "doc@v1")).toBeNull();              // an archived version is gone from the addressable store
+  expect(readArtifact(w, "doc")!.version).toBe(5);           // latest is untouched
+  expect(readArtifactBody(w, "doc@v5")?.toString("utf8")).toBe("5");
+});
+
+test("gcArtifacts NEVER archives a version referenced by a trace, however old", () => {
+  const w = ws();
+  for (let i = 1; i <= 4; i++) saveArtifact(w, { id: "doc", title: `v${i}`, body: `${i}`, ...prov });
+  // v1 is old (outside keep-latest-2) but a trace still points at it → must survive.
+  const r = gcArtifacts(w, { keepLatest: 2, referenced: ["doc@v1"] });
+  expect(r.archived).toEqual(["doc@v2"]);                     // only the old AND unreferenced one goes
+  expect(readArtifact(w, "doc@v1")!.title).toBe("v1");        // referenced version preserved
+  expect(readArtifact(w, "doc@v2")).toBeNull();
+});
+
+test("gcArtifacts preserves the parent-closure of a kept version (lineage integrity)", () => {
+  const w = ws();
+  saveArtifact(w, { id: "src", title: "Source", body: "s", ...prov });      // src@v1
+  saveArtifact(w, { id: "src", title: "Source v2", body: "s2", ...prov });  // src@v2 (latest, kept)
+  // a DIFFERENT id derives from the OLD src@v1; keeping the derived latest must keep src@v1 too.
+  saveArtifact(w, { id: "derived", title: "Derived", body: "d", parents: ["src@v1"], ...prov });
+  const r = gcArtifacts(w, { keepLatest: 1 });
+  // src@v1 is outside keep-latest-1 AND unreferenced by a trace, but it's the parent of a kept artifact
+  expect(r.archived).not.toContain("src@v1");
+  expect(readArtifact(w, "src@v1")!.title).toBe("Source");
+});
+
+test("gcArtifacts never archives a version that carries an annotation", () => {
+  const w = ws();
+  for (let i = 1; i <= 4; i++) saveArtifact(w, { id: "doc", title: `v${i}`, body: `${i}`, ...prov });
+  annotateArtifact(w, { target: "doc@v1", author: "human", body: "keep this one — it's the approved baseline" });
+  const r = gcArtifacts(w, { keepLatest: 2 });
+  expect(r.archived).not.toContain("doc@v1");                // annotated ⇒ protected
+  expect(readArtifact(w, "doc@v1")!.title).toBe("v1");
+  expect(r.archived).toEqual(["doc@v2"]);
+});
+
+test("gcArtifacts is a no-op when nothing is collectable", () => {
+  const w = ws();
+  saveArtifact(w, { id: "a", title: "A", body: "1", ...prov });
+  saveArtifact(w, { id: "b", title: "B", body: "2", ...prov });
+  const r = gcArtifacts(w);
+  expect(r.archived).toEqual([]);
+  expect(listArtifacts(w).map((x) => x.id).sort()).toEqual(["a", "b"]);
 });

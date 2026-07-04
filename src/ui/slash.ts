@@ -25,6 +25,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "mcp", summary: "manage MCP servers", usage: "[list|add|remove|login] …" },
   { name: "kb", summary: "manage the knowledgebase", usage: "sync | list [filter] | forget <filter> | reindex" },
   { name: "skills", summary: "manage agent skills", usage: "list | show <id|name> | remove <id> | reindex" },
+  { name: "artifacts", summary: "view / annotate / approve artifacts", usage: "list [q] | show <handle> | annotate <handle> <text> | approve <handle> | gc" },
   { name: "status", summary: "show the auth source" },
   { name: "login", summary: "sign in with a ChatGPT subscription", usage: "openai" },
   { name: "logout", summary: "sign out", usage: "openai" },
@@ -233,4 +234,37 @@ export function parseSkillCommand(arg: string): SkillCommand {
   if (sub === "show") return parts[1] ? { kind: "show", arg: parts[1] } : { kind: "error", message: "usage: /skills show <id|name>" };
   if (sub === "remove") return parts[1] ? { kind: "remove", id: parts[1] } : { kind: "error", message: "usage: /skills remove <id>" };
   return { kind: "error", message: `unknown /skills subcommand "${sub}" (try list, show, remove, reindex)` };
+}
+
+// ---- /artifacts parsing (pure; the async handler lives in App.tsx) --------------------------------
+// The captain's window into the hand-off store (Plan 01 Ph4d): view what agents produced, leave
+// feedback (→ a revision run), sign off, and reclaim disk (gc). A handle is "id" (latest) or "id@vN".
+
+export type ArtifactsCommand =
+  | { kind: "list"; q?: string }
+  | { kind: "show"; handle: string }
+  | { kind: "annotate"; handle: string; body: string }
+  | { kind: "approve"; handle: string }
+  | { kind: "gc" }
+  | { kind: "error"; message: string };
+
+export function parseArtifactsCommand(arg: string): ArtifactsCommand {
+  const trimmed = arg.trim();
+  if (!trimmed) return { kind: "list" };
+  const sp = trimmed.indexOf(" ");
+  const sub = (sp === -1 ? trimmed : trimmed.slice(0, sp)).toLowerCase();
+  const rest = sp === -1 ? "" : trimmed.slice(sp + 1).trim();
+  if (sub === "list" || sub === "ls") return { kind: "list", q: rest || undefined };
+  if (sub === "gc") return { kind: "gc" };
+  if (sub === "show") return rest ? { kind: "show", handle: rest } : { kind: "error", message: "usage: /artifacts show <handle>" };
+  if (sub === "approve") return rest ? { kind: "approve", handle: rest } : { kind: "error", message: "usage: /artifacts approve <handle>" };
+  if (sub === "annotate") {
+    const s2 = rest.indexOf(" ");
+    if (s2 === -1) return { kind: "error", message: "usage: /artifacts annotate <handle> <feedback>" };
+    const handle = rest.slice(0, s2);
+    const body = rest.slice(s2 + 1).trim();
+    if (!handle || !body) return { kind: "error", message: "usage: /artifacts annotate <handle> <feedback>" };
+    return { kind: "annotate", handle, body };
+  }
+  return { kind: "error", message: `unknown /artifacts subcommand "${sub}" (try list, show, annotate, approve, gc)` };
 }

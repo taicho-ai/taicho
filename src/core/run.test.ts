@@ -22,6 +22,7 @@ import { KbNode } from "../schemas/knowledge";
 import { writeSkill } from "../store/skills";
 import { Skill } from "../schemas/skill";
 import { saveArtifact, readArtifact } from "../store/artifacts";
+import { annotateArtifact } from "../store/annotations";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -619,6 +620,33 @@ test("delegate_task drops an unknown input artifact handle with a note (never pa
   expect(res.trace.delegatedOut.length).toBe(1);               // delegation still happens
   expect(res.trace.inputArtifacts).toEqual([]);                // the dead ref was dropped, not passed
   expect(res.trace.notes.some((n) => /dropped unknown input artifact/i.test(n))).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// Plan 01 Phase 4: feedback & revision — open annotations ride an input artifact into a revision run.
+// ---------------------------------------------------------------------------
+
+test("open annotations on an input artifact become a REVISION brief in the child's prompt (annotation → revision path)", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  saveArtifact(ws, { id: "dossier", title: "Dossier", type: "dossier", summary: "the short summary", body: "THE ENORMOUS BODY", producer: "root", runId: "root/seed" });
+  // human feedback + a machine verdict (Plan 06) — both are annotations, both must ride along.
+  annotateArtifact(ws, { target: "dossier@v1", author: "human", body: "add dates to every source" });
+  annotateArtifact(ws, { target: "dossier@v1", author: "checker", body: "verification", verdict: { pass: false, reasons: ["two sources are undated"] } });
+  const childModel = new MockLanguageModelV3({ doGenerate: (async () => text("revised")) as any });
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "writer", goal: "revise the dossier", inputArtifacts: ["dossier@v1"] }),
+    text("root done"),
+  ) as any });
+  const deps = makeDeps({ ws, db, model: rootModel, resolveModel: (id) => id === "writer" ? { model: childModel, modelId: "m" } : { model: rootModel, modelId: "m" } });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "fix it" }], triggeredBy: "user" });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const childPrompt = JSON.stringify((childModel as any).doGenerateCalls[0].prompt);
+  expect(childPrompt).toContain("add dates to every source");   // human feedback surfaced
+  expect(childPrompt).toContain("two sources are undated");      // verdict reasons surfaced
+  expect(childPrompt).toContain("REVISION");                     // the child is told this is a revision
+  expect(childPrompt).not.toContain("THE ENORMOUS BODY");        // still BY REFERENCE — body never inlined
 });
 
 test("create_agent honors an edited identity, not just role", async () => {

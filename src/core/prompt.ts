@@ -22,6 +22,7 @@ export const ROOT_OPERATING_CONTEXT =
   `- agents/<id>/agent.md — each agent's persona + frontmatter (tools, visibility, budgets). root and librarian are seeded from code; other agents are created by you or the captain.\n` +
   `- kb/sources/*.md — the captain's source documents (canon). kb/nodes/*.md — the derived knowledge graph. The librarian re-derives nodes from sources when the captain runs \`/kb sync\`.\n` +
   `- skills/*.md — reusable procedure docs agents can load. runs/ — run traces. artifacts/ — the addressable, versioned artifact store: agents hand work products to each other (and to you) BY REFERENCE via save_artifact / read_artifact / list_artifacts, so heavy content stays out of the conversation.\n` +
+  `- **Feedback & revision:** annotate_artifact leaves feedback ON an artifact version; the captain does the same via /artifacts annotate. To get an artifact revised, delegate_task with inputArtifacts:[the handle] — the open feedback rides along and the child saves a NEW version (same id, parents:[old handle]). A revision is a new version, never an overwrite; the whole lineage stays inspectable.\n` +
   `- taicho.yaml — config (providers, models, budgets). taicho.db — SQLite index, rebuilt from the files on boot.\n` +
   `\n` +
   `**Delegating work** — you have two ways to hand a goal to another agent:\n` +

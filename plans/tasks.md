@@ -56,29 +56,29 @@ returning the child's full text into the parent's context. That is the pollution
 - [x] Extend `RunTrace` to record `inputArtifacts` / `outputArtifacts` → builds the hand-off graph (mirrors `delegatedOut`).
 
 ### Phase 4 — Feedback & revision
-- [ ] Versioning: a `save_artifact` revision creates a new version linked to its parent.
-- [ ] Annotations/feedback on an artifact (from an agent or the human) that becomes the input to a revision run.
-- [ ] Connect to coaching/policy — `policy.artifact` currently keys on a path; move to an artifact id.
-- [ ] UI: surface artifacts to the captain (view / annotate / approve).
-- [ ] **Hook for Plan 06:** a verification verdict is an annotation like any other — same annotation → revision path (see `reference/delegation-verification.md` §3c).
+- [x] Versioning: a `save_artifact` revision creates a new version linked to its parent. *(store already immutable-per-version; confirmed + tested — a revision is a new version linked via `parents`.)*
+- [x] Annotations/feedback on an artifact (from an agent or the human) that becomes the input to a revision run. *(`src/schemas/annotation.ts` + `src/store/annotations.ts`; `annotate_artifact`/`list_annotations` tools; open annotations ride an input artifact into a revision run via `run.ts`'s input-artifacts block.)*
+- [x] Connect to coaching/policy — `policy.artifact` currently keys on a path; move to an artifact id. *(`Exemplar.artifact` is now an artifact HANDLE resolved via the store, not a filesystem path. Exemplar itself is still unwired scaffolding — the schema/semantics change is the deliverable.)*
+- [x] UI: surface artifacts to the captain (view / annotate / approve). *(`/artifacts list|show|annotate|approve|gc` in `ui/slash.ts` + `ui/App.tsx`.)*
+- [x] **Hook for Plan 06:** a verification verdict is an annotation like any other — same annotation → revision path (see `reference/delegation-verification.md` §3c). *(`Annotation.verdict` accepts a `VerificationVerdict`; a verdict-bearing annotation is a `verification` kind and surfaces to the reviser identically to human feedback.)*
 
 ### Phase 4b — Retention & GC
 - [x] Retention policy: immutable-per-version + heavy media = unbounded disk. *Decided (2026-07-04): keep-latest-N-versions + age-based archive, config-disposed; GC only unreferenced versions (nothing in a trace/policy/task).* 
-- [ ] `gc_artifacts` maintenance path (or `/artifacts gc`) honoring the policy; never breaks an id referenced by a trace, policy, or task.
+- [x] `gc_artifacts` maintenance path (or `/artifacts gc`) honoring the policy; never breaks an id referenced by a trace, policy, or task. *(`gcArtifacts` in `store/artifacts.ts` + `/artifacts gc`: keep-latest-N + archive to `artifacts/<id>/_archive/`; protects referenced handles, annotated versions, and the parent-closure of anything kept. Tested.)*
 
 ### Phase 5 — Context-hygiene synthesis (related pending work)
 **Detail:** [`reference/context-hygiene-audit.md`](reference/context-hygiene-audit.md)
 - [x] Reconcile `thread.jsonl` vs `conversation` ledger/context source-of-truth (decided 2026-07-04: option **C**).
 - [x] Move turn audit (ledger + context + task) into the engine (`run.ts`), guarded by `triggeredBy === "user"`.
-- [ ] De-duplicate the two ~30-line audit blocks in `App.tsx submit()` into one seam.
-- [ ] Cut dead/no-op code: `modelMessageContent` (unused identity no-op), `statusFromOutcome` (identity). (`verifiedClaims`: decided 2026-07-04 in Plan 06 — rename → `verifications[]` and populate, not cut.)
-- [ ] Make replayed context carry artifact handles, not payloads (this is where the two halves meet).
+- [x] De-duplicate the two ~30-line audit blocks in `App.tsx submit()` into one seam. *(one `recordTurnOutcome(agent, res)` closure in `App.tsx`; closes context-hygiene tension #3. NOTE: this de-dups within the UI — moving the seam into the engine (`executeRun`) to also give non-Ink callers identical audit + the single-write seam Plan 05 Ph3 wants is DEFERRED, to keep the required agent-flow mp4 stable.)*
+- [x] Cut dead/no-op code: `modelMessageContent` (unused identity no-op), `statusFromOutcome` (identity). *(both deleted from `store/conversation.ts`; `statusFromOutcome` inlined as `res.trace.outcome` — `outcome ⊂ LedgerStatus`.)* (`verifiedClaims`: decided 2026-07-04 in Plan 06 — rename → `verifications[]` and populate, not cut.)
+- [ ] Make replayed context carry artifact handles, not payloads (this is where the two halves meet). **DEFERRED** — hand-off already returns handles+summaries (never bodies) and the replayed thread stores the assistant's final text (which references handles), so payloads don't re-enter today; the deliberate handle-carrying replay mechanism is unbuilt.
 
 ### Phase 6 — Tests & docs
 - [x] Unit tests for the artifact store: immutability, versioning, provenance/lineage.
 - [x] Layer-1 `App.test.tsx` coverage for save/read/list + a delegation hand-off.
-- [ ] Real-binary e2e (tui-test): agent A produces an artifact, agent B consumes it **by reference**, parent context stays thin.
-- [ ] Update `TESTING.md`, `CLAUDE.md`, `prompt.ts` workspace-layout notes. *(partial: `prompt.ts` root workspace-layout note updated for the artifact store; `TESTING.md`/`CLAUDE.md` deferred.)*
+- [x] Real-binary e2e (tui-test): agent A produces an artifact, agent B consumes it **by reference**, parent context stays thin. *(`e2e/scenarios/artifact-handoff.ts` + `artifact-handoff` e2e-model mode; VHS evidence PASS 8/8 — keystone assertion: the dossier body marker is in the artifact file but NEVER in root's transcript/input.)*
+- [x] Update `TESTING.md`, `CLAUDE.md`, `prompt.ts` workspace-layout notes. *(`prompt.ts` root note now covers annotate/revise; `TESTING.md` documents the `artifact-handoff` scenario; `CLAUDE.md` lists `annotations.ts` + the annotation schema.)*
 
 ---
 
