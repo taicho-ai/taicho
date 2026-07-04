@@ -2,11 +2,12 @@
  *  survives a restart and is reconciled/armed on boot (`listSchedules`). The set is small (a handful
  *  of captain-created schedules), so a file scan is the whole query surface — no DB index needed
  *  (unlike `/tasks`, which needs fast filtered queries over many rows). */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { paths } from "./files";
 import { Schedule, type ScheduleSpec } from "../schemas/schedule";
 import { validateTrigger } from "../core/scheduler";
+import { log } from "../core/logger";
 
 function scheduleFile(ws: string, id: string): string {
   return join(paths.scheduleDir(ws), `${id}.json`);
@@ -21,9 +22,16 @@ function mkScheduleId(explicit?: string): string {
   return `sched_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 }
 
+/** Atomic write — temp file + `rename` (atomic on POSIX) — so a crash mid-write can never leave a
+ *  half-written `<id>.json` that `listSchedules` would silently drop (losing the schedule). The temp
+ *  suffix isn't `.json`, so a leftover temp from a crashed write is ignored by `listSchedules`.
+ *  Mirrors the pattern already used by `artifacts.ts`. */
 function write(ws: string, schedule: Schedule): void {
   mkdirSync(paths.scheduleDir(ws), { recursive: true });
-  writeFileSync(scheduleFile(ws, schedule.id), JSON.stringify(schedule, null, 2));
+  const dest = scheduleFile(ws, schedule.id);
+  const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(schedule, null, 2));
+  renameSync(tmp, dest);
 }
 
 /** Create + persist a new schedule. Validates the trigger (a bad cron expression throws HERE, at
@@ -63,7 +71,7 @@ export function listSchedules(ws: string): Schedule[] {
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".json")) continue;
     try { out.push(Schedule.parse(JSON.parse(readFileSync(join(dir, f), "utf8")))); }
-    catch { /* skip an unparseable/partial schedule file */ }
+    catch (e) { log.warn(`skipped unparseable schedule file ${f}`, e); } // surfaced, not silently lost
   }
   return out.sort((a, b) => b.created.localeCompare(a.created));
 }
