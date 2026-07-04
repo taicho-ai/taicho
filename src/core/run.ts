@@ -18,7 +18,7 @@ import { rankSkills } from "../skills/retrieval";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
 import { reserveRunId, writeTrace } from "../store/trace";
 import { appendRunTranscript, writeChildRuns, writeRunFailure, writeRunFinal, writeRunInput, type RunTranscriptEvent } from "../store/run-transcript";
-import type { StepInfo, StepEvent } from "./events";
+import type { StepInfo, StepEvent } from "./step-events";
 import type { ProposalDraft } from "../coaching/proposal";
 import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";

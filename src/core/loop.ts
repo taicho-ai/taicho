@@ -3,7 +3,7 @@
  *  spend (tokens + advisory USD) and the single place caps + cancellation are enforced. */
 import { generateText, streamText, type ModelMessage, type ToolSet } from "ai";
 import type { AgentDef } from "../schemas/agent";
-import type { StepInfo } from "./events";
+import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
 
 const DEFAULT_MODEL_IDLE_TIMEOUT_MS = 120_000;

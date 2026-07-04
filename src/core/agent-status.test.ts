@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { statusReducer, statusList, type StatusMap } from "./agent-status";
-import type { StepEvent } from "./events";
+import type { StepEvent } from "./step-events";
 
 const ev = (phase: StepEvent["phase"], runId: string, agent: string, extra: Partial<StepEvent> = {}): StepEvent =>
   ({ phase, runId, agent, ...extra });
