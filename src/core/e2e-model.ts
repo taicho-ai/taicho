@@ -24,8 +24,9 @@ function stream(chunks: unknown[], initialDelayInMs = 0): any {
 // Streamed text response: start → one delta carrying the whole text → end → finish(stop).
 // `delayMs` (default 0) holds the model call in-flight before ANY output — the loop has already
 // emitted `model_start` (→ live "thinking" status) by then, so the agent renders as a live pane +
-// bar segment for the whole delay. The idle watchdog (120s, reset per chunk) dwarfs it, so
-// guardModelCall never abandons the call. Deterministic (fixed delay, no network).
+// bar segment for the whole delay. Plan 12: there is no loop-level watchdog; the only deadline is the
+// provider fetch's transport timeout (120s default), which this mock never touches. Deterministic
+// (fixed delay, no network).
 function text(t: string, delayMs = 0) {
   return stream([
     { type: "stream-start", warnings: [] },
@@ -161,7 +162,7 @@ function artifactHandoffModel(): Model {
 /** How long (ms) the squad-panes child holds its model call in-flight so its live pane + bar segment
  *  are on screen long enough for VHS to `Wait+Screen` + screenshot. Fixed default, overridable via
  *  TAICHO_E2E_SLOW_MS (deterministic — a duration, never a race). ~4s dwarfs VHS's poll interval and
- *  sits far under the loop's 120s idle watchdog. */
+ *  sits far under the provider fetch's 120s transport deadline (Plan 12; no loop-level watchdog). */
 const SQUAD_PANES_SLOW_MS = Number(process.env.TAICHO_E2E_SLOW_MS ?? 4000);
 
 /** squad-panes (Plan 10 Phase 5): the SLOW-MODE delegation that makes the split-pane view provable.

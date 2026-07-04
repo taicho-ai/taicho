@@ -71,8 +71,8 @@ export async function runChecker(params: {
     captureProviderCost: params.captureProviderCost,
     deckLedger: params.deckLedger, // Plan 09: commit + bound the checker call against the deck ceiling
   });
-  // We read only result.text, never result.error: a checker that NEVER RAN (transport error/timeout ⇒
-  // result.text like "[error]"/"[timed out]") parses to the SAME non-blocking advisory PASS as a
+  // We read only result.text, never result.error: a checker that NEVER RAN (transport error/cancel ⇒
+  // result.text like "[error]"/"[cancelled]") parses to the SAME non-blocking advisory PASS as a
   // garbled verdict. Deliberate for now — the checker is advisory, never a hard gate — so a broken or
   // unreachable verifier must not wedge delegation. Louder surfacing of a never-ran verifier is a follow-up.
   // Cost honesty (mirrors run.ts/loop.ts): a subscription checker has NO measurable USD, so costUsd is
