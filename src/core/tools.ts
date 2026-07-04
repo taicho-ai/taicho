@@ -6,12 +6,14 @@ import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import type { AgentDef } from "../schemas/agent";
-import type { RunContext } from "./run";
+import type { RunContext, RunResult } from "./run";
 import type { McpManager } from "./mcp/manager";
+import type { VerificationVerdict } from "../schemas/trace";
 import { paths } from "../store/files";
 import { readTaskState } from "../store/task-state";
 import { saveArtifact, readArtifact, readArtifactBody, listArtifacts } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
+import { recordVerificationFailure } from "../coaching/patterns";
 import { artifactHandle } from "../schemas/artifact";
 import { mergeDraft } from "./draft";
 import { scrapeUrl } from "./firecrawl";
@@ -245,6 +247,41 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           // No criteria ⇒ no check ⇒ today's trust-everything behavior, zero extra cost.
           // Parent context gets handles + a summary, NOT the child's full body (the pollution vector).
           if (!criteria) return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
+          const criteriaText = criteria; // narrowed to string past the guard (kept for the surface closure)
+
+          // Plan 06 Phase 3 — surface a FAILED verdict two ways, then hand the caveat to the parent:
+          //  (1) as an ANNOTATION on the artifact version the hand-off involved (the child's output, else
+          //      the input it was revising) — the SAME object a human review produces, so a machine
+          //      verdict rides the identical annotation → revision path (Plan 01 Ph4);
+          //  (2) into COACHING — a REPEATED (agent, criteria) failure PROPOSES a policy note (captain-
+          //      gated, inert until approved), never an auto-applied policy.
+          // A passing verdict does neither; either way the parent still gets the verdict attached below.
+          const surface = (v: VerificationVerdict, c: RunResult) => {
+            if (!v.pass) {
+              // Prefer the child's OUTPUT artifacts; else the INPUT handles it was revising. annotateArtifact
+              // pins a bare/`id@vN` handle to a concrete version, so the verdict anchors to the exact bytes it judged.
+              const targets = c.trace.artifacts.length ? c.trace.artifacts : resolved;
+              for (const h of targets) {
+                try {
+                  const ann = annotateArtifact(ctx.ws, {
+                    target: h, author: "checker",
+                    body: v.reasons.length ? v.reasons.join("; ") : "output did not meet the acceptance criteria",
+                    verdict: v,
+                  });
+                  ctx.notes.push(`verification verdict annotated on ${ann.target} (${ann.id})`);
+                } catch (e) {
+                  ctx.notes.push(`verdict annotation skipped for ${h}: ${e instanceof Error ? e.message : String(e)}`);
+                }
+              }
+              try {
+                const { proposed } = recordVerificationFailure(ctx.ws, { targetAgent: to, criteria: criteriaText, runId: c.runId, reasons: v.reasons });
+                if (proposed) ctx.emit?.({ note: `⚑ ${to} keeps failing this check — proposed a coaching note (${proposed.id}) for your approval` });
+              } catch (e) {
+                ctx.notes.push(`coaching proposal skipped: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            }
+            return { to, runId: c.runId, outputArtifacts: c.trace.artifacts, summary: c.text, verification: v };
+          };
 
           // Independent checker call, BEFORE the result reaches the parent's context. Its spend is
           // real model spend this run caused → fold it into the aggregate (like child-run spend).
@@ -264,7 +301,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
               const why = overBudget ? budgetMsg() : !retryGuard.ok ? retryGuard.error : "retry blocked";
               ctx.notes.push(`verification retry refused: ${why}`);
               ctx.emit?.({ note: `⚠ ${to} result surfaced WITHOUT a passing verification (retry blocked: ${why})` });
-              return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text, verification: verdict };
+              return surface(verdict, child);
             }
             const feedback = "Your previous attempt did NOT meet the acceptance criteria. Fix these before returning:\n" +
               verdict.reasons.map((r) => `- ${r}`).join("\n");
@@ -282,7 +319,8 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           }
 
           // Criteria was set: always attach the verdict so the parent (and captain) sees the caveat.
-          return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text, verification: verdict };
+          // A failed verdict here ALSO lands the annotation + coaching side effects (via surface).
+          return surface(verdict, child);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           ctx.notes.push(`delegate failed: ${msg}`);

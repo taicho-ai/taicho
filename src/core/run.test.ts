@@ -15,14 +15,14 @@ import { runChecker } from "./verification";
 import { makeDeckLedger, readDeckSpend } from "../store/deck-budget";
 import { rollupCosts } from "./costs";
 import { readTrace } from "../store/trace";
-import { writePolicy } from "../store/policy";
+import { writePolicy, listPolicies } from "../store/policy";
 import { PolicyNote } from "../schemas/policy";
 import { writeNode } from "../store/knowledge";
 import { KbNode } from "../schemas/knowledge";
 import { writeSkill } from "../store/skills";
 import { Skill } from "../schemas/skill";
 import { saveArtifact, readArtifact } from "../store/artifacts";
-import { annotateArtifact } from "../store/annotations";
+import { annotateArtifact, listAnnotations } from "../store/annotations";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -860,6 +860,131 @@ test("non-subscription checker prices its real spend: runChecker returns a USD c
   expect(r.costUsd).toBeGreaterThan(0); // a real cost — folding it is exactly what closes the cost-honesty gap
   expect(r.costNote).toBeUndefined();   // priced run ⇒ no subscription note
   expect(r.tokens).toBeGreaterThan(0);
+});
+
+// ---------------------------------------------------------------------------
+// Plan 06 Phase 3 — artifact & coaching tie-in
+//   (1) a failed verdict on an artifact hand-off becomes an annotation on the artifact VERSION;
+//   (2) a REPEATED (agent, criteria) failure PROPOSES a captain-gated coaching note.
+// ---------------------------------------------------------------------------
+
+test("Phase 3: a failed verdict is written as an ANNOTATION on the child's OUTPUT artifact version (id@vN), like human feedback", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You delegate.", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 10, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "worker", role: "worker", identity: "You work.", tools: ["save_artifact"], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  // one delegation with criteria; the worker saves an artifact each attempt (out@v1, then out@v2 on retry);
+  // both checks FAIL, so the FINAL verdict must land on the artifact version the checker actually judged.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // boss
+    call("save_artifact", { id: "out", title: "Out", body: "attempt one, no Y" }),        // worker (1st)
+    text("saved v1"),
+    text('{"pass": false, "reasons": ["missing Y"]}'),                                     // checker (1st)
+    call("save_artifact", { id: "out", title: "Out", body: "attempt two, still no Y" }),   // worker (retry)
+    text("saved v2"),
+    text('{"pass": false, "reasons": ["still missing Y"]}'),                               // checker (2nd)
+    text("boss done"),                                                                     // boss final
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut.length).toBe(2);              // initial + retry
+  // the FINAL failed verdict rode the same annotation path a human review would — pinned to out@v2
+  const onV2 = listAnnotations(ws, "out@v2", { status: "open" });
+  expect(onV2.length).toBe(1);
+  expect(onV2[0].kind).toBe("verification");                  // a machine verdict IS an annotation
+  expect(onV2[0].author).toBe("checker");
+  expect(onV2[0].target).toBe("out@v2");                      // version-pinned to the exact judged bytes (id@vN)
+  expect(onV2[0].verdict?.pass).toBe(false);
+  expect(onV2[0].verdict?.reasons.join(" ")).toContain("still missing Y");
+  // it is pinned to the version judged, NOT smeared across earlier versions
+  expect(listAnnotations(ws, "out@v1", { status: "open" }).length).toBe(0);
+  expect(res.trace.notes.some((n) => /annotated on out@v2/.test(n))).toBe(true);
+});
+
+test("Phase 3: with no output artifact, the verdict annotates the INPUT the child was revising — and surfaces to the next revision run", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "reviser", role: "revises", identity: "You revise." }, "root");
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You delegate.", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 10, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "worker", role: "worker", identity: "You work.", tools: [], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  saveArtifact(ws, { id: "dossier", title: "Dossier", type: "dossier", summary: "the short summary", body: "THE ENORMOUS BODY", producer: "root", runId: "root/seed" });
+
+  // Phase A: boss hands dossier@v1 down with criteria; the worker produces no new artifact and fails
+  // twice ⇒ the failed verdict falls back onto the INPUT handle it was revising.
+  const phaseA = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "revise the dossier", criteria: "every source dated", inputArtifacts: ["dossier@v1"] }),
+    text("attempt one"),                                                             // worker (1st)
+    text('{"pass": false, "reasons": ["missing dates"]}'),                           // checker (1st)
+    text("attempt two"),                                                             // worker (retry)
+    text('{"pass": false, "reasons": ["dossier still lacks dates"]}'),               // checker (2nd)
+    text("boss done"),                                                               // boss final
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  await executeRun(makeDeps({ ws, db, model: phaseA }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  const onInput = listAnnotations(ws, "dossier@v1", { status: "open" });
+  expect(onInput.length).toBe(1);
+  expect(onInput[0].kind).toBe("verification");
+  expect(onInput[0].target).toBe("dossier@v1");              // pinned to the input version it was revising
+  expect(onInput[0].verdict?.pass).toBe(false);
+
+  // Phase B: a subsequent revision run gets dossier@v1 handed in — the machine verdict must surface in
+  // the child's prompt EXACTLY like a human annotation (annotation → revision path, Plan 01 Ph4).
+  const reviserModel = new MockLanguageModelV3({ doGenerate: (async () => text("revised")) as any });
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "reviser", goal: "revise the dossier", inputArtifacts: ["dossier@v1"] }),
+    text("root done"),
+  ) as any });
+  const deps = makeDeps({ ws, db, model: rootModel, resolveModel: (id) => id === "reviser" ? { model: reviserModel, modelId: "m" } : { model: rootModel, modelId: "m" } });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "fix it" }], triggeredBy: "user" });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const childPrompt = JSON.stringify((reviserModel as any).doGenerateCalls[0].prompt);
+  expect(childPrompt).toContain("dossier still lacks dates");  // the verdict reasons surfaced
+  expect(childPrompt).toContain("REVISION");                   // told it is a revision, like human feedback
+  expect(childPrompt).not.toContain("THE ENORMOUS BODY");      // still BY REFERENCE — body never inlined
+});
+
+test("Phase 3: a REPEATED (agent, criteria) verification failure PROPOSES a captain-gated coaching note", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  // boss delegates to worker TWICE with the SAME criteria; each delegation fails verification (twice
+  // each ⇒ one terminal failure per delegation). The 2nd failing delegation is the repeat that proposes.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // boss iter1
+    text("attempt one"),                                                                  // worker
+    text('{"pass": false, "reasons": ["missing Y"]}'),                                    // checker
+    text("attempt two"),                                                                  // worker (retry)
+    text('{"pass": false, "reasons": ["still missing Y"]}'),                              // checker (retry)
+    call("delegate_task", { to: "worker", goal: "write X again", criteria: "must mention Y" }), // boss iter2
+    text("attempt one again"),                                                            // worker
+    text('{"pass": false, "reasons": ["missing Y"]}'),                                    // checker
+    text("attempt two again"),                                                            // worker (retry)
+    text('{"pass": false, "reasons": ["still missing Y"]}'),                              // checker (retry)
+    text("boss done"),                                                                    // boss final
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  const notes = listPolicies(ws, "worker");
+  expect(notes.length).toBe(1);                    // the repeat produced exactly ONE proposal
+  expect(notes[0].status).toBe("proposed");        // captain-gated — inert until approved, never auto-applied
+  expect(notes[0].agent).toBe("worker");           // scoped to the failing (producer) agent
+  expect(notes[0].taughtBy).toBe("verification");
+  expect(notes[0].do).toContain("still missing Y");
+});
+
+test("Phase 3: a ONE-OFF failed delegation proposes NO coaching note (one delegation is not a pattern)", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  // a single delegation that fails twice is still ONE delegation ⇒ one terminal failure ⇒ no repeat.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }),
+    text("attempt one"),
+    text('{"pass": false, "reasons": ["missing Y"]}'),
+    text("attempt two"),
+    text('{"pass": false, "reasons": ["still missing Y"]}'),
+    text("boss done"),
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(listPolicies(ws, "worker")).toEqual([]); // no proposal from a single miss
 });
 
 // ---------------------------------------------------------------------------
