@@ -19,6 +19,7 @@ import { createCodexProvider } from "./core/providers/openai-codex";
 import { OPENAI_CODEX_AUTH } from "./core/auth/constants";
 import { createMcpManager, type McpManager } from "./core/mcp/manager";
 import { readMcpStore } from "./store/mcp-store";
+import { makeDeckLedger, hasCeilings } from "./store/deck-budget";
 import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
 import { reindexTasks, reconcileTasks } from "./store/task-state";
@@ -92,6 +93,11 @@ const mcp: McpManager | undefined = config.mcp?.enabled === false
 // (Ctrl+C/SIGINT is owned by Ink, which exits the app; stdio children otherwise die with the
 // foreground process group. Async cleanup can't run in a process "exit" handler, so we don't use one.)
 if (mcp) process.on("SIGTERM", () => { void mcp.closeAll().finally(() => process.exit(0)); });
+
+// Plan 09: one deck-wide spend ledger, shared by every run this session. DB-backed rolling counters
+// keyed by UTC day / ISO week persist across sessions. Built only when a ceiling is configured, so
+// with no `budgets` in taicho.yaml the loop does zero extra DB work (pre-Plan-09 behavior).
+const deckLedger = hasCeilings(config.budgets) ? makeDeckLedger(db, config.budgets) : undefined;
 
 const e2eModel = createE2eModel(process.env.TAICHO_E2E_MODEL);
 const authSource = e2eModel
@@ -170,6 +176,7 @@ if (cli.command?.kind === "run") {
       ws, db, model: initial.model,
       resolveModel: initial.resolveModel, priceUsd: initial.priceUsd,
       configDefaults: config.defaults, mcp, embed: embedder?.embed,
+      deckLedger,
     },
     { goal: cli.command.goal, agent: cli.command.agent, approve: cli.command.approve },
   );
@@ -192,6 +199,7 @@ render(
     mcp={mcp}
     mcpYamlServers={Object.keys(config.mcp?.servers ?? {})}
     embed={embedder?.embed}
+    deckLedger={deckLedger}
     startupNotice={startupNotice}
     {...initial}
     cfg={authSource.kind === "env" ? { provider: authSource.provider, model: authSource.model } : null}

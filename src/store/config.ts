@@ -78,6 +78,17 @@ export function interpolateEnv(value: string, env: Record<string, string | undef
   return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, name: string) => env[name] ?? "");
 }
 
+/** Plan 09: deck-WIDE spend ceilings (all agents, all runs) enforced in the loop and persisted across
+ *  sessions. Distinct from per-run/per-agent `budgets` above — these bound the whole deck's rolling
+ *  daily/weekly spend. Any subset may be set; USD ceilings only constrain priced runs (a subscription
+ *  deck is bounded by tokens, never a fabricated dollar figure). */
+const DeckBudgets = z.object({
+  dailyTokens: z.number().int().positive().optional(),
+  weeklyTokens: z.number().int().positive().optional(),
+  dailyCostUsd: z.number().positive().optional(),
+  weeklyCostUsd: z.number().positive().optional(),
+}).optional();
+
 export const TaichoConfig = z.object({
   defaults: z.object({
     provider: z.enum(["anthropic", "openai", "openrouter"]).optional(),
@@ -87,6 +98,8 @@ export const TaichoConfig = z.object({
     // round-trips into one compact summary. Default ~0.7 (see compaction.ts DEFAULT_COMPACT_AT).
     compactAt: z.number().positive().max(1).optional(),
   }).optional(),
+  // Deck-level ceilings (Plan 09) — top-level because they bound the whole deck, not one agent.
+  budgets: DeckBudgets,
   agents: z.record(z.string(), AgentOverride).optional(),
   auth: z.object({ chatgpt_signin: z.boolean().optional() }).optional(),
   // Plan 04: a global ceiling on total in-flight + queued BACKGROUND runs (dispatch_task). Bounds

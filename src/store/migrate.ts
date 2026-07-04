@@ -99,6 +99,23 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS tasks_kind   ON tasks(kind);
       `),
   },
+  // v6: deck spend counters (Plan 09). Rolling per-period totals keyed by UTC day / ISO week so
+  // deck-wide budget ceilings span sessions. An enforcement counter, not a ledger of record — traces
+  // stay canon for /costs reporting; this just answers "how much has the deck spent this day/week".
+  {
+    version: 6,
+    up: (db) =>
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS deck_spend (
+          period_kind TEXT NOT NULL,           -- 'day' | 'week'
+          period_key  TEXT NOT NULL,           -- 'YYYY-MM-DD' | 'YYYY-Www'
+          tokens      INTEGER NOT NULL DEFAULT 0,
+          cost_usd    REAL NOT NULL DEFAULT 0, -- priced runs only; subscription/unpriced commit 0
+          updated     INTEGER DEFAULT (unixepoch()),
+          PRIMARY KEY (period_kind, period_key)
+        );
+      `),
+  },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

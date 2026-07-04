@@ -12,6 +12,8 @@ import { seedRoot, reindex, loadIndex, loadAgent, createAgent, serializeAgent } 
 import { AgentDef } from "../schemas/agent";
 import { makeDeps, executeRun } from "./run";
 import { runChecker } from "./verification";
+import { makeDeckLedger, readDeckSpend } from "../store/deck-budget";
+import { rollupCosts } from "./costs";
 import { readTrace } from "../store/trace";
 import { writePolicy } from "../store/policy";
 import { PolicyNote } from "../schemas/policy";
@@ -758,6 +760,47 @@ test("aggregate folds checker spend: with criteria it equals own loop + child ru
   const verifierCost = res.trace.verification.reduce((s, v) => s + (v.costUsd ?? 0), 0);
   expect(verifierCost).toBeGreaterThan(0);
   expect(res.trace.aggregate!.costUsd).toBeCloseTo(res.trace.costUsd! + childCost + verifierCost, 6);
+});
+
+test("Plan 09: a criteria delegation commits verifier spend to the deck ceiling AND /costs surfaces it exactly once", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  // boss delegates WITH criteria ⇒ an independent checker call runs on the shared deck ledger.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // boss iter1
+    text("attempt one, mentions Y"),                     // worker (1 call)
+    text('{"pass": true, "reasons": []}'),               // checker (1 independent call)
+    text("boss done"),                                   // boss final
+  ) as any });
+  // A deck ceiling IS configured (ceiling high enough not to block) so the ledger is live and enforced.
+  const deckLedger = makeDeckLedger(db, { dailyTokens: 10_000_000 });
+  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens, deckLedger });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+
+  expect(res.trace.verification.length).toBe(1);
+  expect(res.trace.verification[0].verdict.pass).toBe(true);
+  // The verifier's own spend is recorded as its OWN trace field (not folded into trace.tokens).
+  expect(res.trace.verifierTokens).toBeGreaterThan(0);
+  expect(res.trace.verifierCostUsd).toBeGreaterThan(0);
+
+  const workerTrace = readTrace(ws, res.trace.delegatedOut[0]);
+  expect(workerTrace.verifierTokens).toBe(0); // the worker did no criteria delegation ⇒ no verifier spend of its own
+
+  // (1) THE CEILING SEES THE VERIFIER: the deck_spend counter the ceiling reads = boss loop + worker
+  // run + verifier call. Before the fix the verifier ran with no ledger, so this would be short by
+  // verifierTokens (the under-count the finding flagged) and the daily ceiling could never bound it.
+  const deck = readDeckSpend(db);
+  expect(deck.dayTokens).toBe(res.trace.tokens + workerTrace.tokens + res.trace.verifierTokens);
+  expect(deck.dayCostUsd).toBeCloseTo(res.trace.costUsd! + workerTrace.costUsd! + res.trace.verifierCostUsd, 6);
+
+  // (2) /costs SURFACES IT ONCE: rollup sums each trace's OWN spend (loop + verifier); the verifier
+  // writes no child trace, so adding verifierTokens counts it exactly once — never double.
+  const rollup = rollupCosts([res.trace, workerTrace]);
+  expect(rollup.totals.tokens).toBe(res.trace.tokens + res.trace.verifierTokens + workerTrace.tokens);
+  // parity: /costs and the deck ceiling report the SAME comprehensive number — verifier included, no double-count.
+  expect(rollup.totals.tokens).toBe(deck.dayTokens);
+  expect(rollup.totals.costUsd).toBeCloseTo(deck.dayCostUsd, 6);
 });
 
 test("subscription checker is cost-honest: costUsd is 0 (never fabricated) even with a pricer, tokens still metered so they fold", async () => {

@@ -4,6 +4,7 @@ import type { RunTrace } from "../schemas/trace";
 import type { PolicyNote } from "../schemas/policy";
 import { McpServerConfig } from "../store/config";
 import type { McpServerStatus } from "../core/mcp/manager";
+import { rollupCosts, formatCostRollup } from "../core/costs";
 
 export type Line = { kind: "user" | "agent" | "system"; from?: string; text: string; rendered?: boolean };
 
@@ -14,6 +15,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "help", summary: "list commands" },
   { name: "agents", summary: "list the squad" },
   { name: "runs", summary: "list runs", usage: "[agent]" },
+  { name: "costs", summary: "cross-session spend rollup (agent / day / model)", usage: "[agent]" },
   { name: "tasks", summary: "list / cancel background tasks", usage: "[cancel <id>]" },
   { name: "trace", summary: "open the waterfall inspector (no arg = latest run)", usage: "[id]" },
   { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>", requiresArg: true },
@@ -65,6 +67,11 @@ export function runSlash(cmd: string, arg: string, deps: SlashDeps): Line[] {
     if (!traces.length) return [sys("  (no runs yet)")];
     // Duration surfaced so /runs doubles as the waterfall picker (open one with /trace <id>).
     return traces.map((t) => sys(`  ${t.id}  ${t.outcome}  ${t.tokens}tok  ${(t.durationMs / 1000).toFixed(1)}s`));
+  }
+  if (cmd === "costs") {
+    // Cross-session rollup from the SAME traces /runs reads. Honest about subscription (costUsd:null)
+    // runs — reports their tokens, never a fabricated $0. Optional [agent] scopes to one agent.
+    return formatCostRollup(rollupCosts(deps.listTraces(arg || undefined))).map(sys);
   }
   // NOTE: `/trace` is handled interactively in App.tsx (it opens the TraceInspector over the derived
   // span tree — see deriveTrace); it can't live here because that needs workspace file access.

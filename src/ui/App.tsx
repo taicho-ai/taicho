@@ -22,6 +22,7 @@ import type { RunResult, TaskAwaitResult, RunDeps } from "../core/run";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { isStdioServer } from "../store/config";
+import type { DeckLedger } from "../store/deck-budget";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
 import { renderMarkdown } from "./markdown";
@@ -117,6 +118,7 @@ export function App(props: {
   mcpYamlServers?: string[];
   embed?: (text: string) => Promise<Float32Array>;
   startupNotice?: string;
+  deckLedger?: DeckLedger; // Plan 09: deck-wide spend ledger (undefined ⇒ no deck ceilings configured)
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -385,6 +387,7 @@ export function App(props: {
     configDefaults: props.configDefaults,
     mcp: props.mcp,
     embed: props.embed,
+    deckLedger: props.deckLedger, // Plan 09: deck-wide ceilings enforced in the loop, shared by all runs
     dispatch,
     awaitTask,
     onRunStart: ({ runId, agent, triggeredBy }) => {
@@ -650,7 +653,14 @@ export function App(props: {
       setBusy(true);
       setActivity(`teaching ${agentId}…`);
       try {
-        const draft = await draftPolicy(activeModel, agentId, correction);
+        // Plan 07: route the distiller through the Codex-safe streaming shape when signed in with a
+        // ChatGPT subscription (a bare non-streaming call 400s). Plan 09: meter it against the deck
+        // ceiling (real model call, but no run trace ⇒ not surfaced in /costs — see coaching/teach.ts).
+        const draft = await draftPolicy(activeModel, agentId, correction, {
+          codexBackend: authSource.kind === "oauth-openai-codex",
+          deckLedger: props.deckLedger,
+          priceUsd,
+        });
         const decision = await requestApproval({ kind: "propose_coaching", draft });
         if (decision.type === "reject") { say({ kind: "system", text: "  discarded" }); }
         else {

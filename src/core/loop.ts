@@ -5,6 +5,7 @@ import { generateText, streamText, type ModelMessage, type ToolSet } from "ai";
 import type { AgentDef } from "../schemas/agent";
 import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
+import { deckCeilingHit, type DeckLedger } from "../store/deck-budget";
 import { compactMessages, estimateContextTokens, type CompactionSummary } from "./compaction";
 
 /** Plan 05: how many recent tool round-trips the compaction fold keeps VERBATIM (the system prompt +
@@ -111,6 +112,12 @@ export async function runLoop(opts: {
    *  Persisted as a resume checkpoint so an interrupted run can (later) restart from the last
    *  completed iteration. */
   checkpoint?: (state: { iteration: number; messages: ModelMessage[] }) => void;
+  /** Plan 09: deck-WIDE spend ceilings, enforced HERE — the single meter, the same place per-run caps
+   *  are (model proposes, config disposes). The ledger is a DB-backed rolling counter that spans
+   *  sessions: before each call we refuse if a running total has crossed a ceiling, and after each
+   *  call we commit that call's spend. Subscription calls commit 0 USD (unmeasurable) but still count
+   *  tokens, so a USD ceiling never fabricates spend. Undefined ⇒ no deck ceilings configured. */
+  deckLedger?: DeckLedger;
 }): Promise<LoopResult> {
   const counts: Record<string, number> = {};
   const transcript: LoopResult["transcript"] = [];
@@ -139,6 +146,12 @@ export async function runLoop(opts: {
     if (opts.signal?.aborted) return done({ text: "[cancelled]", aborted: true });
     if (cap.maxTokensPerRun != null && tokens >= cap.maxTokensPerRun) return done({ text: "[budget exhausted]", exhausted: true });
     if (cap.maxCostPerRunUsd != null && costUsd >= cap.maxCostPerRunUsd) return done({ text: "[budget exhausted]", exhausted: true });
+    // Deck-wide ceilings (Plan 09) — checked against the running cross-session total, alongside the
+    // per-run caps above. Refuses the next call once any configured ceiling is crossed.
+    if (opts.deckLedger) {
+      const hit = deckCeilingHit(opts.deckLedger.current(), opts.deckLedger.ceilings);
+      if (hit) return done({ text: `[deck budget exhausted: ${hit}]`, exhausted: true });
+    }
 
     const steer = opts.pollSteer?.();
     if (steer) messages.push({ role: "user", content: steerMarker(steer) });
@@ -247,10 +260,16 @@ export async function runLoop(opts: {
     const inTok = usage?.inputTokens ?? 0, outTok = usage?.outputTokens ?? 0;
     inputTokens += inTok;
     outputTokens += outTok;
-    tokens += usage?.totalTokens ?? inTok + outTok;
+    const callTokens = usage?.totalTokens ?? inTok + outTok;
+    tokens += callTokens;
     // Prefer a provider-reported cost (OpenRouter) when available; else the static token pricer.
     const provCost = opts.captureProviderCost ? openrouterCostUsd(providerMetadata) : undefined;
-    costUsd += provCost ?? opts.priceUsd?.({ inputTokens: inTok, outputTokens: outTok }) ?? 0;
+    const callCost = provCost ?? opts.priceUsd?.({ inputTokens: inTok, outputTokens: outTok }) ?? 0;
+    costUsd += callCost;
+    // Commit this call's spend to the deck ledger (Plan 09). Tokens always count; USD only for priced
+    // runs — a subscription (codex backend) call has no measurable USD, so it commits 0 (honest: the
+    // token ceiling still bounds it, the USD ceiling never sees a fabricated figure).
+    opts.deckLedger?.add({ tokens: callTokens, costUsd: opts.codexBackend ? 0 : callCost });
 
     if (toolCalls.length === 0) {
       opts.onStep?.({ phase: "final", text });
