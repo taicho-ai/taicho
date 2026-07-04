@@ -93,6 +93,7 @@ function proposalView(req: Exclude<ApprovalRequest, { kind: "ask_human" }>): { t
   if (req.kind === "run_command")
     return { title: "Run command — approve?", fields: [
       { label: "command", value: req.command },
+      { label: "cwd", value: req.cwd ?? "(workspace)" },
       { label: "flagged", value: req.reason ?? "the guard flagged this command" },
     ] };
   return { title: "New agent — approve?", fields: [
