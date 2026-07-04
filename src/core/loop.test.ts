@@ -1,20 +1,46 @@
 import { test, expect } from "bun:test";
-import { MockLanguageModelV3, mockValues } from "ai/test";
+import { MockLanguageModelV3 } from "ai/test";
 import { tool, simulateReadableStream, type ToolSet } from "ai";
-import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { z } from "zod";
 import { runLoop } from "./loop";
 import type { AgentDef } from "../schemas/agent";
 
+// Plan 07: the loop unifies on streamText, so EVERY model is driven via doStream (not doGenerate).
+// These are the LanguageModelV3 stream parts a mock emits for a tool-call turn and a final-text turn.
+// Raw provider usage shape (`inputTokens.total`) — the SDK normalizes it to `{ inputTokens: number }`.
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
-const toolCallResp = {
-  content: [{ type: "tool-call", toolCallId: "c1", toolName: "noop", input: JSON.stringify({}) }],
-  finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
-} as unknown as LanguageModelV3GenerateResult;
-const finalResp = {
-  content: [{ type: "text", text: "all done" }],
-  finishReason: { unified: "stop", raw: "stop" }, usage,
-} as unknown as LanguageModelV3GenerateResult;
+const toolCallChunks = [
+  { type: "stream-start", warnings: [] },
+  { type: "tool-call", toolCallId: "c1", toolName: "noop", input: "{}" },
+  { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_use" }, usage },
+];
+const finalChunks = [
+  { type: "stream-start", warnings: [] },
+  { type: "text-start", id: "1" },
+  { type: "text-delta", id: "1", delta: "all done" },
+  { type: "text-end", id: "1" },
+  { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+];
+
+// A doStream that emits `chunks` on EVERY call.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function streamOf(chunks: unknown[]): any {
+  return async () => ({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    stream: simulateReadableStream({ initialDelayInMs: 0, chunkDelayInMs: 0, chunks: chunks as any }),
+  });
+}
+// A doStream that emits the next chunk-set per call (repeats the last once exhausted).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function streamSeq(...sets: unknown[][]): any {
+  let i = 0;
+  return async () => {
+    const chunks = sets[Math.min(i, sets.length - 1)];
+    i += 1;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return { stream: simulateReadableStream({ initialDelayInMs: 0, chunkDelayInMs: 0, chunks: chunks as any }) };
+  };
+}
 
 const agent: AgentDef = {
   id: "a", role: "r", identity: "i", tools: ["noop"], canSee: ["*"], canDelegateTo: [],
@@ -26,8 +52,7 @@ const tools: ToolSet = {
 };
 
 test("loop returns final text after a tool-call round", async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const model = new MockLanguageModelV3({ doGenerate: mockValues(toolCallResp, finalResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamSeq(toolCallChunks, finalChunks) });
   const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools });
   expect(res.text).toBe("all done");
   expect(res.toolCalls.noop).toBe(1);
@@ -35,8 +60,7 @@ test("loop returns final text after a tool-call round", async () => {
 
 test("loop falls through to budget-exhausted when the model always tool-calls", async () => {
   const budgetAgent: AgentDef = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 2 } };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const model = new MockLanguageModelV3({ doGenerate: (async () => toolCallResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamOf(toolCallChunks) });
   const res = await runLoop({ model, agent: budgetAgent, system: "S", messages: [{ role: "user", content: "go" }], tools });
   expect(res.text).toBe("[budget exhausted]");
   expect(res.exhausted).toBe(true);
@@ -44,19 +68,19 @@ test("loop falls through to budget-exhausted when the model always tool-calls", 
 });
 
 test("a queued steer is injected as a marked user message before the next call", async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const model = new MockLanguageModelV3({ doGenerate: mockValues(toolCallResp, finalResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamSeq(toolCallChunks, finalChunks) });
   let fired = false;
   const pollSteer = () => { if (!fired) { fired = true; return null; } return "actually, stop after this"; };
   await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, pollSteer });
   // second model call's prompt must contain the steer marker
-  const secondPrompt = JSON.stringify(model.doGenerateCalls[1].prompt);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const secondPrompt = JSON.stringify((model as any).doStreamCalls[1].prompt);
   expect(secondPrompt).toContain("OUT-OF-BAND USER MESSAGE");
   expect(secondPrompt).toContain("actually, stop after this");
 });
 
 test("meters input/output/total tokens and cost via the injected pricer", async () => {
-  const model = new MockLanguageModelV3({ doGenerate: mockValues(finalResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamOf(finalChunks) });
   const res = await runLoop({
     model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
     priceUsd: ({ inputTokens, outputTokens }) => inputTokens * 2 + outputTokens * 3,
@@ -67,12 +91,17 @@ test("meters input/output/total tokens and cost via the injected pricer", async 
   expect(res.costUsd).toBe(5);
 });
 
-test("captureProviderCost: uses providerMetadata.openrouter.usage.cost, overriding the token pricer", async () => {
-  const withCost = {
-    ...(finalResp as object),
-    providerMetadata: { openrouter: { usage: { cost: 0.0042 } } },
-  } as unknown as LanguageModelV3GenerateResult;
-  const model = new MockLanguageModelV3({ doGenerate: mockValues(withCost) as any });
+test("captureProviderCost: uses providerMetadata.openrouter.usage.cost on the streamed path, overriding the token pricer", async () => {
+  // OpenRouter reports the authoritative per-call cost in the finish part's providerMetadata; the
+  // streamed path must surface it (s.providerMetadata) exactly as the generateText path once did.
+  const withCostChunks = [
+    { type: "stream-start", warnings: [] },
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "all done" },
+    { type: "text-end", id: "1" },
+    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage, providerMetadata: { openrouter: { usage: { cost: 0.0042 } } } },
+  ];
+  const model = new MockLanguageModelV3({ doStream: streamOf(withCostChunks) });
   const res = await runLoop({
     model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
     captureProviderCost: true,
@@ -82,7 +111,7 @@ test("captureProviderCost: uses providerMetadata.openrouter.usage.cost, overridi
 });
 
 test("captureProviderCost: falls back to the token pricer when no provider cost is reported", async () => {
-  const model = new MockLanguageModelV3({ doGenerate: mockValues(finalResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamOf(finalChunks) });
   const res = await runLoop({
     model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
     captureProviderCost: true,
@@ -93,32 +122,33 @@ test("captureProviderCost: falls back to the token pricer when no provider cost 
 
 test("stops with exhausted when the token cap is reached", async () => {
   const capped = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 30, maxTokensPerRun: 1 } };
-  const model = new MockLanguageModelV3({ doGenerate: (async () => toolCallResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamOf(toolCallChunks) });
   const res = await runLoop({ model, agent: capped, system: "S", messages: [{ role: "user", content: "go" }], tools });
   expect(res.exhausted).toBe(true);
   // proves the TOKEN cap (not the 30-iteration cap) stopped it: exactly one model call happened
-  expect((model as any).doGenerateCalls.length).toBe(1);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((model as any).doStreamCalls.length).toBe(1);
 });
 
 test("stops with exhausted when the cost cap is reached (not the iteration cap)", async () => {
   const capped = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 30, maxCostPerRunUsd: 0.001 } };
-  const model = new MockLanguageModelV3({ doGenerate: (async () => toolCallResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamOf(toolCallChunks) });
   const res = await runLoop({ model, agent: capped, system: "S", messages: [{ role: "user", content: "go" }], tools, priceUsd: () => 1 });
   expect(res.exhausted).toBe(true);
-  expect((model as any).doGenerateCalls.length).toBe(1); // one $1 call exceeds the $0.001 cap
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  expect((model as any).doStreamCalls.length).toBe(1); // one $1 call exceeds the $0.001 cap
 });
 
 test("aborts when the signal is already aborted", async () => {
   const controller = new AbortController();
   controller.abort();
-  const model = new MockLanguageModelV3({ doGenerate: (async () => finalResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamOf(finalChunks) });
   const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, signal: controller.signal });
   expect(res.aborted).toBe(true);
 });
 
 test("codexBackend streams (doStream) and routes system -> providerOptions.openai.instructions (+ store:false), not as a system message", async () => {
-  // The ChatGPT/Codex backend requires SSE streaming ("Stream must be set to true"), so the codex
-  // path must use streamText (doStream), not generateText (doGenerate).
+  // The ChatGPT/Codex backend requires the system prompt in the top-level `instructions` field.
   const model = new MockLanguageModelV3({
     doStream: (async () => ({
       stream: simulateReadableStream({
@@ -131,10 +161,12 @@ test("codexBackend streams (doStream) and routes system -> providerOptions.opena
           { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
         ],
       }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     })) as any,
   });
   const res = await runLoop({ model, agent, system: "SYS", messages: [{ role: "user", content: "go" }], tools, codexBackend: true });
   expect(res.text).toBe("all done"); // proves the streamed text was aggregated
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const call = (model as any).doStreamCalls[0];
   // rejected as "Instructions are required" unless `system` arrives here:
   expect(call.providerOptions?.openai?.instructions).toBe("SYS");
@@ -143,16 +175,37 @@ test("codexBackend streams (doStream) and routes system -> providerOptions.opena
   expect(JSON.stringify(call.prompt)).not.toContain("SYS");
 });
 
-test("env path (no codexBackend) keeps system as a normal system prompt, no instructions override", async () => {
-  const model = new MockLanguageModelV3({ doGenerate: mockValues(finalResp) as any });
+test("env path (no codexBackend) streams too, keeping system as a normal system prompt with no instructions override", async () => {
+  const model = new MockLanguageModelV3({ doStream: streamOf(finalChunks) });
   await runLoop({ model, agent, system: "SYS", messages: [{ role: "user", content: "go" }], tools });
-  const call = (model as any).doGenerateCalls[0];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const call = (model as any).doStreamCalls[0];
   expect(call.providerOptions?.openai?.instructions).toBeUndefined();
   expect(JSON.stringify(call.prompt)).toContain("SYS"); // system delivered the normal way
 });
 
+test("env path (unified streaming): usage, cost, toolCalls and live deltas all come through", async () => {
+  // Parity proof for a NON-codex provider under the unified streamText path: everything the
+  // generateText path used to return (final text, counted tool calls, metered usage, priced cost)
+  // still arrives — AND text deltas now stream live (previously codex-only).
+  const model = new MockLanguageModelV3({ doStream: streamSeq(toolCallChunks, finalChunks) });
+  const deltas: string[] = [];
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
+    priceUsd: ({ inputTokens, outputTokens }) => inputTokens * 2 + outputTokens * 3,
+    onStep: (i) => { if (i.delta) deltas.push(i.delta); },
+  });
+  expect(res.text).toBe("all done");        // final text aggregated from the stream
+  expect(res.toolCalls.noop).toBe(1);        // tool call surfaced + counted on the streamed path
+  expect(res.inputTokens).toBe(2);           // usage metered across BOTH streamed calls (1 + 1)
+  expect(res.outputTokens).toBe(2);
+  expect(res.costUsd).toBe(10);              // priced from streamed usage: 2 × (1*2 + 1*3) = 10
+  expect(deltas.join("")).toBe("all done");  // deltas forwarded live on the env path
+});
+
 test("returns a structured error (does not throw) when the model call fails", async () => {
-  const model = new MockLanguageModelV3({ doGenerate: (() => { throw new Error("boom"); }) as any });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doStream: (async () => { throw new Error("boom"); }) as any });
   const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools });
   expect(res.error).toContain("boom");
   expect(res.aborted).toBe(false);
@@ -163,8 +216,6 @@ test("returns a structured error (does not throw) when the model call fails", as
 // connection (never errors, never closes, never honors abort), which used to hang the loop forever.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const wedgedStream = () => new MockLanguageModelV3({ doStream: (() => new Promise(() => {})) as any });
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const wedgedGen = () => new MockLanguageModelV3({ doGenerate: (() => new Promise(() => {})) as any });
 
 test("cancels a wedged streaming model call when the signal aborts (does not hang)", async () => {
   const controller = new AbortController();
@@ -175,20 +226,23 @@ test("cancels a wedged streaming model call when the signal aborts (does not han
   expect(res.text).toBe("[cancelled]");
 }, 3000);
 
-test("times out a wedged streaming model call instead of hanging", async () => {
+test("times out a wedged streaming model call instead of hanging (codex path)", async () => {
   const res = await runLoop({ model: wedgedStream(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true, modelCallTimeoutMs: 150 });
   expect(res.error).toBeDefined();
   expect(res.text).toBe("[timed out]");
   expect(res.aborted).toBe(false);
 }, 3000);
 
-test("times out a wedged non-streaming model call instead of hanging", async () => {
-  const res = await runLoop({ model: wedgedGen(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, modelCallTimeoutMs: 150 });
+test("times out a wedged streaming model call on the env path too (idle watchdog everywhere, not just codex)", async () => {
+  // Plan 07: the idle watchdog must guard the env (non-codex) path as well — the unified streaming
+  // path means a wedged Anthropic/OpenAI/OpenRouter stream can no longer hang the loop.
+  const res = await runLoop({ model: wedgedStream(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, modelCallTimeoutMs: 150 });
   expect(res.text).toBe("[timed out]");
   expect(res.error).toBeDefined();
+  expect(res.aborted).toBe(false);
 }, 3000);
 
-test("codexBackend forwards streamed text deltas via onStep (so the UI can render live)", async () => {
+test("forwards streamed text deltas via onStep (so the UI can render live)", async () => {
   const model = new MockLanguageModelV3({
     doStream: (async () => ({
       stream: simulateReadableStream({
@@ -208,7 +262,7 @@ test("codexBackend forwards streamed text deltas via onStep (so the UI can rende
   });
   const deltas: string[] = [];
   const res = await runLoop({
-    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true,
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
     onStep: (i) => { if (i.delta) deltas.push(i.delta); },
   });
   expect(deltas).toEqual(["Hel", "lo, ", "world"]); // each chunk surfaced incrementally, in order
@@ -216,8 +270,7 @@ test("codexBackend forwards streamed text deltas via onStep (so the UI can rende
 });
 
 test("onEvent flushes each transcript event live (incremental evidence, not buffered to run end)", async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const model = new MockLanguageModelV3({ doGenerate: mockValues(toolCallResp, finalResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamSeq(toolCallChunks, finalChunks) });
   const kinds: string[] = [];
   const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, onEvent: (e) => kinds.push(e.kind) });
   expect(kinds).toContain("model_request");
@@ -228,8 +281,7 @@ test("onEvent flushes each transcript event live (incremental evidence, not buff
 });
 
 test("checkpoint is called once per iteration with the loop's message array (the resume point)", async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const model = new MockLanguageModelV3({ doGenerate: mockValues(toolCallResp, finalResp) as any });
+  const model = new MockLanguageModelV3({ doStream: streamSeq(toolCallChunks, finalChunks) });
   const snaps: Array<{ iteration: number; msgCount: number }> = [];
   await runLoop({
     model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
@@ -260,6 +312,6 @@ test("does NOT time out a streaming call that keeps making progress (idle timer 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     })) as any,
   });
-  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true, modelCallTimeoutMs: 100 });
+  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, modelCallTimeoutMs: 100 });
   expect(res.text).toBe("abcd");
 }, 3000);

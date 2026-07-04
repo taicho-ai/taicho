@@ -76,7 +76,8 @@ export async function runLoop(opts: {
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
   /** ChatGPT/Codex-backend shape: the subscription endpoint rejects requests whose system prompt
    *  is sent as an `input` message ("Instructions are required") — it must arrive in the top-level
-   *  `instructions` field, with store:false. The env (api.openai.com / Anthropic) path uses `system`. */
+   *  `instructions` field, with store:false. Every other provider (api.openai.com / Anthropic /
+   *  OpenRouter) sends a normal `system` prompt. All providers stream (Plan 07). */
   codexBackend?: boolean;
   /** OpenRouter (usage:{include:true}) returns the authoritative per-call cost in
    *  providerMetadata.openrouter.usage.cost — prefer it over the static token pricer when set. */
@@ -121,6 +122,8 @@ export async function runLoop(opts: {
     // Checkpoint the message array before this iteration's call — the resume point if we die here.
     opts.checkpoint?.({ iteration: iterations + 1, messages });
 
+    // `generateText` is retained only for its RESULT TYPE — the aggregated fields streamText drains
+    // to are identical, so this keeps the ModelOut shape exact while the runtime path is streaming.
     type GenResult = Awaited<ReturnType<typeof generateText>>;
     type ModelOut = {
       text: string;
@@ -139,26 +142,41 @@ export async function runLoop(opts: {
       // hang the loop: it returns on completion, on abort, OR after an idle timeout. onChunk pings the
       // idle watchdog so a long-but-progressing response is never falsely killed.
       out = await guardModelCall<ModelOut>(async (progress) => {
-        if (opts.codexBackend) {
-          // The ChatGPT/Codex backend requires SSE streaming ("Stream must be set to true") plus the
-          // system prompt in the top-level `instructions` field with store:false ("Instructions are
-          // required"). streamText sends stream:true; we drain it to completion and read the same
-          // aggregated fields generateText would return, so the rest of the loop is identical.
-          let streamErr: unknown;
-          const s = streamText({
-            model: opts.model, messages, tools: opts.tools, abortSignal: opts.signal,
-            providerOptions: { openai: { instructions: opts.system, store: false } },
-            onError: ({ error }) => { streamErr = error; },
-            // Each chunk both pings the idle watchdog AND surfaces the text delta so the UI can
-            // render the response live as it streams (instead of all at once when the run returns).
-            onChunk: ({ chunk }) => { progress(); if (chunk.type === "text-delta") opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text }); },
-          });
-          await s.consumeStream();
-          if (streamErr) throw streamErr;
-          return { text: await s.text, usage: await s.usage, toolCalls: await s.toolCalls, responseMessages: (await s.response).messages, providerMetadata: undefined };
-        }
-        const r = await generateText({ model: opts.model, system: opts.system, messages, tools: opts.tools, abortSignal: opts.signal });
-        return { text: r.text, usage: r.usage, toolCalls: r.toolCalls, responseMessages: r.response.messages, providerMetadata: r.providerMetadata };
+        // Plan 07: ONE streaming path for EVERY provider. streamText streams deltas so the live
+        // markdown UI lights up for all providers (previously only the Codex subscription path
+        // streamed; Anthropic/OpenAI/OpenRouter went through generateText and rendered nothing live).
+        // We drain the stream to completion and read the same aggregated fields generateText returned
+        // (text, usage, toolCalls, response messages, providerMetadata), so the rest of the loop is
+        // unchanged. The idle watchdog now gets onChunk pings on every provider, not just codex.
+        let streamErr: unknown;
+        const s = streamText({
+          model: opts.model,
+          messages,
+          tools: opts.tools,
+          abortSignal: opts.signal,
+          // Codex backend (subscription) requires the system prompt in the top-level `instructions`
+          // field with store:false ("Instructions are required") — NOT a system message. Every other
+          // provider takes a normal `system` prompt. (SSE streaming — "Stream must be set to true" —
+          // is now the shared path, so there is no codex-specific streaming toggle anymore.)
+          ...(opts.codexBackend
+            ? { providerOptions: { openai: { instructions: opts.system, store: false } } }
+            : { system: opts.system }),
+          onError: ({ error }) => { streamErr = error; },
+          // Each chunk both pings the idle watchdog AND surfaces the text delta so the UI can render
+          // the response live as it streams (instead of all at once when the run returns).
+          onChunk: ({ chunk }) => { progress(); if (chunk.type === "text-delta") opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text }); },
+        });
+        await s.consumeStream();
+        if (streamErr) throw streamErr;
+        return {
+          text: await s.text,
+          usage: await s.usage,
+          toolCalls: await s.toolCalls,
+          responseMessages: (await s.response).messages,
+          // OpenRouter (usage:{include:true}) reports the authoritative per-call cost here on the
+          // streamed path too (aggregated from the finish part); captureProviderCost reads it below.
+          providerMetadata: await s.providerMetadata,
+        };
       }, opts.signal, opts.modelCallTimeoutMs ?? DEFAULT_MODEL_IDLE_TIMEOUT_MS);
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);

@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MockLanguageModelV3 } from "ai/test";
+import { MockLanguageModelV3 } from "../core/mock-model"; // Plan 07: auto-streaming mock
 import { draftPolicy, persistApprovedPolicy } from "./teach";
 import { readPolicy } from "../store/policy";
 

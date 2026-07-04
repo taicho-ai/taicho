@@ -7,7 +7,7 @@
  *  multi-char chunk as literal input, so "text\r" would NOT submit). Arrow keys are ANSI escapes. */
 import { test, expect } from "bun:test";
 import { render } from "ink-testing-library";
-import { MockLanguageModelV3, mockValues } from "ai/test";
+import { MockLanguageModelV3, mockValues } from "../core/mock-model"; // Plan 07: auto-streaming mock
 import { simulateReadableStream } from "ai";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -640,6 +640,9 @@ test("delegation with acceptance criteria: a twice-failed verdict is surfaced to
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "get writer to write X", ENTER);
   await waitFor(lastFrame, "still failed verification", 8000);        // the captain SEES the failed-verdict breadcrumb
+  // The breadcrumb fires from INSIDE delegate_task (mid-run); wait for the root's final reply so the
+  // root run has actually settled and written its trace before we read it back.
+  await waitFor(lastFrame, "Writer produced X", 8000);
   // …and the verdict is durably recorded on the trace and the task-state.
   const done = listTraces(ws, "root").filter((t) => t.outcome === "completed");
   const root = done.at(-1)!;

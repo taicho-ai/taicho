@@ -5,7 +5,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MockLanguageModelV3, mockValues } from "ai/test";
+import { MockLanguageModelV3, mockValues } from "./mock-model"; // Plan 07: auto-streaming mock
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { ensureWorkspace } from "../store/files";
 import { openDb } from "../store/db";

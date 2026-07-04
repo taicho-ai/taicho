@@ -2,7 +2,9 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, existsSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MockLanguageModelV3, mockValues, simulateReadableStream } from "ai/test";
+// Plan 07: the loop streams every provider, so models are driven via doStream. `./mock-model` is a
+// MockLanguageModelV3 that auto-streams a doGenerate script (still recording doGenerateCalls).
+import { MockLanguageModelV3, mockValues, simulateReadableStream } from "./mock-model";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
