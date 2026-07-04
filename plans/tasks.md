@@ -484,3 +484,74 @@ the tracking view; the runbook is the build view.
 ### Phase 4 — Docs & CI
 - [x] Rewrite `CLI_TESTING.md` around the new harness; add Layer 4 to `TESTING.md`'s table; update `CLAUDE.md`. *CLI_TESTING.md rewritten (assertion contract kept, manifest = deliverable, gotchas documented); TESTING.md now four layers + a Layer 4 section; CLAUDE.md testing line updated.*
 - [ ] (later) `charmbracelet/vhs-action` in CI, evidence folder as build artifact — only once tapes prove stable locally.
+
+---
+
+## Plan 12 — Kill the model-call watchdog
+
+**One line:** Delete the bespoke idle-timeout watchdog. A model call either returns tokens or
+errors; a hung request becomes an error via a transport deadline. No watchdog, no "stall" concept,
+no babysitting.
+
+**Why now:** a real user run (`root/2026-07-04-run6`) was marked `failed` even though every
+sub-agent succeeded. Root cause: `guardModelCall` wraps `streamText` + `consumeStream`, and the AI
+SDK executes tools *inside* `consumeStream`. A 156s `shot-planner` delegation produced no stream
+chunks for 120s, so the idle timer fired `ModelStalledError` at exactly `tool_start + 120000ms` —
+timing our own tool, not the model. The error text ("backend stalled or connection dropped") is a
+hardcoded guess; `streamText`'s `onError` never fired because nothing actually dropped. The timer
+only *abandons* the promise (never aborts), so the wedged stream + its whole closure (messages,
+tools, ctx) leaks — the likely cause of the session slowdown ~30min after a failure.
+
+- [ ] Delete `guardModelCall` + `ModelStalledError` from `loop.ts` (the watchdog is the bug — remove, don't replace).
+- [ ] Put an `AbortSignal.timeout(ms)` on the model fetch (transport layer, e.g. `makeAuthFetch`) so a genuinely hung request (open socket, zero tokens) becomes a normal error — and cannot see tool execution, which happens after the model's HTTP stream closes.
+- [ ] Route that error through the AI SDK's existing `maxRetries` (don't hand-roll retry); on exhaustion the run fails / provider is dropped like any other error.
+- [ ] Confirm real abort tears the stream/connection/closure down (fixes the abandon-don't-cancel leak); reproduce the pre-fix leak with a heap snapshot as evidence.
+- [ ] Fix the failure surface: report the real transport error, never a fabricated "backend stalled" string.
+- [ ] Tests: a long (>old-timeout) delegation completes and the parent surfaces the child result (the `shot-planner` case); a truly hung fetch errors + retries + fails cleanly with no leaked stream. Update `CLAUDE.md` (remove the watchdog notes) + the `loop-model-call-hang-and-cancel` memory.
+
+---
+
+## Plan 13 — Rolling compact live-stream view (UI)
+
+**One line:** Bound each live agent's streaming output to a small **rolling window** (≈4 lines, 5
+max) instead of dumping the whole stream into the CLI scrollback — you can see that streaming and
+work are happening without it eating the screen or blowing up what the eye has to hold.
+
+**Why now:** during a delegation cascade the live surfaces either show terse tool lines (Plan 10
+panes deliberately DON'T show the streamed reply text) or, in `waterfall`/scrollback, the full
+stream floods down. On a 5-agent run (`root/2026-07-04-run6`) that's a wall of text; the signal
+("agent X is producing, here's the tail of it") drowns. We want presence + a peek at the tail,
+not the transcript.
+
+- [x] A per-agent rolling tail component: keep only the last N lines (default 4, cap 5) of the agent's live stream, older lines scroll off — a fixed-height window, never grows. *(`src/ui/RollingStream.tsx` — `tailLines()` is the pure last-N window, clamped to [1, MAX_ROLL_LINES]; unit-tested in `RollingStream.test.tsx`.)*
+- [x] Wire it to the existing live event stream (`onStep` deltas — the same feed StatusBar/SquadPanes/live-trace consume); no new engine plumbing, pure UI over the delta events. *(App.tsx accumulates the `delta` events into a bounded per-run buffer; no engine/store change.)*
+- [x] Compose with `/view` (Plan 10): the rolling tail is the reply/work channel the panes intentionally omit; decide whether it lives inside the pane, under the bar, or a new `/view` mode (default choice + persist via `store/prefs.ts`). *Decision: a new **`/view stream`** mode (default overall view UNCHANGED — stays `both`; captains opt in). Rationale: keeping the streamed-reply channel in its own mode avoids reintroducing the pane↔scrollback reply race Plan 10 fought, and leaves every default-`both` test untouched. Persisted via `store/prefs.ts` (`VIEW_MODES` gains `stream`); `resolveLayout` gains `showStream`.*
+- [x] Collapse cleanly: window disappears when the agent settles (brief `done` beat like panes), degrades below min terminal size, "+N more" when multiple agents stream at once. *(settle machinery mirrors SquadPanes; `resolveLayout`/component guard degrades to bar-only below `MIN_PANE_COLS/ROWS`; height-cap + `+N more` overflow — all tested: App-test collapse-on-completion, resolveLayout+component degrade, component `+N more`.)*
+- [x] Never load-bearing for context: this is display-only and must not change what's recorded or replayed (it's a view, not a compaction of the ledger — that's Plan 05). *(a separate UI ref; the reply still commits to scrollback via `streamRef`; nothing writes transcript/ledger/replay. The App test proves the reply still flushes to scrollback normally.)*
+- [x] Layer-1 `App.test.tsx`: window shows the last N delta lines during a streaming run, rolls as new deltas arrive, clears on completion. Update `TESTING.md`, `CLAUDE.md`. *(the "Plan 13: /view stream shows a rolling tail…" test; TESTING.md's Squad UI section + CLAUDE.md's `src/ui/` line updated.)*
+
+---
+
+## Plan 14 — Worker agents born toolless (artifact tools never bound)
+
+**One line:** Every worker agent in a real deck was created with `tools: []`, so NONE of the
+artifact tools (`save_artifact`/`read_artifact`/`list_artifacts`/`annotate_artifact`/`write_artifact`)
+— nor `delegate`, `ask_human`, etc. — are bound. The squad can only call the unconditional baseline
+(`use_skill`/`search_skills`), which is why every child in `root/2026-07-04-run6` produced ZERO
+artifacts and handed work back as loose `final.md` text.
+
+**Root cause (verified):** the default worker grant is correct — `roster.ts:143` grants the
+artifact trio via `draft.tools ?? [ ...defaults ]`. But `??` only fills `null`/`undefined`; an
+explicit `tools: []` (which `create_agent`'s optional schema, `tools.ts:195`, permits a model to
+emit) sails through and **defeats the default**. All 9 squad agents (`content-strategist`,
+`researcher`, `creative-director`, `master-scriptwriter`, `shot-planner`, `performance-analyst`,
+`platform-adapter`, `production-coordinator`, `short-form-editor`) carry `tools: []`. `use_skill`
+runs only because it's baseline (unguarded, `tools.ts:668`). Secondary: the `write-a-clear-artifact`
+skill (`skills/skill_write_artifact.md`) coaches "before calling write_artifact" — a **dangling
+reference** to a tool the agent doesn't have.
+
+- [ ] Fix the bind-time fallback so an empty/`[]` tools list does NOT silently defeat the sensible default — treat empty as "apply the default worker grant," OR make the artifact trio part of an always-merged baseline (decide which; empty-means-default is the smaller change, baseline-merge is the more robust one).
+- [ ] Decide the intended lifecycle contract: what SHOULD `create_agent` with no/empty `tools` grant? Document it where the grant is defined so a future create path can't reintroduce the toolless worker.
+- [ ] Backfill the existing 9 toolless agents (a boot reconcile / migration that grants the default trio to any worker with `tools: []`), so the live deck is usable without hand-editing each `agent.md`.
+- [ ] Reconcile the dangling skill: point `write-a-clear-artifact` at the real `save_artifact` (not the legacy `write_artifact`), or gate the guidance on the tool actually being granted.
+- [ ] Test: a freshly `create_agent`'d worker (no `tools` field AND explicit `tools: []`) ends up with the artifact trio bound; a delegated child can `save_artifact` and hand off by reference (proves the `root/2026-07-04-run6` gap is closed). Update `CLAUDE.md`.

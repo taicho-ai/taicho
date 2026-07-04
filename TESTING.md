@@ -230,6 +230,33 @@ complete summary.
   1000` gives the panes vertical room (they degrade to bar-only below `MIN_PANE_ROWS`). Ran twice, no
   flake; `agent-flow` stays 7/7.
 
+### The rolling compact live-stream view (`/view stream`, Plan 13)
+
+`ui/RollingStream.tsx` is a fixed-height per-agent tail of the live reply/work stream — only the last N
+lines (default 4, cap 5), older lines scroll off, the window never grows. It is the reply/work channel
+the Plan 10 panes deliberately OMIT (see the pane note above — echoing streamed reply text raced the
+scrollback reply channel), so it ships as its **own opt-in `/view stream` mode**: the default `both`
+surfaces (and every test that waits on the scrollback reply then asserts the trace) are untouched. It
+folds the SAME `onStep` `delta` events the bar/panes/live-trace consume into a bounded per-run buffer in
+`App.tsx` (no new engine plumbing) and is display-only — it never feeds back into transcript/ledger/
+boot-replay.
+
+- **Pure units** — `ui/RollingStream.test.tsx` covers `tailLines(text, n)` (the fixed-height window:
+  last-N slice, older lines scroll off, short streams don't pad, a trailing newline's empty segment is
+  dropped, N clamped to `[1, MAX_ROLL_LINES]`). `ui/SquadPanes.test.tsx` adds the `stream` case to
+  `resolveLayout` (stream shows the rolling surface, hides bar+panes+waterfall; too-small degrades to
+  bar-only); `store/prefs.test.ts` adds the `stream` `/view` persistence round-trip.
+- **Layer 1 (Ink)** — the Plan 13 test in `App.test.tsx` renders the real `<App>` with a **slow
+  multi-line `doStream` mock** (each delta a line, more lines than the window holds). Two non-obvious
+  things the next author should keep: (1) the window is gated by `/view stream` (a mode `App.test.tsx`'s
+  other tests never enter, so the default surfaces stay unperturbed); (2) the rolling assertion is made
+  **mid-stream** — while a single-newline paragraph is still streaming it has NOT committed to
+  scrollback, so a `waitForPred` catches the frame where a *later* line (`l6`) is visible while the
+  *earliest* (`l1`) has already scrolled off and the body-row count is `≤ MAX_ROLL_LINES`. That
+  ordering matters: after completion the reply flushes to scrollback (which then contains `l1`), so the
+  bounded-window proof must be read before the flush. The test then asserts the window collapses after
+  the run (`▎` accent gone) — the rolling view is display-only and never lingers.
+
 ## Adding a dependency (testing-adjacent gotcha)
 
 `bun add <pkg>` re-resolves the whole tree and hits a broken upstream publish (`@vercel/ai-tsconfig@0.0.0`, 404). **Instead: edit `package.json` and run `bun install`**, keeping the `overrides` block intact (it pins the transitive `@ai-sdk/*` packages; never override a *direct* dep — npm's `EOVERRIDE` would then break `npx`, which launches stdio MCP servers). See the note in `package.json`.
