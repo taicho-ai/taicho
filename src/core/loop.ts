@@ -85,9 +85,22 @@ export async function runLoop(opts: {
    *  abandoned and the run fails. Guards against a backend/stream that wedges without erroring,
    *  closing, or honoring abort — which would otherwise hang the loop forever. Default 120s. */
   modelCallTimeoutMs?: number;
+  /** Plan 04 Phase 5: called for EACH transcript event as it happens, so evidence flushes
+   *  incrementally (a crash mid-run leaves a legible transcript.jsonl) instead of only at run end.
+   *  Also feeds Plan 02's live-mode waterfall. */
+  onEvent?: (event: { ts: string; kind: string; iteration?: number; data?: unknown }) => void;
+  /** Plan 04 Phase 5: called once per iteration with the loop's message array — its only real state.
+   *  Persisted as a resume checkpoint so an interrupted run can (later) restart from the last
+   *  completed iteration. */
+  checkpoint?: (state: { iteration: number; messages: ModelMessage[] }) => void;
 }): Promise<LoopResult> {
   const counts: Record<string, number> = {};
   const transcript: LoopResult["transcript"] = [];
+  // Push a transcript event AND flush it live (onEvent) so evidence isn't buffered until run end.
+  const emit = (event: { ts: string; kind: string; iteration?: number; data?: unknown }) => {
+    transcript.push(event);
+    opts.onEvent?.(event);
+  };
   let tokens = 0, inputTokens = 0, outputTokens = 0, costUsd = 0, iterations = 0;
   const messages = [...opts.messages];
   const cap = opts.agent.budgets;
@@ -105,6 +118,9 @@ export async function runLoop(opts: {
     const steer = opts.pollSteer?.();
     if (steer) messages.push({ role: "user", content: steerMarker(steer) });
 
+    // Checkpoint the message array before this iteration's call — the resume point if we die here.
+    opts.checkpoint?.({ iteration: iterations + 1, messages });
+
     type GenResult = Awaited<ReturnType<typeof generateText>>;
     type ModelOut = {
       text: string;
@@ -115,7 +131,9 @@ export async function runLoop(opts: {
     };
     let out: ModelOut;
     try {
-      transcript.push({ ts: new Date().toISOString(), kind: "model_request", iteration: iterations + 1, data: { messageCount: messages.length } });
+      // emit() (Plan 04) flushes the transcript event live via onEvent; onStep model_start (Plan 02/10)
+      // drives the live "thinking" status. Keep both.
+      emit({ ts: new Date().toISOString(), kind: "model_request", iteration: iterations + 1, data: { messageCount: messages.length } });
       opts.onStep?.({ phase: "model_start" }); // → "thinking" until a delta or the response arrives
       // guardModelCall wraps the call so a wedged stream (no bytes/close/error, abort ignored) can't
       // hang the loop: it returns on completion, on abort, OR after an idle timeout. onChunk pings the
@@ -144,13 +162,13 @@ export async function runLoop(opts: {
       }, opts.signal, opts.modelCallTimeoutMs ?? DEFAULT_MODEL_IDLE_TIMEOUT_MS);
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
-      transcript.push({ ts: new Date().toISOString(), kind: "model_error", iteration: iterations + 1, data: { error } });
+      emit({ ts: new Date().toISOString(), kind: "model_error", iteration: iterations + 1, data: { error } });
       if (opts.signal?.aborted) return done({ text: "[cancelled]", aborted: true });
       if (e instanceof ModelStalledError) return done({ text: "[timed out]", error: e.message });
       return done({ text: "[error]", error });
     }
     const { text, usage, toolCalls, responseMessages, providerMetadata } = out;
-    transcript.push({
+    emit({
       ts: new Date().toISOString(),
       kind: "model_response",
       iteration: iterations + 1,
@@ -174,7 +192,9 @@ export async function runLoop(opts: {
     // + the post-hoc tool_call transcript record (full args, for the drill-in).
     for (const tc of toolCalls) {
       counts[tc.toolName] = (counts[tc.toolName] ?? 0) + 1;
-      transcript.push({ ts: new Date().toISOString(), kind: "tool_call", iteration: iterations + 1, data: tc });
+      // emit() flushes live (Plan 04). Tool start/end onStep now comes from the tools.ts execute()
+      // wrapper (Plan 02/10 phase:"tool_start"/"tool_end"), so the loop no longer emits onStep({tool}).
+      emit({ ts: new Date().toISOString(), kind: "tool_call", iteration: iterations + 1, data: tc });
     }
     messages.push(...responseMessages);
   }

@@ -42,6 +42,7 @@ const PartialBudgets = z.object({
   maxWorkItemsPerRequest: z.number().int().positive().optional(),
   maxTokensPerRun: z.number().int().positive().optional(),
   maxCostPerRunUsd: z.number().positive().optional(),
+  maxConcurrentRuns: z.number().int().positive().optional(), // Plan 04: per-agent background concurrency cap
 }).optional();
 
 const AgentOverride = z.object({
@@ -85,6 +86,9 @@ export const TaichoConfig = z.object({
   }).optional(),
   agents: z.record(z.string(), AgentOverride).optional(),
   auth: z.object({ chatgpt_signin: z.boolean().optional() }).optional(),
+  // Plan 04: a global ceiling on total in-flight + queued BACKGROUND runs (dispatch_task). Bounds
+  // system-wide fan-out independent of per-agent maxConcurrentRuns; default applied in the REPL (32).
+  tasks: z.object({ maxBackgroundRuns: z.number().int().positive().optional() }).optional(),
   mcp: McpConfig,
   embeddings: z.object({ provider: z.enum(["off", "local", "openai"]).optional() }).optional(), // semantic KB backend
 }).default({});

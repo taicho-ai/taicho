@@ -17,7 +17,7 @@ import { getActiveSkills } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
 import { reserveRunId, writeTrace } from "../store/trace";
-import { appendRunTranscript, writeChildRuns, writeRunFailure, writeRunFinal, writeRunInput, type RunTranscriptEvent } from "../store/run-transcript";
+import { appendRunTranscript, writeChildRuns, writeRunCheckpoint, writeRunFailure, writeRunFinal, writeRunInput, type RunTranscriptEvent } from "../store/run-transcript";
 import type { StepInfo, StepEvent } from "./step-events";
 import type { ProposalDraft } from "../coaching/proposal";
 import { pricerFor } from "./pricing";
@@ -114,12 +114,22 @@ export interface RunContext {
   checkCriteria: (p: { goal: string; criteria: string; output: string }) => Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string }>;
   /** Surface a one-line breadcrumb to the captain (e.g. a failed verification), routed via onStep. */
   emit?: (info: { note: string }) => void;
+  /** Plan 04: fire-and-forget a goal onto another agent in the BACKGROUND. Returns a taskId
+   *  immediately (the cascade runs off-turn via the same executeRun). Present only when the host
+   *  wired a scheduler (the REPL); undefined in headless/unit contexts. */
+  dispatchTask?: (brief: { to: string; goal: string; context?: string; criteria?: string; inputArtifacts?: string[] }) => Promise<{ taskId: string } | { error: string }>;
+  /** Plan 04: block until a background task settles (bounded by timeoutMs). Status + summary +
+   *  resultRef only — hand-off stays BY REFERENCE, never the inlined payload. */
+  awaitTask?: (taskId: string, timeoutMs?: number) => Promise<TaskAwaitResult>;
   /** The shared instrumentation seam (Plan 02 + Plan 10). tools.ts wraps every tool `execute()` and
    *  run.ts wraps `requestApproval` to (a) push tool/approval span events into `spanEvents` (flushed
    *  to transcript.jsonl for the waterfall) and (b) emit a live typed phase via `emitStep`. */
   spanEvents: RunTranscriptEvent[];
   emitStep?: (info: StepInfo) => void;
 }
+
+/** What check_task / await_task hand back: a reference, never the payload (Plan 01 discipline). */
+export interface TaskAwaitResult { status: string; summary?: string; resultRef?: string; runId?: string; error?: string; }
 
 export interface RunDeps {
   ws: string;
@@ -128,6 +138,10 @@ export interface RunDeps {
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   onStep?: (info: StepEvent) => void;
   pollSteer?: () => string | null;
+  /** Plan 04 Phase 4: per-run steer routing. run.ts binds the loop's pollSteer to THIS run's id, so
+   *  a steer routed to a specific runId reaches only that run (not a random descendant). Falls back
+   *  to the flat pollSteer when absent (unit tests). */
+  pollSteerFor?: (info: { runId: string; agentId: string; triggeredBy: string }) => string | null;
   signal?: AbortSignal;
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
   runCounter?: { n: number };
@@ -137,6 +151,16 @@ export interface RunDeps {
   mcp?: McpManager;
   embed?: (text: string) => Promise<Float32Array>; // semantic KB embedder; undefined ⇒ keyword+graph
   onRunStart?: (info: { runId: string; agent: string; triggeredBy: string; messages: ModelMessage[] }) => void;
+  /** Plan 04 Phase 4: called when a run finishes (any outcome) so the host can drop it from its
+   *  active-run map / steer routing table. */
+  onRunEnd?: (info: { runId: string; agent: string; triggeredBy: string; outcome: RunTrace["outcome"] }) => void;
+  /** Plan 04 Phase 2: start a detached BACKGROUND run for a dispatched task. The host (REPL) owns
+   *  the scheduler + settle/notify; the engine just hands it a resolved child agent + brief.
+   *  Returns the taskId immediately (fire-and-forget). Undefined ⇒ dispatch_task is unavailable. */
+  dispatch?: (opts: { agent: AgentDef; goal: string; context?: string; criteria?: string; inputArtifacts?: string[]; parentRunId: string; parentAgentId: string; parentAncestry: string[] }) => { taskId: string } | { error: string };
+  /** Plan 04 Phase 2: back await_task — block until a background task settles (host-owned). The
+   *  optional awaiterAgentId (stamped by run.ts) lets the host fail fast on a same-agent self-block. */
+  awaitTask?: (taskId: string, timeoutMs?: number, awaiterAgentId?: string) => Promise<TaskAwaitResult>;
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -145,6 +169,7 @@ export function makeDeps(opts: {
   requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   onStep?: RunDeps["onStep"];
   pollSteer?: () => string | null;
+  pollSteerFor?: RunDeps["pollSteerFor"];
   signal?: AbortSignal;
   priceUsd?: RunDeps["priceUsd"];
   runCounter?: { n: number };
@@ -154,17 +179,21 @@ export function makeDeps(opts: {
   mcp?: McpManager;
   embed?: (text: string) => Promise<Float32Array>;
   onRunStart?: RunDeps["onRunStart"];
+  onRunEnd?: RunDeps["onRunEnd"];
+  dispatch?: RunDeps["dispatch"];
+  awaitTask?: RunDeps["awaitTask"];
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
     requestApproval: opts.requestApproval ?? (async () => ({ type: "reject" })),
-    onStep: opts.onStep, pollSteer: opts.pollSteer,
+    onStep: opts.onStep, pollSteer: opts.pollSteer, pollSteerFor: opts.pollSteerFor,
     signal: opts.signal, priceUsd: opts.priceUsd,
     runCounter: opts.runCounter ?? { n: 0 },
     resolveModel: opts.resolveModel, configDefaults: opts.configDefaults,
     globalPolicyCache: opts.globalPolicyCache ?? {},
     mcp: opts.mcp, embed: opts.embed,
-    onRunStart: opts.onRunStart,
+    onRunStart: opts.onRunStart, onRunEnd: opts.onRunEnd,
+    dispatch: opts.dispatch, awaitTask: opts.awaitTask,
   };
 }
 
@@ -249,6 +278,21 @@ export async function executeRun(
       goal: p.goal, criteria: p.criteria, output: p.output,
     }),
     emit: emitStep ? (info) => emitStep({ note: info.note }) : undefined,
+    // Plan 04: dispatch resolves the child agent (like runChild) then hands it to the host scheduler,
+    // which starts a detached run and returns the taskId immediately. Undefined when unwired.
+    // parentAncestry threads the dispatching run's ancestry so the cross-agent cycle guard spans
+    // dispatch hops — a detached A→B→A ping-pong is refused by delegationGuard, not just per-agent caps.
+    dispatchTask: deps.dispatch
+      ? async ({ to, goal, context, criteria, inputArtifacts }) => {
+          const child = await loadAgent(deps.ws, to);
+          return deps.dispatch!({ agent: child, goal, context, criteria, inputArtifacts, parentRunId: runId, parentAgentId: opts.agent.id, parentAncestry: ancestry });
+        }
+      : undefined,
+    // awaiterAgentId lets the host fail fast on a self-block deadlock: awaiting a task queued behind
+    // THIS agent's own concurrency slot (the awaiting run holds it) would park until timeout.
+    awaitTask: deps.awaitTask
+      ? (taskId, timeoutMs) => deps.awaitTask!(taskId, timeoutMs, opts.agent.id)
+      : undefined,
     // Discovery respects the caller's visibility ACL, consistent with the inline-roster path.
     findAgents: (query, k) =>
       rankAgents(
@@ -362,12 +406,20 @@ export async function executeRun(
 
   const result = await runLoop({
     model, agent: opts.agent, system, messages: opts.messages, tools,
-    onStep: emitStep,
-    pollSteer: deps.pollSteer,
+    onStep: emitStep, // stamps agent + runId (Plan 02/10) then forwards to deps.onStep
+    // Per-run steer routing (Phase 4): a steer aimed at THIS runId reaches only this run; fall back
+    // to the flat queue for unit contexts that don't route.
+    pollSteer: (deps.pollSteerFor || deps.pollSteer)
+      ? () => deps.pollSteerFor?.({ runId, agentId: opts.agent.id, triggeredBy: opts.triggeredBy }) ?? deps.pollSteer?.() ?? null
+      : undefined,
     signal: deps.signal,
     priceUsd,
     codexBackend: subscription, // subscription:true ⇒ Codex backend ⇒ system goes in `instructions`
     captureProviderCost: picked?.captureCost, // OpenRouter reports real cost in providerMetadata
+    // Phase 5 recovery: flush each transcript event live + checkpoint the message array per iteration,
+    // so a crash mid-run leaves legible evidence and a resume point instead of nothing.
+    onEvent: (e) => appendRunTranscript(deps.ws, runId, e),
+    checkpoint: (s) => writeRunCheckpoint(deps.ws, runId, s),
   });
   const outcome: RunTrace["outcome"] =
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";
@@ -390,16 +442,18 @@ export async function executeRun(
     notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };
-  // Merge the loop's model events with the tool/approval span events (both carry a ts) and flush in
-  // time order, so the waterfall reader reconstructs the true timeline. (Incremental per-event flush
-  // is Plan 04 Phase 5 — deferred; buffering + one ordered write is correct until then.)
-  const merged = [...result.transcript, ...ctx.spanEvents].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
-  for (const event of merged) appendRunTranscript(deps.ws, runId, event);
+  // The loop's model events (model_request/response/tool_call) were flushed LIVE via onEvent
+  // (incremental recovery, Plan 04 Phase 5). The tool/approval SPAN events (Plan 02/10) buffer in
+  // ctx.spanEvents — flush them here. The waterfall reader pairs spans by callId/iteration and times
+  // them by each event's `ts`, so append order is irrelevant. Do NOT re-write result.transcript:
+  // onEvent already persisted it live, and doing both would double-write every loop event.
+  for (const event of ctx.spanEvents) appendRunTranscript(deps.ws, runId, event);
   // Verdicts are part of the run's story ("why did it retry?") — record them in the transcript too.
   for (const v of ctx.verifications) appendRunTranscript(deps.ws, runId, { ts: new Date().toISOString(), kind: "verification", data: v });
   writeChildRuns(deps.ws, runId, ctx.childTraces);
   writeRunFinal(deps.ws, runId, result.error ? `error: ${result.error}` : result.text);
   writeRunFailure(deps.ws, runId, trace, result.error ? `error: ${result.error}` : result.text);
   writeTrace(deps.ws, trace);
+  deps.onRunEnd?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, outcome });
   return { runId, text: result.error ? `error: ${result.error}` : result.text, trace };
 }

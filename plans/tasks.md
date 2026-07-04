@@ -189,35 +189,35 @@ until Phase 0 here is decided.
 - [x] **Cap location:** `budgets.maxConcurrentRuns` per agent (config disposes). *Decided (2026-07-04): yes.*
 
 ### Phase 1 — Task model & store
-- [ ] Promote `task-state.ts`: `Task` schema (id, goal, agent, status queued|running|done|failed|cancelled|interrupted, resultRef, rootRunId, timestamps) + DB index; survives restarts.
-- [ ] `/tasks` command: list + status + cancel.
+- [x] Promote `task-state.ts`: `Task` schema (id, goal, agent, status queued|running|done|failed|cancelled|interrupted, resultRef, rootRunId, timestamps) + DB index; survives restarts. *(evolved `TaskState`: added queued/cancelled statuses + kind/agent/goal/resultRef/summary; files under `tasks/` canon + rebuildable `tasks` DB index (migrate v5, `reindexTasks`). "done" kept as the existing "completed".)*
+- [x] `/tasks` command: list + status + cancel. *(default view hides completed chat turns; shows background + in-flight; `/tasks cancel <id>` aborts a running task or drops a queued one.)*
 
 ### Phase 2 — Background execution
-- [ ] `dispatch_task` tool — fire-and-forget; returns `{ taskId }` immediately; cascade runs off-turn via the same `executeRun`.
-- [ ] `check_task` / `await_task` tools (status+summary only — reference hand-off, never payload).
-- [ ] REPL notification when a background task settles.
+- [x] `dispatch_task` tool — fire-and-forget; returns `{ taskId }` immediately; cascade runs off-turn via the same `executeRun` (`triggeredBy: taskId`).
+- [x] `check_task` / `await_task` tools (status+summary+handle only — reference hand-off, never payload; summary capped at 500 chars).
+- [x] REPL notification when a background task settles.
 
 ### Phase 3 — Real fan-out
-- [ ] `maxConcurrentRuns` budget + enforcement.
-- [ ] Audit shared-mutable seams under interleaving (`runCounter` check-then-act in `delegationGuard`, `childSpend`, `globalPolicyCache`, SQLite).
+- [x] `maxConcurrentRuns` budget + enforcement. *(added to `AgentDef.budgets` + config `PartialBudgets`; `TaskScheduler` is a per-agent semaphore — over-cap dispatches sit `queued` and the queue pumps on settle.)*
+- [x] Audit shared-mutable seams under interleaving (`runCounter` check-then-act in `delegationGuard`, `childSpend`, `globalPolicyCache`, SQLite). *(audited: Bun is single-threaded so each `execute()` runs to completion between awaits; the work-item + guard check-then-act is synchronous at execute entry — proven by the interleaved-dispatch test. `childSpend` folding is synchronous. Real concurrency vector is background dispatch, gated by the scheduler.)*
 
 ### Phase 4 — Targeted steering
-- [ ] Per-run steer queues keyed by runId (replaces the single global `steerQueue`).
-- [ ] Routing: plain steer → root; `@agent` steer → that agent's active run.
+- [x] Per-run steer queues keyed by runId (replaces the single global `steerQueue`). *(`RunDeps.pollSteerFor` bound to each run's id in `run.ts`; App holds a `steerRoutes` Map<runId, steers[]>.)*
+- [x] Routing: plain steer → root; `@agent` steer → that agent's active run. *(App tracks `activeRuns` + `foregroundRootRef` via onRunStart/onRunEnd.)*
 
 ### Phase 5 — Recovery & resume
-- [ ] Flush `transcript.jsonl` incrementally (append per event, not at run end) — shared with Plan 02 live mode.
-- [ ] Checkpoint the loop's message array per iteration; resume an interrupted run from the last completed iteration.
-- [ ] Boot reconciliation of `tasks/`: `running` → `interrupted`, then per Phase 0 decision.
+- [x] Flush `transcript.jsonl` incrementally (append per event, not at run end) — shared with Plan 02 live mode. *(`loop.ts` `onEvent`; `run.ts` appends live and drops the post-loop re-append.)*
+- [~] Checkpoint the loop's message array per iteration; resume an interrupted run from the last completed iteration. *(checkpoint WRITING done — `checkpoint.json` per iteration via `loop.ts` `checkpoint`; automatic resume EXECUTION deferred, consistent with the closed Phase 0 "report-and-ask first" decision.)*
+- [x] Boot reconciliation of `tasks/`: `running`/`queued` → `interrupted`, then report-and-ask per Phase 0. *(`reconcileTasks` on boot → startupNotice lists the interrupted tasks; captain reviews via `/tasks`.)*
 
 ### Phase 6 — v2 (deferred)
-- [ ] Scheduled/triggered runs (cron-style, watches) — needs Plan 03's headless mode.
+- [ ] Scheduled/triggered runs (cron-style, watches) — needs Plan 03's headless mode. **DEFERRED (v2).**
 
 ### Phase 7 — Tests & docs
-- [ ] Unit: task store lifecycle; steer routing; delegationGuard under interleaved dispatches.
-- [ ] Layer-1 `App.test.tsx`: dispatch → keep chatting → notification → `/tasks`.
-- [ ] Real-binary e2e: kill mid-run → boot reconciliation reports the interrupted task.
-- [ ] Update `TESTING.md`, `CLAUDE.md`, `prompt.ts` delegation guidance.
+- [x] Unit: task store lifecycle; steer routing; delegationGuard under interleaved dispatches. *(`task-state.test.ts`, `tasks.test.ts` (scheduler), `run.test.ts` (dispatch wiring/guards/steer/checkpoint), `tools.test.ts` (dispatch/check/await), `loop.test.ts` (onEvent/checkpoint).)*
+- [x] Layer-1 `App.test.tsx`: dispatch → keep chatting → notification → `/tasks`.
+- [ ] Real-binary e2e: kill mid-run → boot reconciliation reports the interrupted task. **DEFERRED** (stretch goal; agent-flow evidence stays green; the bespoke kill-mid-run tape not built this pass).
+- [x] Update `TESTING.md`, `CLAUDE.md`, `prompt.ts` delegation guidance.
 
 ---
 

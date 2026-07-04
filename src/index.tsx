@@ -21,6 +21,7 @@ import { createMcpManager, type McpManager } from "./core/mcp/manager";
 import { readMcpStore } from "./store/mcp-store";
 import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
+import { reindexTasks, reconcileTasks } from "./store/task-state";
 import { createE2eModel } from "./core/e2e-model";
 import { parseCli, runHeadless, runTail } from "./core/headless";
 import { configureLogger, log } from "./core/logger";
@@ -50,9 +51,17 @@ if (idx.length === 0 || !idx.some((r) => r.id === LIBRARIAN_ID)) await reindex(w
 reindexKnowledge(ws, db); // rebuild the KB graph index from kb/nodes/*.md (files are canon)
 reindexSkills(ws, db); // rebuild the skills index from skills/*.md (files are canon)
 const kbDrift = diffSources(ws, db);
-const startupNotice = (kbDrift.changed.length || kbDrift.deleted.length)
-  ? `kb: ${kbDrift.changed.length} changed / ${kbDrift.deleted.length} removed source(s) — run /kb sync`
-  : undefined;
+// Plan 04 Phase 5: rebuild the task index from files, then reconcile — a task left `running`/`queued`
+// means the process died mid-flight → mark `interrupted` and report it (report-and-ask per Phase 0;
+// auto-resume is deferred). The captain can inspect/cancel via /tasks.
+reindexTasks(ws, db);
+const interruptedTasks = reconcileTasks(ws, db);
+const notices: string[] = [];
+if (kbDrift.changed.length || kbDrift.deleted.length)
+  notices.push(`kb: ${kbDrift.changed.length} changed / ${kbDrift.deleted.length} removed source(s) — run /kb sync`);
+if (interruptedTasks.length)
+  notices.push(`tasks: ${interruptedTasks.length} interrupted last session (${interruptedTasks.slice(0, 3).map((t) => t.taskId).join(", ")}${interruptedTasks.length > 3 ? "…" : ""}) — /tasks to review`);
+const startupNotice = notices.length ? notices.join(" · ") : undefined;
 const roster = loadIndex(db);
 
 // Semantic KB embedder (optional; null ⇒ keyword+graph recall). Env-driven, decoupled from the chat
@@ -174,6 +183,7 @@ render(
   <App
     ws={ws} db={db} roster={roster}
     configDefaults={config.defaults}
+    backgroundRunCeiling={config.tasks?.maxBackgroundRuns}
     authSource={authSource}
     buildFromAuth={buildFromAuth}
     onLogin={onLogin}

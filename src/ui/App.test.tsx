@@ -20,7 +20,7 @@ import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "../sto
 import { listTraces } from "../store/trace";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { loadContext, loadLedger } from "../store/conversation";
-import { readTaskState, taskIdForRun } from "../store/task-state";
+import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { KbNode } from "../schemas/knowledge";
@@ -574,6 +574,51 @@ test("a non-streaming agent reply renders markdown (bold stripped of ** markers)
   expect(lastFrame()).not.toContain("**bold**"); // markdown was rendered, not shown raw
 });
 
+// ── Plan 04: background dispatch (dispatch_task → keep chatting → settle notification → /tasks) ──
+
+test("dispatch_task runs in the BACKGROUND: root returns immediately, the captain keeps chatting, then a settle notification + /tasks show the finished task", async () => {
+  const GOAL = "research the fusion timeline";
+  const dispatchCall = toolCall("dispatch_task", { to: "bgworker", goal: GOAL });
+  // One model, branching by prompt content, so the root run and the detached worker run each get a
+  // deterministic response no matter how their calls interleave. The worker is delayed so its
+  // completion clearly lands AFTER the foreground turns (proving dispatch never blocked the captain).
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("BACKGROUND-WORKER-IDENTITY")) { await sleep(300); return finalText("background work complete"); } // the detached worker run
+      if (s.includes("what else")) return finalText("still here — that task runs in the background");                    // a 2nd foreground chat turn
+      if (s.includes("task_bg_")) return finalText("kicked it off in the background");                                   // root, after dispatch returned a taskId
+      return dispatchCall;                                                                                                // root, first turn
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "bgworker", role: "Background worker", identity: "BACKGROUND-WORKER-IDENTITY — you do detached work.", tools: [] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "kick off a background research job", ENTER);
+  await waitFor(lastFrame, "dispatched");                       // the ⇢ dispatch breadcrumb
+  await waitFor(lastFrame, "kicked it off in the background");  // root replied WITHOUT waiting on the worker
+
+  // The captain keeps chatting while the background task is still running.
+  await send(stdin, "what else can you do", ENTER);
+  await waitFor(lastFrame, "still here");                       // a second turn ran while the task was in flight
+
+  // The background task settles → a REPL notification appears (notify + /tasks per Phase 0).
+  await waitFor(lastFrame, "background task", 4000);
+  expect(lastFrame()).toContain("completed");
+
+  // /tasks lists the finished background task (the index survived across the turns).
+  await send(stdin, "/tasks", ENTER);
+  await waitFor(lastFrame, GOAL);                               // the goal shows only in the /tasks list row
+
+  // …and it is durably recorded as a completed background task.
+  const rows = listTaskIndex(db, { activeOrBackground: true });
+  const bg = rows.find((r) => r.agent === "bgworker");
+  expect(bg?.status).toBe("completed");
+  expect(bg?.kind).toBe("background");
+});
+
 test("delegation with acceptance criteria: a twice-failed verdict is surfaced to the captain and recorded (Plan 06)", async () => {
   // root delegates WITH criteria; the independent checker (same mock model) fails both the first
   // attempt and the one bounded retry, so the result comes back with the failed verdict attached.
@@ -715,4 +760,110 @@ test("waterfall: ↓↑ navigate, ← collapses a run's subtree, → re-expands,
   await waitFor(lastFrame, "llm #1");
   await send(stdin, ESC);                             // Esc closes the inspector
   await waitForGone(lastFrame, "TRACE");
+});
+
+// ── Plan 04: routeSteer routing (Layer-1, through the real App) ──
+
+test("routeSteer: an @agent steer with no live run for that agent tells the captain (no silent misroute)", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(400); return finalText("root done"); }) as any });
+  const { props } = await setup({ model: slow });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "think a while", ENTER);
+  await waitFor(lastFrame, "thinking");                 // root run is live (REPL busy)
+  await send(stdin, "@ghost hurry up", ENTER);          // steer targeting an agent with no live run
+  await waitFor(lastFrame, "no active run for @ghost");
+});
+
+test("routeSteer: a plain steer while a run is live routes to the foreground root and reaches the model", async () => {
+  // The run iterates via a delayed tool call; the plain steer, queued mid-run, is injected before a
+  // later model call and the model echoes it — proving it reached THE foreground run (foregroundRootRef).
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("STEER-ECHO-TOKEN")) return finalText("acknowledged STEER-ECHO-TOKEN");
+      await sleep(80);
+      return toolCall("list_artifacts", {}); // keep the loop iterating so a later poll picks up the steer
+    }) as any,
+  });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "start a long task", ENTER);
+  await waitFor(lastFrame, "list_artifacts");                        // the run is live and mid-loop
+  await send(stdin, "STEER-ECHO-TOKEN please", ENTER);
+  await waitFor(lastFrame, "(steer)");                              // routeSteer accepted the plain steer
+  await waitFor(lastFrame, "acknowledged STEER-ECHO-TOKEN", 8000);  // it reached the foreground run
+});
+
+test("routeSteer: an @agent steer prefers the FOREGROUND run when the same agent is also live in a background run", async () => {
+  // "w" ends up live in TWO runs at once: a background dispatch (started first → first in the
+  // activeRuns Map) and a foreground @w turn. A naive first-match-by-Map-order would steer the
+  // BACKGROUND run; the fix prefers the foreground cascade, so the correction the captain types reaches
+  // the run they are watching. The foreground w run's reply renders to the main output; the background
+  // one's does not — so an echoed STEER-TOKEN in the frame proves the steer landed on the foreground run.
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("STEER-TOKEN")) return finalText("acknowledged STEER-TOKEN");        // whichever w run got the steer echoes it
+      if (s.includes("W-WORKER-IDENTITY")) { await sleep(60); return toolCall("list_artifacts", {}); } // both w runs loop, awaiting a steer
+      if (s.includes("task_bg_")) return finalText("root kicked it off");                  // root, after dispatch returned a taskId
+      return toolCall("dispatch_task", { to: "w", goal: "background loop" });              // root, first turn
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "w", role: "worker", identity: "W-WORKER-IDENTITY", tools: ["list_artifacts"] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "kick off bg", ENTER);
+  await waitFor(lastFrame, "⇢ dispatched");            // background w run started (first into the activeRuns Map)
+  await waitFor(lastFrame, "root kicked it off");       // root's turn finished — the REPL is free again
+  await send(stdin, "@w foreground task", ENTER);       // foreground w run (second into the activeRuns Map)
+  await waitFor(lastFrame, "esc to cancel");            // the foreground @w run is live (REPL busy)
+  await sleep(150);                                      // let the foreground run iterate at least once
+  await send(stdin, "@w STEER-TOKEN", ENTER);           // steer @w while BOTH w runs are live
+  await waitFor(lastFrame, "(steer @w)");               // routeSteer accepted it
+  await waitFor(lastFrame, "acknowledged STEER-TOKEN", 8000); // the FOREGROUND run echoed → correct routing
+});
+
+// ── Plan 04: concurrent approval requests QUEUE (never clobber) ──
+
+test("concurrent approval requests queue instead of clobbering: both are answered and both runs resolve", async () => {
+  // A background dispatched run and the foreground run both block on the captain at once. Before the
+  // fix, the second setPending overwrote the first — the first request's resolver was lost forever and
+  // its run hung. Now they queue: answer the head, the next surfaces, and BOTH promises resolve.
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      // Discriminate root by MESSAGE content ("kick off" — its own user turn; agent identities leak via
+      // the roster block, so those aren't reliable). Each ask_human has ≥2 options (schema minimum) and
+      // BLOCKS on the card; the run only reaches its "done" branch once the card is actually answered
+      // (the question text then sits in history, proving the approval resolved — not auto-progressed).
+      if (s.includes("kick off")) {
+        if (s.includes("FG question?")) return finalText("root done");           // FG card was answered → finish
+        if (s.includes("task_bg_")) return toolCall("ask_human", { question: "FG question?", options: ["ok", "no"] });
+        return toolCall("dispatch_task", { to: "bgworker", goal: "detached work" });
+      }
+      // the background worker's detached run:
+      if (s.includes("BG question?")) return finalText("bg worker done");         // BG card was answered → finish
+      await sleep(150);                                                            // land after the FG ask, so BOTH queue together
+      return toolCall("ask_human", { question: "BG question?", options: ["ok", "no"] });
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "bgworker", role: "bg", identity: "BG-WORKER-IDENTITY", tools: ["ask_human"] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "kick off", ENTER);
+  await waitFor(lastFrame, "FG question?");             // root dispatched, then asked → the foreground card shows first
+  await sleep(300);                                      // the background worker's ask_human lands and QUEUES behind it
+  await send(stdin, "1");                               // answer the head (foreground) → picks fg-answer
+  await waitFor(lastFrame, "BG question?");             // the SECOND (background) approval was NOT clobbered — it surfaces
+  await send(stdin, "1");                               // answer it → picks bg-answer
+  await waitFor(lastFrame, "root done");                // the foreground run's promise resolved (not lost)
+  await waitFor(lastFrame, "background task", 6000);    // the background run settled → its promise resolved too
+  const bg = listTaskIndex(db, { activeOrBackground: true }).find((r) => r.agent === "bgworker");
+  expect(bg?.status).toBe("completed");                // both runs finished cleanly
 });

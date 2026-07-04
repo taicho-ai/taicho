@@ -739,3 +739,172 @@ test("non-subscription checker prices its real spend: runChecker returns a USD c
   expect(r.costNote).toBeUndefined();   // priced run ⇒ no subscription note
   expect(r.tokens).toBeGreaterThan(0);
 });
+
+// ---------------------------------------------------------------------------
+// Plan 04 — Async & parallel: dispatch_task wiring, guards, steer routing, recovery
+// ---------------------------------------------------------------------------
+
+/** A single model response carrying MULTIPLE tool calls — the AI SDK runs their execute()s
+ *  concurrently (interleaved at await points), which is exactly the shared-mutable seam to audit. */
+const calls = (specs: [string, object][]) =>
+  ({ content: specs.map(([name, input], i) => ({ type: "tool-call", toolCallId: `c${i}`, toolName: name, input: JSON.stringify(input) })),
+     finishReason: { unified: "tool-calls", raw: "tool_use" }, usage }) as unknown as LanguageModelV3GenerateResult;
+
+test("dispatch_task hands the resolved child agent to the host scheduler and returns immediately (fire-and-forget, not a blocking child run)", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You dispatch.", tools: ["dispatch_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "worker", role: "worker", identity: "You work.", tools: [], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  const dispatched: Array<{ agentId: string; goal: string; parentRunId: string }> = [];
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("dispatch_task", { to: "worker", goal: "do it later" }),
+    text("boss moved on"),
+  ) as any });
+  const deps = makeDeps({ ws, db, model, dispatch: (o) => { dispatched.push({ agentId: o.agent.id, goal: o.goal, parentRunId: o.parentRunId }); return { taskId: "task_bg_1" }; } });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.text).toBe("boss moved on");            // the parent did NOT block on the child
+  expect(res.trace.delegatedOut.length).toBe(0);     // dispatch is not a synchronous delegation edge
+  expect(dispatched.length).toBe(1);
+  expect(dispatched[0].agentId).toBe("worker");      // the host got the RESOLVED child agent
+  expect(dispatched[0].goal).toBe("do it later");
+  expect(dispatched[0].parentRunId).toBe(res.runId); // provenance: which run dispatched it
+  expect(res.trace.notes.some((n) => /dispatched/i.test(n))).toBe(true);
+});
+
+test("two dispatch_task calls in ONE turn each consume a work item; the over-budget one is refused (interleaved check-then-act is safe)", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You dispatch.", tools: ["dispatch_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 1 } });
+  putAgent(ws, db, { id: "worker", role: "worker", identity: "You work.", tools: [], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  let n = 0;
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    calls([["dispatch_task", { to: "worker", goal: "a" }], ["dispatch_task", { to: "worker", goal: "b" }]]),
+    text("done"),
+  ) as any });
+  const dispatched: string[] = [];
+  const deps = makeDeps({ ws, db, model, dispatch: (o) => { dispatched.push(o.goal); return { taskId: `task_${n++}` }; } });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(dispatched.length).toBe(1);                                     // only the first (within budget) fired
+  expect(res.trace.notes.some((n) => /work item/i.test(n))).toBe(true); // the 2nd was refused, not silently dropped
+});
+
+test("dispatch_task is refused once the per-request run ceiling is hit (same guard as delegate_task)", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You dispatch.", tools: ["dispatch_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "worker", role: "worker", identity: "leaf", tools: [], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(call("dispatch_task", { to: "worker", goal: "x" }), text("ok")) as any });
+  let dispatchCalled = 0;
+  const deps = makeDeps({ ws, db, model, runCounter: { n: 50 }, dispatch: () => { dispatchCalled++; return { taskId: "t" }; } });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(dispatchCalled).toBe(0);                                                   // the host was never asked to start a run
+  expect(res.trace.notes.some((n) => /max runs per request/i.test(n))).toBe(true);
+});
+
+test("dispatch_task cleanly reports when no scheduler is wired (headless/unit context)", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You dispatch.", tools: ["dispatch_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "worker", role: "w", identity: "w", tools: [], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(call("dispatch_task", { to: "worker", goal: "x" }), text("done")) as any });
+  const deps = makeDeps({ ws, db, model }); // no `dispatch`
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("completed"); // the run still finishes; the tool just reported unavailability
+});
+
+test("A→B→A dispatch cycle is REFUSED: the detached run's cycle guard spans the dispatch hop (ancestry is threaded)", async () => {
+  // Before the fix, a detached dispatch started with a fresh depth/ancestry/runCounter, so delegationGuard's
+  // cycle check never saw the parent chain across dispatch hops — two agents with dispatch_task + mutual
+  // canDelegateTo could ping-pong A→B→A unboundedly. Threading the dispatching run's ancestry into the
+  // detached executeRun makes the cross-agent cycle guard span the hop.
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "a", role: "a", identity: "You are A.", tools: ["dispatch_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "b", role: "b", identity: "You are B.", tools: ["dispatch_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  // Branch on the GOAL text (unambiguous: it appears only in the run that received it): A dispatches to
+  // B (goal GOAL-TO-B); B receives GOAL-TO-B and tries to dispatch back to A; after any dispatch RESULT
+  // ("task_bg_") or a refusal ("cycle") the run wraps up.
+  const model = new MockLanguageModelV3({ doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+    const s = JSON.stringify(prompt);
+    if (s.includes("task_bg_") || s.includes("cycle")) return text("wrapped up");
+    if (s.includes("GOAL-TO-B")) return call("dispatch_task", { to: "a", goal: "GOAL-TO-A" }); // this is B → back to A
+    return call("dispatch_task", { to: "b", goal: "GOAL-TO-B" });                              // this is A → to B
+  }) as any });
+
+  const detached: ReturnType<typeof executeRun>[] = [];
+  let dispatches = 0;
+  let deps: ReturnType<typeof makeDeps>;
+  // Mimic App.tsx's real dispatch closure: start a detached executeRun, THREADING the parent ancestry so
+  // the cycle guard spans the hop, but keeping budgets (depth/runCounter) reset — a dispatch stays an
+  // independent request. A hard cap bounds a would-be-runaway if the fix regresses.
+  const dispatch: NonNullable<Parameters<typeof makeDeps>[0]["dispatch"]> = (o) => {
+    if (dispatches >= 5) return { error: "test safety cap" };
+    dispatches++;
+    const taskId = `task_bg_${dispatches}`;
+    detached.push(executeRun(deps, {
+      agent: o.agent, messages: [{ role: "user", content: o.goal }],
+      brief: { from: o.parentAgentId, goal: o.goal, fromRun: o.parentRunId },
+      triggeredBy: taskId, ancestry: [...o.parentAncestry, o.parentAgentId],
+    }));
+    return { taskId };
+  };
+  deps = makeDeps({ ws, db, model, dispatch });
+  const a = await loadAgent(ws, "a");
+  const res = await executeRun(deps, { agent: a, messages: [{ role: "user", content: "kickoff" }], triggeredBy: "user" });
+  expect(res.trace.notes.some((n) => /dispatched/i.test(n))).toBe(true); // A dispatched to B
+  const runs = await Promise.all(detached);
+  expect(dispatches).toBe(1);                                            // ONLY A→B fired; B→A was refused BEFORE dispatch
+  const bRun = runs.find((r) => r.trace.agent === "b")!;
+  expect(bRun.trace.notes.some((n) => /cycle/i.test(n))).toBe(true);     // B→A refused by the cycle guard
+});
+
+test("run.ts routes steering per-run: pollSteerFor is called with THIS run's id/agent and its steer reaches the model", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  let seen: { runId: string; agentId: string; triggeredBy: string } | null = null;
+  let fired = false;
+  const pollSteerFor = (info: { runId: string; agentId: string; triggeredBy: string }) => {
+    seen = info;
+    if (!fired) { fired = true; return null; }
+    return "actually, wrap it up";
+  };
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(call("write_artifact", { topicSlug: "x", markdown: "y" }), text("done")) as any });
+  const deps = makeDeps({ ws, db, model, pollSteerFor });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(seen!.runId).toBe(res.runId);        // the loop polled THIS run's queue (not a global one)
+  expect(seen!.agentId).toBe("writer");
+  expect(seen!.triggeredBy).toBe("user");
+  const secondPrompt = JSON.stringify((model as any).doGenerateCalls[1].prompt);
+  expect(secondPrompt).toContain("actually, wrap it up"); // the routed steer was injected before the 2nd call
+});
+
+test("onRunEnd fires with the run's outcome so the host can clean up its routing table", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const ended: Array<{ runId: string; agent: string; outcome: string }> = [];
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("done")) as any });
+  const deps = makeDeps({ ws, db, model, onRunEnd: (i) => ended.push({ runId: i.runId, agent: i.agent, outcome: i.outcome }) });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
+  expect(ended).toEqual([{ runId: res.runId, agent: "writer", outcome: "completed" }]);
+});
+
+test("recovery: run.ts writes an incremental transcript AND a resume checkpoint during the run", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(call("write_artifact", { topicSlug: "x", markdown: "y" }), text("done")) as any });
+  const deps = makeDeps({ ws, db, model });
+  const writer = await loadAgent(ws, "writer");
+  const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  const dir = paths.runRecordDir(ws, res.runId);
+  // transcript flushed live (model_request/response/tool_call all present), not just at end
+  const tr = readFileSync(join(dir, "transcript.jsonl"), "utf8");
+  expect(tr).toContain("model_request");
+  expect(tr).toContain("tool_call");
+  // checkpoint written with the loop's message array — the resume point
+  expect(existsSync(join(dir, "checkpoint.json"))).toBe(true);
+  const cp = JSON.parse(readFileSync(join(dir, "checkpoint.json"), "utf8"));
+  expect(cp.runId).toBe(res.runId);
+  expect(Array.isArray(cp.messages)).toBe(true);
+  expect(cp.iteration).toBeGreaterThan(0);
+});

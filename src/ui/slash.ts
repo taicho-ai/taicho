@@ -14,6 +14,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "help", summary: "list commands" },
   { name: "agents", summary: "list the squad" },
   { name: "runs", summary: "list runs", usage: "[agent]" },
+  { name: "tasks", summary: "list / cancel background tasks", usage: "[cancel <id>]" },
   { name: "trace", summary: "open the waterfall inspector (no arg = latest run)", usage: "[id]" },
   { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>", requiresArg: true },
   { name: "policies", summary: "list an agent's coaching notes", usage: "<agent>", requiresArg: true },

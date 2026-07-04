@@ -9,6 +9,7 @@ import type { AgentDef } from "../schemas/agent";
 import type { RunContext } from "./run";
 import type { McpManager } from "./mcp/manager";
 import { paths } from "../store/files";
+import { readTaskState } from "../store/task-state";
 import { saveArtifact, readArtifact, readArtifactBody, listArtifacts } from "../store/artifacts";
 import { artifactHandle } from "../schemas/artifact";
 import { mergeDraft } from "./draft";
@@ -252,6 +253,77 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           ctx.notes.push(`delegate failed: ${msg}`);
           return { error: msg };
         }
+      },
+    });
+
+  // Plan 04 — background delegation. dispatch_task fires-and-forgets (returns a taskId immediately);
+  // check_task / await_task follow up. Results come back BY REFERENCE (summary + handles), never the
+  // inlined payload. Requires a host scheduler (the REPL wires ctx.dispatchTask); when unwired the
+  // tool cleanly reports it (a headless/unit context has no background runner).
+  if (agent.tools.includes("dispatch_task"))
+    set.dispatch_task = tool({
+      description:
+        "Kick a goal off to another agent in the BACKGROUND and keep working — fire-and-forget. Returns " +
+        "a taskId immediately; the task runs off-turn. Use this (instead of delegate_task, which BLOCKS " +
+        "until the child returns) when you don't need the result right now — e.g. long research you'll " +
+        "check on later. Follow up with check_task(taskId) for status or await_task(taskId) to block on " +
+        "it when you finally need it. Results come back BY REFERENCE (a summary + artifact handles), never " +
+        "inlined. Hand inputs over with `inputArtifacts` and set `criteria` exactly as for delegate_task.",
+      inputSchema: z.object({
+        to: z.string(),
+        goal: z.string(),
+        context: z.string().optional(),
+        criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
+        inputArtifacts: z.array(z.string()).optional().describe("artifact handles ('id' or 'id@vN') to hand to the task by reference"),
+      }),
+      execute: async ({ to, goal, context, criteria, inputArtifacts }) => {
+        if (!ctx.dispatchTask) return { error: "background dispatch is not available in this context — use delegate_task instead" };
+        const budgetMsg = () => `work item budget (${agent.budgets.maxWorkItemsPerRequest}) exhausted`;
+        // A dispatch consumes a work item like a delegation — config disposes fan-out either way.
+        ctx.workItems.n += 1;
+        if (ctx.workItems.n > agent.budgets.maxWorkItemsPerRequest) {
+          ctx.notes.push(`dispatch refused: ${budgetMsg()}`);
+          return { error: budgetMsg() };
+        }
+        const guard = ctx.delegationGuard(to);
+        if (!guard.ok) { ctx.notes.push(`dispatch refused: ${guard.error}`); return { error: guard.error }; }
+        // Resolve input handles up front; drop (and note) dead refs rather than dispatch a broken brief.
+        const resolved: string[] = [], dropped: string[] = [];
+        for (const h of inputArtifacts ?? []) (readArtifact(ctx.ws, h) ? resolved : dropped).push(h);
+        if (dropped.length) ctx.notes.push(`dispatch: dropped unknown input artifact(s) ${dropped.join(", ")}`);
+        const r = await ctx.dispatchTask({ to, goal, context, criteria, inputArtifacts: resolved });
+        if ("error" in r) { ctx.notes.push(`dispatch failed: ${r.error}`); return r; }
+        ctx.notes.push(`dispatched ${r.taskId} → ${to}`);
+        return { taskId: r.taskId, status: "queued", to, note: `running in background — check_task("${r.taskId}") for status, or await_task to block on it` };
+      },
+    });
+
+  if (agent.tools.includes("check_task"))
+    set.check_task = tool({
+      description: "Check a background task (from dispatch_task) WITHOUT blocking: returns its status (queued/running/completed/failed/interrupted/cancelled) plus a short summary and result handle when done. Reference-only — never the full payload; pull artifacts with read_artifact.",
+      inputSchema: z.object({ taskId: z.string() }),
+      execute: async ({ taskId }) => {
+        const t = readTaskState(ctx.ws, taskId);
+        if (!t) return { error: `no task "${taskId}"` };
+        return { taskId, status: t.status, to: t.agent, summary: t.summary ?? null, resultRef: t.resultRef ?? null, runId: t.rootRunId || null };
+      },
+    });
+
+  if (agent.tools.includes("await_task"))
+    set.await_task = tool({
+      description: "BLOCK until a background task settles (bounded by a timeout), then return its final status + summary + result handle. Use when you dispatched work earlier and now genuinely need it before continuing. Reference-only — never the inlined payload.",
+      inputSchema: z.object({
+        taskId: z.string(),
+        timeoutMs: z.number().int().positive().max(600000).optional().describe("give up waiting after this many ms (default 120000)"),
+      }),
+      execute: async ({ taskId, timeoutMs }) => {
+        if (!ctx.awaitTask) {
+          // No scheduler wired: fall back to reading the record (already-settled tasks still resolve).
+          const t = readTaskState(ctx.ws, taskId);
+          if (!t) return { error: `no task "${taskId}"` };
+          return { taskId, status: t.status, summary: t.summary ?? null, resultRef: t.resultRef ?? null };
+        }
+        return { taskId, ...(await ctx.awaitTask(taskId, timeoutMs)) };
       },
     });
 

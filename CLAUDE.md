@@ -35,6 +35,16 @@ issues tsc won't).
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.
   - `run.ts` — orchestrates ONE run: assemble prompt → build tools → `runLoop` → write trace.
     `RunDeps` are the seams; `executeRun` recurses for delegation (depth/cycle/run caps).
+  - `tasks.ts` — Plan 04 async/parallel. `TaskScheduler` is a per-agent concurrency semaphore over
+    **detached** background runs (`dispatch_task` → `{taskId}` immediately; cascade runs off-turn via
+    the same `executeRun`, `triggeredBy: taskId`). `budgets.maxConcurrentRuns` caps how many of an
+    agent's tasks run at once; extras sit `queued` and the queue pumps when a slot frees. `check_task`
+    / `await_task` return status+summary+handle (reference hand-off, never the payload). The REPL owns
+    the scheduler + settle/notify; the engine exposes `RunDeps.dispatch` / `awaitTask`. Steering is
+    per-run (`pollSteerFor` keyed by runId — plain steer → foreground root, `@agent` → that agent's
+    live run). `loop.ts` flushes `transcript.jsonl` incrementally (`onEvent`) + checkpoints the
+    message array per iteration (`checkpoint`) so a crash is legible; boot reconciles `tasks/`
+    (`running`/`queued` → `interrupted`, report-and-ask).
   - `verification.ts` — the delegation checker (Plan 06): when `delegate_task` carries `criteria`,
     `runChecker` runs ONE independent model call (child output + criteria → `{pass, reasons[]}`) on
     the delegating agent's resolved model, via `runLoop` with an empty toolset. `tools.ts` owns the
@@ -46,7 +56,9 @@ issues tsc won't).
   - `auth/` — OAuth PKCE login, token refresh, profile store, constants, status.
   - `prompt.ts`, `tools.ts`, `registry.ts`, `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
 - **`src/store/`** — persistence: `config.ts` (provider/model/auth resolution + `taicho.yaml`),
-  `db.ts` (SQLite), `roster.ts`, `thread.ts`, `trace.ts`, `policy.ts`, `files.ts`, `vectors.ts`.
+  `db.ts` (SQLite), `roster.ts`, `thread.ts`, `trace.ts`, `policy.ts`, `files.ts`, `vectors.ts`,
+  `task-state.ts` (persistent task queue: `tasks/*.json` canon + a rebuildable `tasks` DB index;
+  chat turns + background dispatches, `reconcileTasks`/`reindexTasks` on boot).
 - **`src/coaching/`** — corrections → durable, conditional, approval-gated policy notes.
 - **`src/schemas/`** — zod schemas (`agent`, `brief`, `policy`, `trace`).
 
