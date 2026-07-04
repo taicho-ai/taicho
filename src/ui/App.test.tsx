@@ -109,6 +109,19 @@ async function waitForGone(frame: () => string | undefined, sub: string, timeout
   }
 }
 
+// Gate on a whole-frame predicate (not just one substring) so an assertion made across SEVERAL live
+// surfaces waits until they've ALL rendered — streaming panes settle over multiple frames, so reading
+// synchronously right after one label appears is a race under load.
+async function waitForPred(frame: () => string | undefined, pred: (f: string) => boolean, label: string, timeout = 8000): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    const f = frame() ?? "";
+    if (pred(f)) return;
+    if (Date.now() - start > timeout) throw new Error(`timed out waiting for ${label}.\nLast frame:\n${f}`);
+    await sleep(15);
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mkNode = (over: object) =>
   KbNode.parse({ id: "kb_" + Math.random().toString(36).slice(2, 8), title: "t", content: "c", created: new Date().toISOString(), ...over });
@@ -815,12 +828,20 @@ test("Plan 10 Phase 4: a pane appears on a delegation, streams the tool line wit
 
   await waitFor(lastFrame, "root delegating", 8000); // the PARENT pane shows delegate_task in flight (a pane-only status)
   const frame = () => lastFrame() ?? "";
-  // the pane HEADER carries the current tool + its argsPreview on one line
-  const header = frame().split("\n").find((l) => l.includes("root delegating"));
-  expect(header).toContain("fusion");
+  const headerLine = (f: string) => f.split("\n").find((l) => l.includes("root delegating") && l.includes("fusion"));
   // the pane BODY streams the tool line with its argsPreview ("→ …", distinct from the "↳" scrollback breadcrumb)
-  const body = frame().split("\n").find((l) => l.includes("→ delegate_task") && l.includes("fusion") && !l.includes("↳"));
-  expect(body).toBeTruthy();
+  const bodyLine = (f: string) => f.split("\n").find((l) => l.includes("→ delegate_task") && l.includes("fusion") && !l.includes("↳"));
+  // These live surfaces settle over separate frames; gate on ALL of them together to kill the render-
+  // timing race BEFORE asserting (the assertion's intent is unchanged — every structural check remains).
+  await waitForPred(
+    lastFrame,
+    (f) => !!headerLine(f) && !!bodyLine(f) && f.includes("writer thinking") && f.includes("▎"),
+    "the parent tool line (header + body with argsPreview) + the live child pane + split-pane accent",
+    8000,
+  );
+  // the pane HEADER carries the current tool + its argsPreview on one line
+  expect(headerLine(frame())).toContain("fusion");
+  expect(bodyLine(frame())).toBeTruthy();
   expect(frame()).toContain("writer thinking");      // the CHILD is live in its own pane at the same time
   expect(frame()).toContain("▎");                    // left-accent split panes actually rendered
 

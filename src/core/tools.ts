@@ -14,7 +14,7 @@ import { readTaskState } from "../store/task-state";
 import { saveArtifact, readArtifact, readArtifactBody, listArtifacts } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { recordVerificationFailure } from "../coaching/patterns";
-import { artifactHandle } from "../schemas/artifact";
+import { artifactHandle, parseHandle } from "../schemas/artifact";
 import { mergeDraft } from "./draft";
 import { scrapeUrl } from "./firecrawl";
 import { McpServerConfig } from "../store/config";
@@ -33,6 +33,21 @@ import { argsPreview, capJson } from "./instrument";
 // uncapped read can't funnel a large payload back into context (the pollution this plan exists to kill).
 const READ_ARTIFACT_CAP = 4000;
 const READ_ARTIFACT_HARD_MAX = 20000;
+
+/** Reduce a list of artifact handles to the LATEST version per logical id (highest @vN). save_artifact
+ *  pushes a NEW versioned handle on every save, so a child that saves the same id twice hands back
+ *  [out@v1, out@v2]. A verification verdict judged the child's FINAL output, so it must anchor to the
+ *  newest version ONLY — annotating out@v1 too would smear a FAIL onto a version the checker never saw. */
+function latestHandlePerId(handles: string[]): string[] {
+  const best = new Map<string, { handle: string; version: number }>();
+  for (const h of handles) {
+    const { id, version } = parseHandle(h);
+    const v = version ?? 0; // trace handles are always id@vN, but a bare id sorts below any concrete version
+    const cur = best.get(id);
+    if (!cur || v > cur.version) best.set(id, { handle: h, version: v });
+  }
+  return [...best.values()].map((b) => b.handle);
+}
 
 export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
   const set: ToolSet = {};
@@ -258,9 +273,22 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           // A passing verdict does neither; either way the parent still gets the verdict attached below.
           const surface = (v: VerificationVerdict, c: RunResult) => {
             if (!v.pass) {
-              // Prefer the child's OUTPUT artifacts; else the INPUT handles it was revising. annotateArtifact
-              // pins a bare/`id@vN` handle to a concrete version, so the verdict anchors to the exact bytes it judged.
-              const targets = c.trace.artifacts.length ? c.trace.artifacts : resolved;
+              // Anchor the FAIL to the exact bytes the checker judged, WITHOUT smearing onto stale or
+              // merely-referenced handles. annotateArtifact pins a handle to a concrete version, so:
+              //  - child produced output → its LATEST version PER id (a child that saved out@v1 then
+              //    out@v2 is judged on out@v2; v1 must NOT also collect the verdict);
+              //  - child produced nothing → the input(s) it was REVISING (they carry OPEN feedback), not
+              //    every reference it was handed (a spec/source it only read shouldn't collect a FAIL);
+              //    absent any open-feedback signal, fall back to the single most-recent input, never all.
+              let targets: string[];
+              if (c.trace.artifacts.length) {
+                targets = latestHandlePerId(c.trace.artifacts);
+              } else {
+                const revised = resolved.filter((h) => {
+                  try { return listAnnotations(ctx.ws, h, { status: "open" }).length > 0; } catch { return false; }
+                });
+                targets = revised.length ? latestHandlePerId(revised) : resolved.slice(-1);
+              }
               for (const h of targets) {
                 try {
                   const ann = annotateArtifact(ctx.ws, {

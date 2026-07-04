@@ -51,3 +51,16 @@ export function deletePolicy(ws: string, agentId: string, polId: string): boolea
   rmSync(f);
   return true;
 }
+
+/** The captain's approval gate for a `proposed` note. Flips it to `approved` (the only status run.ts
+ *  applies) and persists. Returns the updated note, or null if no such note for that agent. Idempotent:
+ *  an already-approved note is returned unchanged. Addressed by (agentId, polId), like deletePolicy —
+ *  a repeated-failure coaching proposal (coaching/patterns.ts) is inert until it passes through here. */
+export function approvePolicy(ws: string, agentId: string, polId: string): PolicyNote | null {
+  const cur = readPolicy(ws, agentId, polId);
+  if (!cur) return null;
+  if (cur.status === "approved") return cur;
+  const updated = PolicyNote.parse({ ...cur, status: "approved" });
+  writePolicy(ws, updated);
+  return updated;
+}

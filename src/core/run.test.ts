@@ -734,6 +734,35 @@ test("criteria that fails twice surfaces the result WITH the failed verdict atta
   expect(tr).toContain("still missing Y");
 });
 
+test("a FAILED verdict annotates only the child's LATEST output version — a same-id multi-save doesn't smear (PR #20)", async () => {
+  const { ws, db } = await boot();
+  // workItems:1 ⇒ the failing check's retry is refused, so exactly one child run (which saves the same
+  // id TWICE → out@v1, out@v2) and one verdict. The FAIL must anchor to out@v2 only, never smear onto v1.
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You delegate.", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 10, maxWorkItemsPerRequest: 1 } });
+  putAgent(ws, db, { id: "worker", role: "worker", identity: "You write.", tools: ["save_artifact"], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Z" }), // boss (no retry: workItems=1)
+    call("save_artifact", { id: "out", title: "Out", body: "draft one" }),                 // worker → out@v1
+    call("save_artifact", { id: "out", title: "Out", body: "draft two" }),                 // worker → out@v2 (SAME id)
+    text("worker done"),                                                                    // worker final
+    text('{"pass": false, "reasons": ["missing Z"]}'),                                      // checker → FAIL
+    text("boss done"),                                                                      // boss final
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.verification.length).toBe(1);
+  expect(res.trace.verification[0].verdict.pass).toBe(false);
+  // the child produced both out@v1 and out@v2 (proving the multi-save setup is real)…
+  const worker = readTrace(ws, res.trace.delegatedOut[0]);
+  expect(worker.artifacts).toEqual(["out@v1", "out@v2"]);
+  // …but the FAIL lands on the LATEST version ONLY — the checker judged the final output, not the draft.
+  const v2 = listAnnotations(ws, "out@v2");
+  expect(v2.length).toBe(1);
+  expect(v2[0].kind).toBe("verification");
+  expect(v2[0].verdict?.pass).toBe(false);
+  expect(listAnnotations(ws, "out@v1").length).toBe(0); // NOT smeared onto the superseded version
+});
+
 test("the verification retry consumes a work item — a budget-exhausted retry is refused, result surfaced with the failed verdict", async () => {
   const { ws, db } = await boot();
   bossAndWorker(ws, db, { workItems: 1 }); // boss may delegate ONCE; the retry needs a 2nd → refused

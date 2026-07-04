@@ -20,7 +20,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "trace", summary: "open the waterfall inspector (no arg = latest run)", usage: "[id]" },
   { name: "view", summary: "switch the live view (persists)", usage: "bar|panes|both" },
   { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>", requiresArg: true },
-  { name: "policies", summary: "list an agent's coaching notes", usage: "<agent>", requiresArg: true },
+  { name: "policies", summary: "list an agent's coaching notes; approve a proposed one", usage: "<agent> | approve <pol_id>", requiresArg: true },
   { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>", requiresArg: true },
   { name: "mcp", summary: "manage MCP servers", usage: "[list|add|remove|login] …" },
   { name: "kb", summary: "manage the knowledgebase", usage: "sync | list [filter] | forget <filter> | reindex" },
@@ -51,6 +51,8 @@ export interface SlashDeps {
   readTrace: (id: string) => RunTrace;
   listPolicies: (agentId: string) => PolicyNote[];
   deletePolicy: (agentId: string, polId: string) => boolean;
+  /** Approve a `proposed` note by id (search is caller-scoped across agents). Null ⇒ no such note. */
+  approvePolicy: (polId: string) => PolicyNote | null;
 }
 
 const sys = (text: string): Line => ({ kind: "system", text });
@@ -78,7 +80,20 @@ export function runSlash(cmd: string, arg: string, deps: SlashDeps): Line[] {
   // NOTE: `/trace` is handled interactively in App.tsx (it opens the TraceInspector over the derived
   // span tree — see deriveTrace); it can't live here because that needs workspace file access.
   if (cmd === "policies") {
-    const notes = deps.listPolicies(arg);
+    const parts = arg.split(/\s+/).filter(Boolean);
+    // `/policies approve <pol_id>` — the captain gate that flips a `proposed` note (e.g. a repeated-
+    // failure coaching proposal) to `approved`, the only status run.ts applies. Id-only: the ⚑ proposal
+    // message hands the captain the id, and approvePolicy locates its owning agent.
+    if (parts[0] === "approve") {
+      const polId = parts[1];
+      if (!polId) return [sys("  usage: /policies approve <pol_id>")];
+      const note = deps.approvePolicy(polId);
+      if (!note) return [sys(`  no proposed policy "${polId}" — check the id (⚑ message or /policies <agent>)`)];
+      return [sys(`  ✓ approved ${note.id} for ${note.agent} — WHEN ${note.when}: ${note.do}`)];
+    }
+    const agentId = parts[0];
+    if (!agentId) return [sys("  usage: /policies <agent>  ·  /policies approve <pol_id>")];
+    const notes = deps.listPolicies(agentId);
     if (!notes.length) return [sys("  (no policies)")];
     return notes.map((n) => sys(`  [${n.id}] (${n.status}) WHEN ${n.when}: ${n.do}`));
   }
