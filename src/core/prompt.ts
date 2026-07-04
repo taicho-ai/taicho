@@ -30,7 +30,7 @@ export const ROOT_OPERATING_CONTEXT =
   `- dispatch_task is FIRE-AND-FORGET: it returns a taskId immediately and the work runs in the background. Use it for long jobs the captain shouldn't wait behind — then check_task(taskId) for status, or await_task(taskId) when you finally need the result. Either way results come back BY REFERENCE (a summary + artifact handles), never dumped into the conversation.\n` +
   `\n` +
   `**The captain drives via slash commands** — point them to the right one when it helps:\n` +
-  `- /agents (list the squad), /runs [agent], /trace [id|task_<id>] (waterfall inspector; no arg = latest run, task_<id> = a whole task), /view [bar|panes|both|waterfall] (waterfall = the live span tree), /tasks (background tasks; /tasks cancel <id>)\n` +
+  `- /agents (list the squad), /runs [agent], /trace [id|task_<id>] (waterfall inspector; no arg = latest run, task_<id> = a whole task), /view [bar|panes|both|waterfall|stream] (waterfall = the live span tree, stream = the rolling stream tail), /tasks (background tasks; /tasks cancel <id>)\n` +
   `- /teach <agent> <correction>, /policies <agent>, /forget <agent> <pol_id> (standing instructions)\n` +
   `- /kb sync|list|forget|reindex (knowledgebase), /skills list|show|remove|reindex\n` +
   `- /mcp (MCP servers), /status, /login openai, /logout openai, /help\n` +

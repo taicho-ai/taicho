@@ -38,16 +38,19 @@ const RESERVED_ROWS = 6;  // rows kept for the banner/scrollback/bar/input when 
 const RULE = "▎";         // the left-accent that reads as a pane's column edge (cheap vs an Ink border)
 
 /** Pure layout decision shared by the App and its tests: which surfaces show for a mode + terminal
- *  size. Panes hide in `bar`/`waterfall` mode and whenever the terminal is too small (degrade to
- *  bar-only); the `waterfall` mode (Plan 02 Phase 6) shows the redrawing live span tree in place of
- *  the panes; the bar hides in `panes`/`waterfall` mode on a terminal large enough to render them. */
-export function resolveLayout(viewMode: ViewMode, columns: number, rows: number): { showPanes: boolean; showBar: boolean; showWaterfall: boolean } {
+ *  size. Panes hide in `bar`/`waterfall`/`stream` mode and whenever the terminal is too small (degrade
+ *  to bar-only); the `waterfall` mode (Plan 02 Phase 6) shows the redrawing live span tree in place of
+ *  the panes; the `stream` mode (Plan 13) shows the rolling per-agent stream tail in place of the panes;
+ *  the bar stays only in `bar`/`both` (and everywhere when too small to render a richer surface). */
+export function resolveLayout(viewMode: ViewMode, columns: number, rows: number): { showPanes: boolean; showBar: boolean; showWaterfall: boolean; showStream: boolean } {
   const tooSmall = columns < MIN_PANE_COLS || rows < MIN_PANE_ROWS;
-  const showWaterfall = viewMode === "waterfall" && !tooSmall;
   return {
-    showWaterfall,
-    showPanes: viewMode !== "bar" && viewMode !== "waterfall" && !tooSmall,
-    showBar: viewMode === "waterfall" ? tooSmall : viewMode !== "panes" || tooSmall,
+    showWaterfall: viewMode === "waterfall" && !tooSmall,
+    showStream: viewMode === "stream" && !tooSmall,
+    showPanes: viewMode !== "bar" && viewMode !== "waterfall" && viewMode !== "stream" && !tooSmall,
+    // Bar is the complete summary; it owns the surface in bar/both, and is the fallback whenever a
+    // richer surface (panes/waterfall/stream) can't render because the terminal is too small.
+    showBar: viewMode === "bar" || viewMode === "both" || tooSmall,
   };
 }
 

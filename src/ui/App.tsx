@@ -6,6 +6,7 @@ import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCar
 import { QuestionCard } from "./QuestionCard";
 import { StatusBar } from "./StatusBar";
 import { SquadPanes, resolveLayout, type PaneEntry, type PaneFeedMap } from "./SquadPanes";
+import { RollingStream, MAX_ROLL_LINES, type StreamFeedMap } from "./RollingStream";
 import { TraceInspector } from "./TraceInspector";
 import { LiveWaterfall } from "./LiveWaterfall";
 import { parseInput } from "./input";
@@ -256,6 +257,28 @@ export function App(props: {
     paneFeedRef.current = next;
     setPaneFeed(next);
   };
+  // Plan 13: per-run streamed-text tail for the rolling stream view (`/view stream`). Built off the
+  // SAME `delta` events the status map reads — no new engine plumbing. streamFeedRef is the
+  // authoritative accumulator (bounded to the last few lines; dodges the rapid onStep stream's stale
+  // closures like statusRef); the snapshot state is pushed only when `stream` is the active surface, so
+  // every other mode pays nothing extra per delta. Display-only: it never touches transcript/ledger/
+  // replay (the reply still commits to scrollback via streamRef — this is a VIEW of the tail).
+  const STREAM_KEEP_LINES = MAX_ROLL_LINES + 1; // keep one over the cap so the shown window always fills
+  const streamFeedRef = useRef<Map<string, string>>(new Map());
+  const [streamFeed, setStreamFeed] = useState<StreamFeedMap>(new Map());
+  const clearStreamFeed = () => { streamFeedRef.current = new Map(); setStreamFeed(new Map()); };
+  const bumpStreamFeed = (runId: string, delta: string) => {
+    const cur = streamFeedRef.current.get(runId) ?? "";
+    const merged = cur + delta;
+    // Trim to the last STREAM_KEEP_LINES lines so the accumulator stays bounded (a long reply never
+    // grows the ref) — the rolling window is fixed-height regardless of how much streamed.
+    const segs = merged.split("\n");
+    const trimmed = segs.length > STREAM_KEEP_LINES ? segs.slice(-STREAM_KEEP_LINES).join("\n") : merged;
+    const next = new Map(streamFeedRef.current);
+    next.set(runId, trimmed);
+    streamFeedRef.current = next;
+    if (viewModeRef.current === "stream") setStreamFeed(next);
+  };
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
@@ -474,6 +497,10 @@ export function App(props: {
         // reply channel — duplicating it in the pane raced that channel; see SquadPanes PaneEntry).
         if (phase === "tool_start" && tool)
           bumpPaneFeed(ev.runId, (e) => ({ lines: [...e.lines, `→ ${tool}${argsPreview ? ` ${argsPreview}` : ""}`].slice(-PANE_FEED_LINES) }));
+        // Plan 13: the rolling stream feed carries the tail of the streamed reply/work text — the very
+        // channel the panes omit. Accumulated here (bounded) and shown only in `/view stream`; the reply
+        // still commits to scrollback below, so this is a VIEW of the tail, never a second record.
+        if (phase === "delta") { const d = ev.text ?? delta ?? ""; if (d) bumpStreamFeed(ev.runId, d); }
       }
       if (delta) {
         streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
@@ -595,6 +622,7 @@ export function App(props: {
     streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
     clearStatuses();
     clearPaneFeed();
+    clearStreamFeed();
     clearLiveTrace();
     try {
       if (parsed.kind === "chat") {
@@ -626,7 +654,7 @@ export function App(props: {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
       // explicit-model guard for a misconfigured OpenRouter agent. Surface it instead of crashing Ink.
       say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
-    } finally { setBusy(false); clearStatuses(); clearLiveTrace(); }
+    } finally { setBusy(false); clearStatuses(); clearLiveTrace(); clearStreamFeed(); }
   };
 
   const runSlash = async (cmd: string, arg: string) => {
@@ -1019,6 +1047,11 @@ export function App(props: {
           record; this is the live reader. */}
       {!inspect && layout.showWaterfall && liveTraceSpans.length > 0 && (
         <LiveWaterfall spans={liveTraceSpans} width={termSize.columns} maxRows={Math.max(6, termSize.rows - 8)} />
+      )}
+      {/* Plan 13: the rolling stream — a fixed-height per-agent tail of the live reply/work channel the
+          panes omit, in its own /view stream mode. Display-only; the reply still lands in scrollback. */}
+      {!inspect && layout.showStream && (
+        <RollingStream statuses={statuses} feed={streamFeed} columns={termSize.columns} rows={termSize.rows} />
       )}
       {!inspect && !pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}

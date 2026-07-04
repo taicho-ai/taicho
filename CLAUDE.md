@@ -34,11 +34,19 @@ issues tsc won't).
   `SquadPanes.tsx` (Plan 10) are the **live squad view**: the bar is a one-line summary of every live
   agent; the panes are one-per-agent detail (status line + recent tool lines with `argsPreview`).
   Both render from `core/agent-status.ts` (the reducer over the `onStep` event stream); `/view
-  bar|panes|both` (default `both`) switches surfaces and persists via `store/prefs.ts`. Panes are
-  display-only — the REPL always owns the keyboard. Layer-4 recorded proof (Plan 10 Phase 5):
+  bar|panes|both|waterfall|stream` (default `both`) switches surfaces and persists via `store/prefs.ts`.
+  Panes are display-only — the REPL always owns the keyboard. Layer-4 recorded proof (Plan 10 Phase 5):
   `bun scripts/e2e-evidence.ts squad-panes` shows both panes + bar live during a delegation, driven by
   a **slow-mode e2e model** (`e2e-model.ts` `squad-panes` mode) that holds the child's model call
   in-flight ~4s so the pane doesn't flash faster than a recorded frame — see TESTING.md's Squad UI section.
+  `RollingStream.tsx` (Plan 13) is the **`/view stream`** surface: a fixed-height per-agent tail of the
+  live reply/work stream — only the last N lines (default 4, cap 5), older lines scroll off, never
+  growing. It is the reply/work channel the panes deliberately OMIT (echoing streamed reply text inside
+  a pane raced the scrollback reply channel — see TESTING.md's Squad UI note), so it lives behind its
+  own opt-in `/view stream` mode leaving the default `both` untouched. It folds the SAME `onStep` delta
+  events the bar/panes/live-trace consume into a bounded per-run buffer (no new engine plumbing) and is
+  **display-only**: it never feeds back into transcript/ledger/boot-replay (Plan 05 owns compaction —
+  this is a view, not a rewrite of the record; the reply still commits to scrollback via `streamRef`).
 - **`src/core/`** — the engine:
   - `loop.ts` — the single metered agent loop. Model proposes, config disposes: budgets/caps and
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.

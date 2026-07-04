@@ -487,6 +487,51 @@ the tracking view; the runbook is the build view.
 
 ---
 
+## Plan 12 — Kill the model-call watchdog
+
+**One line:** Delete the bespoke idle-timeout watchdog. A model call either returns tokens or
+errors; a hung request becomes an error via a transport deadline. No watchdog, no "stall" concept,
+no babysitting.
+
+**Why now:** a real user run (`root/2026-07-04-run6`) was marked `failed` even though every
+sub-agent succeeded. Root cause: `guardModelCall` wraps `streamText` + `consumeStream`, and the AI
+SDK executes tools *inside* `consumeStream`. A 156s `shot-planner` delegation produced no stream
+chunks for 120s, so the idle timer fired `ModelStalledError` at exactly `tool_start + 120000ms` —
+timing our own tool, not the model. The error text ("backend stalled or connection dropped") is a
+hardcoded guess; `streamText`'s `onError` never fired because nothing actually dropped. The timer
+only *abandons* the promise (never aborts), so the wedged stream + its whole closure (messages,
+tools, ctx) leaks — the likely cause of the session slowdown ~30min after a failure.
+
+- [ ] Delete `guardModelCall` + `ModelStalledError` from `loop.ts` (the watchdog is the bug — remove, don't replace).
+- [ ] Put an `AbortSignal.timeout(ms)` on the model fetch (transport layer, e.g. `makeAuthFetch`) so a genuinely hung request (open socket, zero tokens) becomes a normal error — and cannot see tool execution, which happens after the model's HTTP stream closes.
+- [ ] Route that error through the AI SDK's existing `maxRetries` (don't hand-roll retry); on exhaustion the run fails / provider is dropped like any other error.
+- [ ] Confirm real abort tears the stream/connection/closure down (fixes the abandon-don't-cancel leak); reproduce the pre-fix leak with a heap snapshot as evidence.
+- [ ] Fix the failure surface: report the real transport error, never a fabricated "backend stalled" string.
+- [ ] Tests: a long (>old-timeout) delegation completes and the parent surfaces the child result (the `shot-planner` case); a truly hung fetch errors + retries + fails cleanly with no leaked stream. Update `CLAUDE.md` (remove the watchdog notes) + the `loop-model-call-hang-and-cancel` memory.
+
+---
+
+## Plan 13 — Rolling compact live-stream view (UI)
+
+**One line:** Bound each live agent's streaming output to a small **rolling window** (≈4 lines, 5
+max) instead of dumping the whole stream into the CLI scrollback — you can see that streaming and
+work are happening without it eating the screen or blowing up what the eye has to hold.
+
+**Why now:** during a delegation cascade the live surfaces either show terse tool lines (Plan 10
+panes deliberately DON'T show the streamed reply text) or, in `waterfall`/scrollback, the full
+stream floods down. On a 5-agent run (`root/2026-07-04-run6`) that's a wall of text; the signal
+("agent X is producing, here's the tail of it") drowns. We want presence + a peek at the tail,
+not the transcript.
+
+- [x] A per-agent rolling tail component: keep only the last N lines (default 4, cap 5) of the agent's live stream, older lines scroll off — a fixed-height window, never grows. *(`src/ui/RollingStream.tsx` — `tailLines()` is the pure last-N window, clamped to [1, MAX_ROLL_LINES]; unit-tested in `RollingStream.test.tsx`.)*
+- [x] Wire it to the existing live event stream (`onStep` deltas — the same feed StatusBar/SquadPanes/live-trace consume); no new engine plumbing, pure UI over the delta events. *(App.tsx accumulates the `delta` events into a bounded per-run buffer; no engine/store change.)*
+- [x] Compose with `/view` (Plan 10): the rolling tail is the reply/work channel the panes intentionally omit; decide whether it lives inside the pane, under the bar, or a new `/view` mode (default choice + persist via `store/prefs.ts`). *Decision: a new **`/view stream`** mode (default overall view UNCHANGED — stays `both`; captains opt in). Rationale: keeping the streamed-reply channel in its own mode avoids reintroducing the pane↔scrollback reply race Plan 10 fought, and leaves every default-`both` test untouched. Persisted via `store/prefs.ts` (`VIEW_MODES` gains `stream`); `resolveLayout` gains `showStream`.*
+- [x] Collapse cleanly: window disappears when the agent settles (brief `done` beat like panes), degrades below min terminal size, "+N more" when multiple agents stream at once. *(settle machinery mirrors SquadPanes; `resolveLayout`/component guard degrades to bar-only below `MIN_PANE_COLS/ROWS`; height-cap + `+N more` overflow — all tested: App-test collapse-on-completion, resolveLayout+component degrade, component `+N more`.)*
+- [x] Never load-bearing for context: this is display-only and must not change what's recorded or replayed (it's a view, not a compaction of the ledger — that's Plan 05). *(a separate UI ref; the reply still commits to scrollback via `streamRef`; nothing writes transcript/ledger/replay. The App test proves the reply still flushes to scrollback normally.)*
+- [x] Layer-1 `App.test.tsx`: window shows the last N delta lines during a streaming run, rolls as new deltas arrive, clears on completion. Update `TESTING.md`, `CLAUDE.md`. *(the "Plan 13: /view stream shows a rolling tail…" test; TESTING.md's Squad UI section + CLAUDE.md's `src/ui/` line updated.)*
+
+---
+
 ## Plan 14 — Worker agents born toolless (artifact tools never bound)
 
 **One line:** Every worker agent in a real deck was created with `tools: []`, so NONE of the
