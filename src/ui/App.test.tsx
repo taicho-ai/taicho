@@ -804,6 +804,43 @@ test("waterfall renders an error span (✗) for a failed run and shows the error
   await waitFor(lastFrame, "kaboom-trace");           // the error detail
 });
 
+// ── Plan 02 Phase 6: the LIVE waterfall (Layer-1, through the real App) ──
+
+test("live waterfall (/view waterfall): the redrawing span tree lights up as model/tool/delegation events arrive mid-run", async () => {
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "write the thing" }),
+    finalText("root done"),
+  ) as any });
+  // A slow child so the delegation is observable mid-flight (the waterfall redraws while it runs).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slowWriter = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(350); return finalText("writer done"); }) as any });
+  const { ws, db, props } = await setup({ model: rootModel });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (props as any).resolveModel = (id: string) => id === "writer" ? { model: slowWriter, modelId: "m" } : { model: rootModel, modelId: "m" };
+  const { stdin, lastFrame } = render(<App {...props} viewMode="waterfall" terminalSize={{ columns: 120, rows: 40 }} />);
+  await send(stdin, "have writer do it", ENTER);
+  await waitFor(lastFrame, "WATERFALL (live)");        // the live waterfall surface, not the panes/bar
+  await waitFor(lastFrame, "delegate_task");           // a TOOL span row — proves tool events redraw the tree
+  const mid = lastFrame() ?? "";
+  expect(mid).toContain("root · chat");                // the foreground root run span, live
+  expect(mid).toContain("writer");                     // the delegated child run nested + live at the same time
+  await waitFor(lastFrame, "root done");               // the cascade completes → reply lands
+  await waitForGone(lastFrame, "WATERFALL (live)");    // …and the live waterfall clears
+});
+
+test("live waterfall shows a single run's llm span while the model is thinking", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(300); return finalText("thought"); }) as any });
+  const { props } = await setup({ model: slow });
+  const { stdin, lastFrame } = render(<App {...props} viewMode="waterfall" terminalSize={{ columns: 120, rows: 40 }} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "WATERFALL (live)");
+  await waitFor(lastFrame, "llm #1");                  // the llm span derived from the live model_start event
+  await waitFor(lastFrame, "thought");
+  await waitForGone(lastFrame, "WATERFALL (live)");
+});
+
 // ── Plan 10: the live status bar (Layer-1, through the real App) ──
 
 test("status bar shows the agent's live state during a run and clears on completion", async () => {

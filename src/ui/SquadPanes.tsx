@@ -38,13 +38,16 @@ const RESERVED_ROWS = 6;  // rows kept for the banner/scrollback/bar/input when 
 const RULE = "▎";         // the left-accent that reads as a pane's column edge (cheap vs an Ink border)
 
 /** Pure layout decision shared by the App and its tests: which surfaces show for a mode + terminal
- *  size. Panes hide in `bar` mode and whenever the terminal is too small (degrade to bar-only); the
- *  bar hides only in `panes` mode on a terminal large enough to actually render panes. */
-export function resolveLayout(viewMode: ViewMode, columns: number, rows: number): { showPanes: boolean; showBar: boolean } {
+ *  size. Panes hide in `bar`/`waterfall` mode and whenever the terminal is too small (degrade to
+ *  bar-only); the `waterfall` mode (Plan 02 Phase 6) shows the redrawing live span tree in place of
+ *  the panes; the bar hides in `panes`/`waterfall` mode on a terminal large enough to render them. */
+export function resolveLayout(viewMode: ViewMode, columns: number, rows: number): { showPanes: boolean; showBar: boolean; showWaterfall: boolean } {
   const tooSmall = columns < MIN_PANE_COLS || rows < MIN_PANE_ROWS;
+  const showWaterfall = viewMode === "waterfall" && !tooSmall;
   return {
-    showPanes: viewMode !== "bar" && !tooSmall,
-    showBar: viewMode !== "panes" || tooSmall,
+    showWaterfall,
+    showPanes: viewMode !== "bar" && viewMode !== "waterfall" && !tooSmall,
+    showBar: viewMode === "waterfall" ? tooSmall : viewMode !== "panes" || tooSmall,
   };
 }
 

@@ -11,7 +11,8 @@ import { ensureWorkspace } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadAgent, createAgent } from "../store/roster";
 import { makeDeps, executeRun } from "./run";
-import { deriveTrace, traceSummary, type Span } from "./trace-tree";
+import { deriveTrace, deriveTaskTrace, traceSummary, type Span } from "./trace-tree";
+import { createTaskState, createBackgroundTask, setTaskFields, taskIdForRun } from "../store/task-state";
 
 const usage = { inputTokens: { total: 3 }, outputTokens: { total: 2 } } as const;
 const text = (t: string) =>
@@ -160,4 +161,65 @@ test("a model error surfaces as an error-status llm span (and an error run span)
 test("deriveTrace on a missing run id returns no spans (never throws)", async () => {
   const { ws } = await boot();
   expect(deriveTrace(ws, "ghost/2026-01-01-run1")).toEqual([]);
+});
+
+// ── Plan 02 Phase 6: task-level traces (root at a Task, not one user-run) ─────────────────────────
+
+test("deriveTaskTrace roots the waterfall at the TASK, nesting the run's whole subtree under it", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "writer", goal: "write hello" }), // root
+    text("child done"),                                            // child
+    text("root done"),                                             // root final
+  ) as any });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: root, messages: [{ role: "user", content: "make hello" }], triggeredBy: "user" });
+  // The watched-turn task record (what App creates at onRunStart).
+  createTaskState(ws, { runId: res.runId, title: "make hello" }, db);
+  const taskId = taskIdForRun(res.runId);
+
+  const spans = deriveTaskTrace(ws, taskId);
+  // A synthetic task-root span sits above the run tree.
+  const taskRoot = spans[0];
+  expect(taskRoot.id).toBe(`task:${taskId}`);
+  expect(taskRoot.parentId).toBeUndefined();
+  expect(taskRoot.detail.kind).toBe("task");
+  if (taskRoot.detail.kind === "task") { expect(taskRoot.detail.taskId).toBe(taskId); expect(taskRoot.detail.runCount).toBe(1); }
+
+  // The root run now hangs off the task root (not a top-level orphan); its child is still nested under it.
+  const runs = byKind(spans, "run").filter((s) => s.id !== taskRoot.id);
+  expect(runs.length).toBe(2); // root run + delegated child
+  const rootRun = runs.find((s) => s.id === res.runId)!;
+  expect(rootRun.parentId).toBe(taskRoot.id);
+  // traceSummary roots at the (parentless) task span and rolls up the whole tree.
+  const summary = traceSummary(spans)!;
+  expect(summary.tokens).toBeGreaterThan(0);
+});
+
+test("deriveTaskTrace groups MULTIPLE runs of a task (the multi-turn/run generalization)", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(text("turn one"), text("turn two")) as any });
+  const writer = await loadAgent(ws, "writer");
+  // A task whose runs both carry triggeredBy === the task id — the shape a task spanning multiple
+  // turns/runs takes; deriveTaskTrace must gather ALL of them under one task root.
+  const taskId = "task_bg_multi";
+  createBackgroundTask(ws, db, { taskId, agent: "writer", goal: "two-part job" });
+  const r1 = await executeRun(makeDeps({ ws, db, model }), { agent: writer, messages: [{ role: "user", content: "part one" }], triggeredBy: taskId });
+  const r2 = await executeRun(makeDeps({ ws, db, model }), { agent: writer, messages: [{ role: "user", content: "part two" }], triggeredBy: taskId });
+  setTaskFields(ws, db, taskId, { rootRunId: r1.runId, status: "completed" });
+
+  const spans = deriveTaskTrace(ws, taskId);
+  const taskRoot = spans[0];
+  expect(taskRoot.id).toBe(`task:${taskId}`);
+  if (taskRoot.detail.kind === "task") expect(taskRoot.detail.runCount).toBe(2);
+  // Both runs nest directly under the task root, on the shared time axis.
+  const rootLevel = byKind(spans, "run").filter((s) => s.parentId === taskRoot.id).map((s) => s.id).sort();
+  expect(rootLevel).toEqual([r1.runId, r2.runId].sort());
+});
+
+test("deriveTaskTrace on an unknown task returns no spans (never throws)", async () => {
+  const { ws } = await boot();
+  expect(deriveTaskTrace(ws, "task_ghost")).toEqual([]);
 });
