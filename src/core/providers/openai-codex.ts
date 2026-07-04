@@ -5,6 +5,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import type { AuthProfile } from "../auth/profile";
 import { AuthExpiredError } from "../auth/refresh";
 import { OPENAI_CODEX_AUTH, codexHeaders } from "../auth/constants";
+import { log } from "../logger";
 
 export function redactAuthHeader(value: string | null): string {
   if (!value) return "";
@@ -33,12 +34,14 @@ export function makeAuthFetch(deps: AuthFetchDeps): typeof fetch {
       const refreshed = await deps.refresh(); // throws AuthExpiredError if refresh fails
       res = await send(input, init, refreshed);
     }
-    // Diagnostic (opt-in via TAICHO_DEBUG): on a non-2xx, surface the request URL + status + body
-    // snippet so endpoint/model mismatches are debuggable. Never logs the Authorization header.
-    if (process.env.TAICHO_DEBUG && !res.ok) {
+    // Diagnostic: on a non-2xx, record the request URL + status + body snippet so endpoint/model
+    // mismatches are debuggable. Routed through the debug-level logger (raised by --verbose or the
+    // historical TAICHO_DEBUG env; see core/logger.ts envLevel) — the logger redacts, so the
+    // Authorization header can never leak even if it reappears in a body echo.
+    if (!res.ok) {
       const url = input instanceof Request ? input.url : String(input);
       const body = await res.clone().text().catch(() => "");
-      console.error(`taicho codex ${res.status} ${url} :: ${body.slice(0, 500)}`);
+      log.debug(`codex ${res.status} ${url} :: ${body.slice(0, 500)}`);
     }
     return res;
   }) as typeof fetch;

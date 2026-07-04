@@ -16,3 +16,4 @@ tasks/
 evidence/
 tui-traces/
 .tui-test/
+taicho.log

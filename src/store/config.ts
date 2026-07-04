@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { YAML } from "bun";
 import { join } from "node:path";
+import { log } from "../core/logger";
 
 export type Provider = "anthropic" | "openai" | "openrouter";
 export interface ResolvedConfig { provider: Provider; model: string; }
@@ -125,12 +126,12 @@ export async function loadConfig(ws: string): Promise<TaichoConfig> {
   try {
     raw = YAML.parse(await Bun.file(file).text());
   } catch (e) {
-    console.warn(`taicho: failed to parse taicho.yaml — using defaults (${e instanceof Error ? e.message : String(e)})`);
+    log.warn(`failed to parse taicho.yaml — using defaults`, e);
     return TaichoConfig.parse({});
   }
   const result = TaichoConfig.safeParse(raw);
   if (!result.success) {
-    console.warn("taicho: invalid taicho.yaml — using defaults");
+    log.warn("invalid taicho.yaml — using defaults");
     return TaichoConfig.parse({});
   }
   return result.data;
