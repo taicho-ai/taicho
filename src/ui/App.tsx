@@ -14,7 +14,7 @@ import { deriveTrace, type Span } from "../core/trace-tree";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
-import { listPolicies, deletePolicy } from "../store/policy";
+import { listPolicies, deletePolicy, approvePolicy } from "../store/policy";
 import { appendTurn, shouldPersistTurn } from "../store/thread";
 import { appendLedgerTurn, newTurnId, recordContextDecision } from "../store/conversation";
 import { createTaskState, taskIdForRun, updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
@@ -842,6 +842,11 @@ export function App(props: {
       readTrace: (id: string) => readTrace(props.ws, id),
       listPolicies: (a: string) => listPolicies(props.ws, a),
       deletePolicy: (a: string, p: string) => deletePolicy(props.ws, a, p),
+      // A proposed note's id is all the captain has (from the ⚑ message); find its owning agent by id.
+      approvePolicy: (polId: string) => {
+        for (const r of roster) { const n = approvePolicy(props.ws, r.id, polId); if (n) return n; }
+        return null;
+      },
     }).forEach(say);
   };
 

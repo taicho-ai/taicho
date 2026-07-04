@@ -50,6 +50,17 @@ test("compactionThreshold uses the ~70% default and honors a valid override, cla
   expect(compactionThreshold("claude-sonnet-4-6", 2)).toBe(Math.floor(200_000 * DEFAULT_COMPACT_AT));   // >1 → default
 });
 
+test("the unknown-model default window is CONSERVATIVE so it bounds a genuinely-small model", () => {
+  // A generous 128k default would let a real 32k model overflow long before its threshold ever tripped.
+  // The fallback must be small enough that an unknown model folds BEFORE a plausibly-small real window.
+  expect(DEFAULT_WINDOW).toBeLessThanOrEqual(32_000);
+  // …and the derived threshold sits below that window, i.e. compaction actually fires first.
+  expect(compactionThreshold("some-unknown-32k-slug")).toBeLessThan(DEFAULT_WINDOW);
+  // first-party windows are UNCHANGED (the small default is only a fallback, never a downgrade).
+  expect(modelWindow("claude-sonnet-4-6")).toBe(200_000);
+  expect(modelWindow("gpt-5.5")).toBe(400_000);
+});
+
 // ── fold correctness ──────────────────────────────────────────────────────────────────────────
 /** One tool round-trip: an assistant message that calls `tool`, then its tool-result message. */
 function roundTrip(id: string, tool: string, result: string): ModelMessage[] {
@@ -132,4 +143,43 @@ test("re-compaction folds a prior summary back in (survives repeated folds)", ()
   expect(s.text).toContain("c×1");                         // new fold's tool histogram (deterministic)
   // the prior summary text is carried into the new summary's notes (nothing lost silently)
   expect(s.text).toContain("Tools called: a×1, b×1");
+});
+
+// ── round-trip invariant guard (never orphan a tool-call/tool-result pairing) ──────────────────
+/** True iff every tool-call in `messages` has a matching tool-result and vice versa (same toolCallId). */
+function roundTripsPaired(messages: ModelMessage[]): boolean {
+  const calls = new Set<string>(), results = new Set<string>();
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const p of m.content as Array<Record<string, unknown>>) {
+      if (typeof p?.toolCallId !== "string") continue;
+      if (p.type === "tool-call") calls.add(p.toolCallId);
+      else if (p.type === "tool-result") results.add(p.toolCallId);
+    }
+  }
+  return [...calls].every((id) => results.has(id)) && [...results].every((id) => calls.has(id));
+}
+
+test("a normal fold NEVER emits an orphaned tool-call/tool-result (round-trips stay paired)", () => {
+  const messages = [
+    brief,
+    ...roundTrip("c1", "read_url", "R1"),
+    ...roundTrip("c2", "read_url", "R2"),
+    ...roundTrip("c3", "read_url", "R3"),
+  ];
+  const res = compactMessages({ messages, keepHead: 1, keepTailRoundTrips: 1 })!;
+  expect(res).not.toBeNull();
+  expect(roundTripsPaired(res.messages)).toBe(true); // c3 kept with its result; c1/c2 folded whole
+});
+
+test("compactMessages THROWS if keepHead splits a round-trip (a future caller can't orphan a pairing)", () => {
+  // keepHead:2 keeps [brief, assistant(tool-call c1)] verbatim but c1's tool-result falls into the
+  // folded region → the head would carry a tool-call with no matching result. The guard refuses it.
+  const messages = [
+    brief,
+    ...roundTrip("c1", "a", "R1"),
+    ...roundTrip("c2", "b", "R2"),
+    ...roundTrip("c3", "c", "R3"),
+  ];
+  expect(() => compactMessages({ messages, keepHead: 2, keepTailRoundTrips: 1 })).toThrow(/round-trip invariant/);
 });

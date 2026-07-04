@@ -49,7 +49,13 @@ const MODEL_WINDOWS: Record<string, number> = {
   "gpt-5.5": 400_000,
   "gpt-5": 400_000,
 };
-export const DEFAULT_WINDOW = 128_000;
+/** Fallback window for a model NOT in the table (e.g. an arbitrary OpenRouter slug). Deliberately
+ *  SMALL (~32k): the whole point of the fallback is to still BOUND an unknown model's context growth,
+ *  and a genuinely-small model (a 32k slug) overflows well before a generous 128k default would ever
+ *  trip compaction — so its threshold would fire only AFTER the real window blew. A conservative 32k
+ *  errs toward compacting a touch early on a large unknown model (harmless: cheaper calls) rather than
+ *  never bounding a small one (fatal: overflow). Known first-party models keep their real windows above. */
+export const DEFAULT_WINDOW = 32_000;
 export const DEFAULT_COMPACT_AT = 0.7;
 
 export function modelWindow(modelId?: string): number {
@@ -83,6 +89,39 @@ const MAX_SUMMARY_CHARS = 2000;
 const MAX_RESULT_SNIPPETS = 6;
 const SNIPPET_CHARS = 160;
 const MAX_NOTES_CHARS = 600;
+
+/** Round-trip invariant guard. In a provider message array every assistant `tool-call` MUST be
+ *  answered by a `tool-result` bearing the same `toolCallId`, and vice versa — an orphaned pairing is
+ *  a hard error most providers reject. Compaction folds WHOLE round-trips, so its own output is always
+ *  paired FOR A CALLER THAT PASSES `keepHead` ON A ROUND-TRIP BOUNDARY. A future caller (Phase-3
+ *  boot-replay) that slices `keepHead` MID round-trip — keeping an assistant tool-call in the verbatim
+ *  head while its tool-result falls into the folded region — would silently orphan the call. We refuse
+ *  to emit such an array: this throws so the bug surfaces at the source instead of at the model call. */
+function assertRoundTripsIntact(messages: ModelMessage[]): void {
+  const calls = new Set<string>();
+  const results = new Set<string>();
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const raw of m.content) {
+      const part = raw as Record<string, unknown>;
+      if (!part || typeof part !== "object" || typeof part.toolCallId !== "string") continue;
+      if (part.type === "tool-call") calls.add(part.toolCallId);
+      else if (part.type === "tool-result") results.add(part.toolCallId);
+    }
+  }
+  const orphanCalls = [...calls].filter((id) => !results.has(id));
+  const orphanResults = [...results].filter((id) => !calls.has(id));
+  if (orphanCalls.length || orphanResults.length) {
+    const parts = [
+      orphanCalls.length ? `tool-call(s) with no matching tool-result: ${orphanCalls.join(", ")}` : "",
+      orphanResults.length ? `tool-result(s) with no matching tool-call: ${orphanResults.join(", ")}` : "",
+    ].filter(Boolean);
+    throw new Error(
+      `compactMessages: round-trip invariant violated — ${parts.join("; ")}. ` +
+        `keepHead must fall on a round-trip boundary (never split an assistant tool-call from its tool-result).`,
+    );
+  }
+}
 
 /** Group `rest` into round-trips: a new group starts at each `assistant` message; any leading
  *  non-assistant messages (e.g. a prior compaction summary) form their own first group. This keeps
@@ -187,5 +226,7 @@ export function compactMessages(opts: {
   };
   const text = buildSummaryText(summary, extracted);
   const summaryMsg: ModelMessage = { role: "user", content: text };
-  return { messages: [...head, summaryMsg, ...tail.flat()], summary, text };
+  const out = [...head, summaryMsg, ...tail.flat()];
+  assertRoundTripsIntact(out); // never emit a message array that orphans a tool-call/tool-result pairing
+  return { messages: out, summary, text };
 }

@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordVerificationFailure, REPEAT_FAILURE_THRESHOLD } from "./patterns";
-import { listPolicies } from "../store/policy";
+import { listPolicies, approvePolicy } from "../store/policy";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-patterns-"));
 
@@ -60,6 +60,32 @@ test("different agents failing the same criteria do NOT combine (pattern is per 
   recordVerificationFailure(w, { targetAgent: "a", criteria: "c", runId: "a/1" });
   const r2 = recordVerificationFailure(w, { targetAgent: "b", criteria: "c", runId: "b/1" });
   expect(r2.proposed).toBeUndefined();
+});
+
+test("a PROPOSED coaching note can be APPROVED by the captain → then run.ts applies it (approved-only)", () => {
+  const w = ws();
+  // reach the threshold so a proposed note is minted (the coaching proposal path)
+  recordVerificationFailure(w, { targetAgent: "researcher", criteria: "every source dated", runId: "researcher/r1", reasons: ["source 3 undated"] });
+  const { proposed } = recordVerificationFailure(w, { targetAgent: "researcher", criteria: "every source dated", runId: "researcher/r2", reasons: ["source 5 undated"] });
+  expect(proposed).toBeDefined();
+  const id = proposed!.id;
+
+  // BEFORE approval: the note is inert — run.ts's approved-only filter sees nothing to apply.
+  const approvedBefore = () => listPolicies(w, "researcher").filter((n) => n.status === "approved");
+  expect(approvedBefore()).toEqual([]);
+
+  // the captain approves it by id (the /policies approve path, at the store seam)
+  const approved = approvePolicy(w, "researcher", id);
+  expect(approved?.status).toBe("approved");
+
+  // AFTER approval: persisted, and now visible to run.ts's approved-only filter (i.e. it WILL be applied)
+  const applied = approvedBefore();
+  expect(applied.map((n) => n.id)).toEqual([id]);
+  expect(applied[0].do).toContain("source 3 undated");
+
+  // idempotent, and unknown ids are null-safe (no throw, no accidental mint)
+  expect(approvePolicy(w, "researcher", id)?.status).toBe("approved");
+  expect(approvePolicy(w, "researcher", "pol_nope")).toBeNull();
 });
 
 test("a duplicate re-record of the SAME failing run neither double-counts nor re-proposes", () => {

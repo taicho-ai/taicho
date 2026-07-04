@@ -1,9 +1,10 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveArtifact } from "./artifacts";
 import { annotateArtifact, listAnnotations, readAnnotation, resolveAnnotation } from "./annotations";
+import { paths } from "./files";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-ann-"));
 const prov = { producer: "researcher", runId: "researcher/2026-07-04-run1" };
@@ -44,6 +45,21 @@ test("annotations pin to a version: an id@vN handle lists only that version's fe
   expect(listAnnotations(w, "doc@v2").map((a) => a.body)).toEqual(["fix v2"]);
   // a bare id sees every version's annotations (newest first)
   expect(listAnnotations(w, "doc").map((a) => a.body)).toEqual(["fix v2", "fix v1"]);
+});
+
+test("same-timestamp annotations sort DETERMINISTICALLY (newest-appended first — no localeCompare flake)", () => {
+  const w = ws();
+  saveArtifact(w, { id: "doc", title: "Doc", body: "v1", ...prov }); // creates artifacts/doc/
+  // Force a timestamp COLLISION (identical `created`) — the exact same-tick case that made the ordering
+  // depend on unstable sort behavior. Written directly so the tie is guaranteed, not luck-of-the-clock.
+  const f = join(paths.artifactDir(w), "doc", "annotations.jsonl");
+  const at = "2026-07-04T00:00:00.000Z";
+  const line = (id: string, body: string) =>
+    JSON.stringify({ id, target: "doc@v1", author: "human", kind: "feedback", body, status: "open", created: at }) + "\n";
+  appendFileSync(f, line("ann_first", "older"));   // appended first  → created earlier
+  appendFileSync(f, line("ann_second", "newer"));  // appended second → the newer record
+  // Tie broken by append order: the later-appended (newer) annotation comes first, every time.
+  expect(listAnnotations(w, "doc").map((a) => a.body)).toEqual(["newer", "older"]);
 });
 
 test("annotating a nonexistent artifact throws (never a dangling feedback ref)", () => {

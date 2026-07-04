@@ -66,15 +66,24 @@ export function listAnnotations(ws: string, handle: string, filter: AnnotationFi
   const f = annotationsFile(ws, id);
   if (!existsSync(f)) return [];
   const byId = new Map<string, Annotation>();
+  const appendOrder = new Map<string, number>(); // annotation id → first-seen line index (= creation append order)
+  let seen = 0;
   for (const line of readFileSync(f, "utf8").split("\n")) {
     if (!line.trim()) continue;
-    try { const a = Annotation.parse(JSON.parse(line)); byId.set(a.id, a); } catch { /* skip corrupt audit line */ }
+    try {
+      const a = Annotation.parse(JSON.parse(line));
+      if (!appendOrder.has(a.id)) appendOrder.set(a.id, seen++);
+      byId.set(a.id, a);
+    } catch { /* skip corrupt audit line */ }
   }
   const wantVersion = version ?? filter.version;
   return [...byId.values()]
     .filter((a) => !filter.status || a.status === filter.status)
     .filter((a) => wantVersion === undefined || parseHandle(a.target).version === wantVersion)
-    .sort((x, y) => y.created.localeCompare(x.created));
+    // Newest first. `created` is millisecond-resolution, so two annotations minted in the same tick tie
+    // on localeCompare — an unstable order that flakes any test asserting sequence. Break the tie by
+    // append order DESCENDING (the later-appended record is the newer one), making the sort total + stable.
+    .sort((x, y) => y.created.localeCompare(x.created) || (appendOrder.get(y.id)! - appendOrder.get(x.id)!));
 }
 
 /** One annotation by id (searches across all versions of the artifact). */

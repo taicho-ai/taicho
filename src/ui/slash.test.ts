@@ -16,6 +16,7 @@ const deps = {
   readTrace: (id: string) => { if (id === "missing") throw new Error("nope"); return trace(id); },
   listPolicies: (a: string) => a === "w" ? [{ id: "pol_1", agent: "w", when: "x", do: "y", scope: "agent", status: "approved", taughtBy: "user", created: "2026-06-11T00:00:00.000Z", expanded: [] } as any] : [],
   deletePolicy: (_a: string, p: string) => p === "pol_1",
+  approvePolicy: (p: string) => p === "pol_1" ? ({ id: "pol_1", agent: "w", when: "x", do: "y", scope: "agent", status: "approved", taughtBy: "verification", created: "2026-06-11T00:00:00.000Z", expanded: [] } as any) : null,
 };
 
 test("/help lists the grammar", () => { expect(runSlash("help", "", deps).map(l => l.text).join("\n")).toContain("/agents"); });
@@ -46,6 +47,13 @@ test("/forget deletes by id; missing -> message; bad usage -> hint", () => {
   expect(runSlash("forget", "w nope", deps)[0].text).toContain("no such policy");
   expect(runSlash("forget", "w", deps)[0].text).toContain("usage");
 });
+test("/policies approve <id> flips a proposed note (via approvePolicy); unknown id / no id -> message", () => {
+  expect(runSlash("policies", "approve pol_1", deps)[0].text).toContain("approved pol_1");
+  expect(runSlash("policies", "approve nope", deps)[0].text).toContain("no proposed policy");
+  expect(runSlash("policies", "approve", deps)[0].text).toContain("usage");
+  // the list path still works and is not shadowed by the approve subcommand
+  expect(runSlash("policies", "w", deps)[0].text).toContain("pol_1");
+});
 
 test("suggestCommands: all on bare slash, prefix-filtered, none past the command or for non-slash", () => {
   expect(suggestCommands("/").length).toBe(COMMANDS.length);
@@ -65,7 +73,7 @@ test("cycleIndex: wraps both ends, moves in the middle, guards empty", () => {
 });
 
 test("/help is derived from COMMANDS (lists every command)", () => {
-  const text = runSlash("help", "", { roster: [], listTraces: () => [], readTrace: () => { throw new Error(); }, listPolicies: () => [], deletePolicy: () => false }).map((l) => l.text).join("\n");
+  const text = runSlash("help", "", { roster: [], listTraces: () => [], readTrace: () => { throw new Error(); }, listPolicies: () => [], deletePolicy: () => false, approvePolicy: () => null }).map((l) => l.text).join("\n");
   for (const c of COMMANDS) expect(text).toContain(`/${c.name}`);
 });
 
