@@ -140,7 +140,11 @@ test("a compacted replay LARGER than loadThread's cap still replays the compacti
   const c = rebuildReplayCache(w, "root", { keepRecentTurns: 20 });
   expect(c.foldedTurns).toBe(5);
   const replayed = loadThread(w, "root"); // what boot would replay (default maxTurns = 40)
-  expect(replayed.length).toBe(40);
+  // 41 lines over the cap of 40: the head is pinned (−1 slot) and the raw tail cut lands mid-pair —
+  // loadThread drops the orphaned assistant reply (PR #27 follow-up, Finding 2), so 39 messages replay.
+  expect(replayed.length).toBe(39);
   expect(String(replayed[0].content)).toContain("[CONVERSATION COMPACTION]"); // the head survives the cap
+  expect(replayed[1].role).toBe("user");                                      // first tail msg is a USER turn, not an orphan …
+  expect(String(replayed[1].content)).toBe("ask 7");                          // … "ask 6" + its reply were the dropped pair
   expect(String(replayed.at(-1)!.content)).toBe("reply 25");                  // newest tail kept
 });

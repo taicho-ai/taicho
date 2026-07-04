@@ -23,6 +23,14 @@ function isCompactionHead(line: string): boolean {
   } catch { return false; }
 }
 
+/** Is this raw JSONL line an `assistant` reply? Used to keep the truncated tail on a turn (user+
+ *  assistant PAIR) boundary — a raw-message tail cut can land mid-pair and leave a dangling assistant
+ *  reply (no preceding user turn) as the first replayed message. */
+function isAssistantReply(line: string): boolean {
+  try { return (JSON.parse(line) as ModelMessage).role === "assistant"; }
+  catch { return false; }
+}
+
 export function loadThread(ws: string, agentId: string, maxTurns = 40): ModelMessage[] {
   const f = threadFile(ws, agentId);
   if (!existsSync(f)) return [];
@@ -35,7 +43,12 @@ export function loadThread(ws: string, agentId: string, maxTurns = 40): ModelMes
   let rest = lines;
   if (lines.length && isCompactionHead(lines[0])) { head = [lines[0]!]; rest = lines.slice(1); }
   const budget = Math.max(0, maxTurns - head.length);
-  const kept = budget === 0 ? [] : rest.slice(-budget); // guard: slice(-0) would return the WHOLE array
+  let kept = budget === 0 ? [] : rest.slice(-budget); // guard: slice(-0) would return the WHOLE array
+  // Slice the tail at a turn (user+assistant PAIR) boundary. When `1 + 2*replayKeepTurns > maxTurns` the
+  // pinned summary head steals a slot and the raw tail cut lands mid-pair — leaving a DANGLING assistant
+  // reply (orphaned from its user turn) as the first replayed message. Drop that orphan so replay opens
+  // on a user turn (or the summary head), never on a bare assistant reply.
+  if (kept.length && isAssistantReply(kept[0]!)) kept = kept.slice(1);
   const out: ModelMessage[] = [];
   for (const l of [...head, ...kept]) {
     try { out.push(JSON.parse(l) as ModelMessage); } catch { /* skip corrupt line */ }

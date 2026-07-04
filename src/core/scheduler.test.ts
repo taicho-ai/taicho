@@ -7,7 +7,7 @@ import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { ensureWorkspace } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadIndex, loadAgent } from "../store/roster";
-import { runHeadless } from "./headless";
+import { runHeadless, scheduleFireOptions } from "./headless";
 import { loadLedger } from "../store/conversation";
 import { loadThread } from "../store/thread";
 import {
@@ -245,8 +245,10 @@ test("a scheduled fire writes NO conversation-ledger turn and does NOT rebuild t
   let clock = 0;
   const runner = new SchedulerRunner({
     now: () => clock,
-    // Mirrors the production fire closure (App.tsx / index.tsx): the schedule id becomes the triggeredBy.
-    fire: (s) => (firePromise = runHeadless({ ws, db, model }, { goal: s.goal, agent: s.agent, approve: s.approve, triggeredBy: `schedule:${s.id}`, out: () => {} })),
+    // Drives the REAL fire wiring: scheduleFireOptions is the SAME helper App.tsx + index.tsx use to
+    // build their runHeadless options, so a regression in the shared closure (e.g. dropping the marker)
+    // is caught here — not hidden behind an inline replica.
+    fire: (s) => (firePromise = runHeadless({ ws, db, model }, { ...scheduleFireOptions(s), out: () => {} })),
   });
   runner.add(mkSchedule({ id: "nightly", goal: "summarize the logs", agent: "root", approve: "reject", trigger: { kind: "interval", everyMs: 1000 } }));
 
@@ -258,6 +260,17 @@ test("a scheduled fire writes NO conversation-ledger turn and does NOT rebuild t
   expect(loadLedger(ws, "root")).toEqual([]);
   // … and no boot-replay cache rebuild (thread.jsonl stays empty ⇒ nothing replays next launch).
   expect(loadThread(ws, "root")).toEqual([]);
+});
+
+test("scheduleFireOptions — the SHARED fire wiring stamps triggeredBy `schedule:<id>` (the audit-exclusion marker)", () => {
+  // App.tsx AND index.tsx both build their fire options through scheduleFireOptions, so this asserts the
+  // REAL wiring — not an inline replica — sets the marker the audit seam guards off. Break the helper
+  // (e.g. return triggeredBy "user") and both this test AND the full-path audit test above fail.
+  const s = mkSchedule({ id: "nightly", goal: "summarize the logs", agent: "root", approve: "reject", trigger: { kind: "interval", everyMs: 1000 } });
+  const opts = scheduleFireOptions(s);
+  expect(opts.triggeredBy).toBe("schedule:nightly");   // the exact marker the seam excludes from the audit …
+  expect(opts.triggeredBy).not.toBe("user");           // … and NOT a user turn (a user turn would pollute the ledger)
+  expect(opts).toMatchObject({ goal: "summarize the logs", agent: "root", approve: "reject" }); // other fields pass through
 });
 
 test("an explicit `taicho run` (default triggeredBy) STILL audits — the seam distinguishes user from automation", async () => {

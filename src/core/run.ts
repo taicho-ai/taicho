@@ -253,10 +253,13 @@ export async function executeRun(
     : undefined;
 
   // Exception-safe seam: recordUserTurn just opened a `submitted` ledger turn + a `running` task. The
-  // body below can THROW before the normal close (most notably deps.resolveModel — the OpenRouter /
-  // explicit-model guard). Guard it so ANY such throw settles the turn to a terminal `failed` outcome
-  // instead of leaving a dangling `submitted` turn + a `running` task. (runLoop itself does NOT throw
-  // for model errors — it returns result.error → outcome "failed" — so this covers the PRE-loop throws.)
+  // PRE-loop setup below (deps.resolveModel — the OpenRouter/explicit-model guard — plus prompt assembly
+  // and tool build) can THROW before the loop ever runs. Guard it so such a throw settles the turn to a
+  // terminal `failed` outcome instead of leaving a dangling `submitted` turn + a `running` task. Scope is
+  // PRE-loop ONLY: `turnClosed` is set the instant runLoop returns a terminal result (below), so a throw
+  // in POST-loop finalization PROPAGATES and never re-settles an ALREADY-COMPLETED run as a pre-run
+  // failure. (runLoop itself does NOT throw for model errors — it returns result.error → outcome
+  // "failed", which the normal close records via recordTurnOutcome, not the catch.)
   let turnClosed = false;
   try {
   // Resolve THIS agent's model up front (before tools are built) so the delegation checker can run
@@ -494,6 +497,14 @@ export async function executeRun(
     // across every run (parent + delegated children) so the whole deck's spend counts against them.
     deckLedger: deps.deckLedger,
   });
+  // The run has COMPLETED the moment runLoop returns a terminal result — mark the turn closed HERE,
+  // BEFORE the post-loop finalization/close block. This scopes the catch's recordTurnFailure to genuine
+  // PRE-loop throws only: a throw in finalization (writeTrace / recordTurnOutcome → rebuildReplayCache /
+  // writeThread / …) must PROPAGATE, never re-settle a completed run as a pre-run failure (which would
+  // duplicate the ledger turn, flip the user turn's context decision included→excluded, and mark the
+  // task failed). Even a `result.error` outcome ("failed") is a run that RAN — recorded by the normal
+  // close below, not by the catch.
+  turnClosed = true;
   const outcome: RunTrace["outcome"] =
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";
   if (result.error) log.error(`run ${runId} failed`, result.error);
@@ -543,13 +554,13 @@ export async function executeRun(
       keepRecentTurns: deps.configDefaults?.replayKeepTurns,
     });
   }
-  turnClosed = true; // normal path settled the turn — the catch below must not double-close it
   deps.onRunEnd?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, outcome });
   return { runId, text: finalText, trace };
   } catch (err) {
-    // A throw between recordUserTurn and the normal close would strand the open turn — settle it to a
-    // terminal `failed` outcome so the ledger + task never dangle, then re-throw so the caller still
-    // sees the real error. Guarded to user turns that haven't already been closed by the normal path.
+    // A PRE-loop throw (resolveModel / prompt + tool build) between recordUserTurn and runLoop returning
+    // would strand the open turn — settle it to a terminal `failed` outcome so the ledger + task never
+    // dangle, then re-throw so the caller still sees the real error. `turnClosed` is already true once
+    // runLoop has returned, so a POST-loop finalization throw skips this and simply propagates unchanged.
     if (isUserTurn && userTurn && !turnClosed) {
       try {
         recordTurnFailure(deps.ws, deps.db, {
