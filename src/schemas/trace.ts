@@ -48,6 +48,13 @@ export const RunTrace = z.object({
   tokens: z.number().default(0),
   costUsd: z.number().nullable().default(0),
   costNote: z.string().optional(),
+  // This run's OWN delegation-checker (Plan 06) spend, kept separate from `tokens`/`costUsd` (the
+  // primary loop) because the verifier call creates NO child trace. /costs adds these to the run's
+  // own-spend sum so verifier tokens/USD surface exactly ONCE (no child double-count). USD is 0 for a
+  // subscription/unmeasurable run (mirrors costUsd:null there) — never a fabricated price. Defaults
+  // keep pre-Plan-09 traces parseable.
+  verifierTokens: z.number().default(0),
+  verifierCostUsd: z.number().default(0),
   model: z.string().optional(),           // resolved model id — the /costs "by provider" dimension (default keeps old traces parseable)
   aggregate: z.object({ tokens: z.number(), costUsd: z.number().nullable() }).optional(),
   notes: z.array(z.string()).default([]),

@@ -652,7 +652,9 @@ export function App(props: {
       setBusy(true);
       setActivity(`teaching ${agentId}…`);
       try {
-        const draft = await draftPolicy(activeModel, agentId, correction);
+        // Plan 09: meter the distiller call against the deck ceiling (it's a real model call, but runs
+        // outside a run trace so it's not surfaced in /costs — see coaching/teach.ts + costs.ts).
+        const draft = await draftPolicy(activeModel, agentId, correction, { deckLedger: props.deckLedger, priceUsd });
         const decision = await requestApproval({ kind: "propose_coaching", draft });
         if (decision.type === "reject") { say({ kind: "system", text: "  discarded" }); }
         else {

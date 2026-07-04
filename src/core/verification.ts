@@ -5,6 +5,7 @@
  *  (orchestrated in tools.ts); a second fail surfaces the result WITH the failed verdict attached. */
 import { runLoop } from "./loop";
 import type { AgentDef } from "../schemas/agent";
+import type { DeckLedger } from "../store/deck-budget";
 import { VerificationVerdict } from "../schemas/trace";
 
 /** The checker uses the SAME model plumbing the loop uses — passed in by run.ts (the delegating
@@ -45,6 +46,10 @@ export async function runChecker(params: {
   priceUsd?: (u: { inputTokens: number; outputTokens: number }) => number;
   captureProviderCost?: boolean;
   signal?: AbortSignal;
+  /** Plan 09: the deck-wide ledger. Threaded through so the verifier's model call is BOTH bounded by
+   *  the deck ceiling AND committed to the running total, exactly like a primary agent loop — an
+   *  independent checker call is real deck spend, so the ceiling must see it. Undefined ⇒ no ceilings. */
+  deckLedger?: DeckLedger;
   goal: string;
   criteria: string;
   output: string;
@@ -64,6 +69,7 @@ export async function runChecker(params: {
     priceUsd: params.priceUsd,
     codexBackend: params.subscription,
     captureProviderCost: params.captureProviderCost,
+    deckLedger: params.deckLedger, // Plan 09: commit + bound the checker call against the deck ceiling
   });
   // We read only result.text, never result.error: a checker that NEVER RAN (transport error/timeout ⇒
   // result.text like "[error]"/"[timed out]") parses to the SAME non-blocking advisory PASS as a

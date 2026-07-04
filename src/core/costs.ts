@@ -1,9 +1,14 @@
 /** Plan 09: cross-session cost rollup for `/costs`. Reads run TRACES (the same source /runs and
  *  /trace use) and aggregates each run's OWN spend by agent, day, and model — never trace.aggregate
- *  (which folds in child runs, so summing across the list would double-count). HONESTY RULE: a
- *  subscription run records costUsd:null (unmeasurable) — its TOKENS are always reported, and it is
- *  NEVER counted as $0 nor mixed into a USD total. Tokens are the hard, always-honest number; USD is
- *  a supplement shown only where genuinely priced. */
+ *  (which folds in child runs, so summing across the list would double-count). Each run's OWN spend =
+ *  its primary loop (tokens/costUsd) PLUS its delegation-checker (verifierTokens/verifierCostUsd): the
+ *  verifier makes real, metered model calls but writes NO child trace, so adding its spend here counts
+ *  it exactly once. HONESTY RULE: a subscription run records costUsd:null (unmeasurable) — its TOKENS
+ *  (loop + verifier) are always reported, and it is NEVER counted as $0 nor mixed into a USD total.
+ *  Tokens are the hard, always-honest number; USD is a supplement shown only where genuinely priced.
+ *  SCOPE: /costs covers RUN TRACES — the agent loop and its delegation verifier. The `/teach` coaching
+ *  distiller (src/coaching/teach.ts) runs OUTSIDE any run and produces no trace; its spend IS metered
+ *  against the deck ceiling (deck-budget.ts) but is not itemized here (there is no trace to attach it to). */
 import type { RunTrace } from "../schemas/trace";
 
 export interface CostGroup {
@@ -27,9 +32,11 @@ function blank(key: string): CostGroup {
 
 function accrue(g: CostGroup, t: RunTrace): void {
   g.runs += 1;
-  g.tokens += t.tokens;
+  // Own spend = primary loop + this run's delegation verifier (no child trace holds the verifier's
+  // spend, so it's counted exactly once here).
+  g.tokens += t.tokens + t.verifierTokens;
   if (t.costUsd == null) g.subscriptionRuns += 1; // subscription/unmeasurable — tokens only, never a $0
-  else g.costUsd += t.costUsd;
+  else g.costUsd += t.costUsd + t.verifierCostUsd; // priced run ⇒ include the verifier's USD too
 }
 
 /** The "by provider" dimension. We record the resolved model id in the trace; group by it, falling

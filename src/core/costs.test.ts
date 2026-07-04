@@ -19,6 +19,8 @@ function trace(over: Partial<RunTrace>): RunTrace {
     outcome: "completed",
     tokens: 0,
     costUsd: 0,
+    verifierTokens: 0,
+    verifierCostUsd: 0,
     notes: [],
     durationMs: 0,
     started: "2026-07-04T10:00:00.000Z",
