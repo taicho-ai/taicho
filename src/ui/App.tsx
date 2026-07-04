@@ -19,6 +19,11 @@ import { appendTurn, shouldPersistTurn } from "../store/thread";
 import { appendLedgerTurn, newTurnId, recordContextDecision } from "../store/conversation";
 import { createTaskState, taskIdForRun, updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
 import { TaskScheduler } from "../core/tasks";
+import { SchedulerRunner, parseScheduleCommand, describeTrigger, formatScheduleLine } from "../core/scheduler";
+import { runHeadless } from "../core/headless";
+import { listSchedules, createSchedule, removeSchedule, readSchedule, updateSchedule } from "../store/schedules";
+import type { Schedule } from "../schemas/schedule";
+import { statSync } from "node:fs";
 import type { RunResult, TaskAwaitResult, RunDeps } from "../core/run";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
@@ -32,7 +37,7 @@ import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
 import { addMcpServer, removeMcpServer } from "../store/mcp-store";
-import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand, parseArtifactsCommand } from "./slash";
+import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand, parseArtifactsCommand, tokenize } from "./slash";
 import { listArtifacts, readArtifact, artifactVersions, gcArtifacts, collectReferencedArtifacts } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { artifactHandle } from "../schemas/artifact";
@@ -52,6 +57,11 @@ type PendingApproval = { id: number; req: ApprovalRequest; resolve: (d: Approval
  *  doesn't set `tasks.maxBackgroundRuns`. Bounds a model-initiated dispatch chain that resets
  *  per-request budgets on each hop; over-ceiling dispatch is refused, not silently unbounded. */
 const DEFAULT_BACKGROUND_RUN_CEILING = 32;
+
+/** How often the REPL evaluates schedules for firing (Plan 04 Phase 6). The tick rate — not any
+ *  schedule's interval — is the real floor on how often a scheduled run can fire in a live session,
+ *  which naturally bounds a too-eager `--every`. */
+const SCHEDULE_TICK_MS = 15_000;
 
 type ResolveModelFn = (agentId: string) => { model: Model; modelId: string; subscription?: boolean; captureCost?: boolean };
 type PriceFn = (u: { inputTokens: number; outputTokens: number }) => number;
@@ -184,6 +194,20 @@ export function App(props: {
   const schedulerRef = useRef<TaskScheduler | null>(null);
   if (!schedulerRef.current) schedulerRef.current = new TaskScheduler({ globalCap: props.backgroundRunCeiling ?? DEFAULT_BACKGROUND_RUN_CEILING });
   const scheduler = schedulerRef.current;
+  // Plan 04 Phase 6: the schedule/trigger runner. It fires an UNATTENDED run through the headless
+  // `executeRun` path (runHeadless — NOT the Ink approval card) whenever a schedule comes due. The
+  // fire closure is held in a ref so it always sees the current model/deps (re-armed on /login).
+  const fireScheduleRef = useRef<(s: Schedule) => Promise<void>>(async () => {});
+  const schedRunnerRef = useRef<SchedulerRunner | null>(null);
+  if (!schedRunnerRef.current) schedRunnerRef.current = new SchedulerRunner({
+    now: () => Date.now(),
+    statMtimeMs: (p) => { try { return statSync(p).mtimeMs; } catch { return null; } },
+    fire: (s) => fireScheduleRef.current(s),
+    // The runner advances scheduling state (lastRunAt/nextDueAt/runCount) on each fire; persist it as a
+    // field patch so cadence survives a restart and never clobbers lastRunId/lastStatus (set by fire).
+    persist: (id, patch) => { updateSchedule(props.ws, id, patch); },
+  });
+  const schedRunner = schedRunnerRef.current;
   const thread = useRef<ModelMessage[]>(props.rootThread ?? []);
   const aborter = useRef<AbortController | null>(null);
   // The active approval/question card publishes its key handler here (during its render). App's one
@@ -242,6 +266,38 @@ export function App(props: {
 
   useEffect(() => {
     if (props.startupNotice) say({ kind: "system", text: `  ${props.startupNotice}` });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Plan 04 Phase 6: fire a due schedule through the headless `executeRun` path (runHeadless, NOT the
+  // Ink approval card). Rebuilt every render so it closes over the CURRENT model/resolver (re-armed on
+  // /login). A scheduled run is UNATTENDED: its approve mode (default `reject`) drives an auto-reject
+  // approval channel — no captain, so no unsupervised privileged exec. Breadcrumbs route to scrollback.
+  fireScheduleRef.current = async (s: Schedule) => {
+    const activeModel = model;
+    if (!activeModel) { say({ kind: "system", text: `  ⏰ schedule ${s.id} skipped — no model configured` }); return; }
+    say({ kind: "system", text: `  ⏰ schedule ${s.id} firing → ${s.agent}: ${s.goal} (approvals: ${s.approve})` });
+    try {
+      const res = await runHeadless(
+        { ws: props.ws, db: props.db, model: activeModel, resolveModel, priceUsd, configDefaults: props.configDefaults, mcp: props.mcp, embed: props.embed, deckLedger: props.deckLedger },
+        { goal: s.goal, agent: s.agent, approve: s.approve, out: (l) => say({ kind: "system", text: `  ${l}` }) },
+      );
+      // Record the outcome of this fire (lastRunId/lastStatus). The runner already advanced cadence.
+      updateSchedule(props.ws, s.id, { lastRunId: res.runId, lastStatus: res.outcome ?? (res.ok ? "completed" : "failed") });
+      say({ kind: "system", text: `  ${res.ok ? "✓" : "⚠"} schedule ${s.id} ${res.outcome ?? (res.ok ? "done" : "failed")}${res.runId ? ` — run ${res.runId}` : ""} — /schedules` });
+    } catch (e) {
+      updateSchedule(props.ws, s.id, { lastStatus: "failed" });
+      say({ kind: "system", text: `  ⚠ schedule ${s.id} failed — ${e instanceof Error ? e.message : String(e)}` });
+    }
+  };
+
+  // Arm persisted schedules on boot (reconcile — they survive a restart) and tick the runner on a
+  // real interval. The timer is unref'd so it never keeps the process (or a test's event loop) alive.
+  useEffect(() => {
+    for (const s of listSchedules(props.ws)) schedRunner.add(s);
+    const t = setInterval(() => { try { schedRunner.tick(); } catch { /* a bad schedule never wedges the REPL */ } }, SCHEDULE_TICK_MS);
+    (t as { unref?: () => void }).unref?.();
+    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -823,6 +879,35 @@ export function App(props: {
       const rows = listTaskIndex(props.db, { activeOrBackground: true });
       if (!rows.length) { say({ kind: "system", text: "  (no background tasks)" }); return; }
       rows.forEach((r) => say({ kind: "system", text: `  [${r.id}] ${r.status} · ${r.agent ?? "?"} · ${r.goal ?? ""}${r.result_ref ? ` → ${r.result_ref}` : ""}` }));
+      return;
+    }
+    if (cmd === "schedules") {
+      const parsed = parseScheduleCommand(tokenize(arg));
+      if (parsed.kind === "error") { say({ kind: "system", text: `  ${parsed.message}` }); return; }
+      if (parsed.kind === "list") {
+        const all = listSchedules(props.ws);
+        if (!all.length) { say({ kind: "system", text: "  (no schedules — /schedules add <goal> --every 1h)" }); return; }
+        all.forEach((s) => say({ kind: "system", text: formatScheduleLine(s) }));
+        return;
+      }
+      if (parsed.kind === "add") {
+        try {
+          const s = createSchedule(props.ws, parsed.spec);
+          schedRunner.add(s); // arm it live so it can fire this session
+          say({ kind: "system", text: `  ⏰ added schedule ${s.id} → ${s.agent}: ${s.goal} (${describeTrigger(s.trigger)}, approvals: ${s.approve})` });
+        } catch (e) { say({ kind: "system", text: `  could not add schedule — ${e instanceof Error ? e.message : String(e)}` }); }
+        return;
+      }
+      if (parsed.kind === "remove") {
+        const ok = removeSchedule(props.ws, parsed.id);
+        schedRunner.remove(parsed.id);
+        say({ kind: "system", text: ok ? `  removed schedule ${parsed.id}` : `  no schedule "${parsed.id}"` });
+        return;
+      }
+      // run — fire once now through the same unattended headless path.
+      const s = readSchedule(props.ws, parsed.id);
+      if (!s) { say({ kind: "system", text: `  no schedule "${parsed.id}"` }); return; }
+      void fireScheduleRef.current(s);
       return;
     }
     if (cmd === "trace") {

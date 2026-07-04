@@ -67,6 +67,15 @@ issues tsc won't).
     emits a `compaction` transcript event (never invisible). Peak estimate is recorded as
     `trace.contextTokens` and surfaced in the waterfall LLM-span detail. **Cross-turn (boot-replay)
     compaction is deferred** — it depends on Plan 01 Phase 5's `recordTurnOutcome` seam (not yet built).
+  - `scheduler.ts` — Plan 04 Phase 6 scheduled/triggered runs. A PURE engine (clock, file-stat, and the
+    fire action are all INJECTED — deterministic + unit-tested with no real timers): cron eval (5-field,
+    **UTC**) + `SchedulerRunner`, which on each `tick(now)` fires the due schedules through the headless
+    `executeRun` path (`runHeadless`). Triggers: **cron**, **interval**, file-**watch** (mtime). A
+    scheduled run is UNATTENDED → reuses headless's auto-**reject** approvals (no unsupervised privileged
+    exec; `approve` is the trusted opt-in). Never re-fires a schedule while its run is in flight
+    (concurrency ≤1/schedule). `schedule-cli.ts` runs the `taicho schedule <add|list|remove|run>`
+    subcommand; the same `parseScheduleCommand` backs the REPL's `/schedules`. The REPL arms persisted
+    schedules on boot and ticks on a 15s interval (the real firing floor).
   - `model.ts` — provider+model → AI-SDK model instance (`buildModel`, `createModelResolver`).
   - `providers/openai-codex.ts` — ChatGPT-subscription (Codex backend) provider: a `createOpenAI`
     instance with a custom `fetch` that injects the OAuth bearer + Codex headers and refreshes on 401.
@@ -78,6 +87,8 @@ issues tsc won't).
   `db.ts` (SQLite), `roster.ts`, `thread.ts`, `trace.ts`, `policy.ts`, `files.ts`, `vectors.ts`,
   `task-state.ts` (persistent task queue: `tasks/*.json` canon + a rebuildable `tasks` DB index;
   chat turns + background dispatches, `reconcileTasks`/`reindexTasks` on boot),
+  `schedules.ts` (Plan 04 Ph6 durable schedules: `schedules/<id>.json` canon — a small captain-owned
+  set, so a file scan is the whole query surface, no DB index; a bad cron is rejected at CREATE time),
   `artifacts.ts` (addressable, versioned, immutable-per-version hand-off store over `artifacts/`;
   `gcArtifacts` archives unreferenced old versions, keep-latest-N + lineage/trace-safe),
   `annotations.ts` (Plan 01 Ph4 **feedback & revision**: append-only `artifacts/<id>/annotations.jsonl` —

@@ -16,6 +16,7 @@ export const paths = {
   },
   conversationDir: (ws: string, id: string) => join(ws, "conversations", id),
   taskDir: (ws: string) => join(ws, "tasks"),
+  scheduleDir: (ws: string) => join(ws, "schedules"),
   kbNodeDir: (ws: string) => join(ws, "kb", "nodes"),
   kbNodeFile: (ws: string, id: string) => join(ws, "kb", "nodes", `${id}.md`),
   kbSourceDir: (ws: string) => join(ws, "kb", "sources"),
@@ -30,6 +31,7 @@ export async function ensureWorkspace(ws: string) {
   await mkdir(join(ws, "runs"), { recursive: true });
   await mkdir(join(ws, "conversations"), { recursive: true });
   await mkdir(join(ws, "tasks"), { recursive: true });
+  await mkdir(join(ws, "schedules"), { recursive: true });
   await mkdir(join(ws, "kb", "nodes"), { recursive: true });
   await mkdir(join(ws, "kb", "sources"), { recursive: true });
   await mkdir(join(ws, "skills"), { recursive: true });

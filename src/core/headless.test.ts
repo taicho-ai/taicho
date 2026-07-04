@@ -52,6 +52,13 @@ test("parseCli: tail with runId and --follow", () => {
   expect(parseCli(["b", "t", "tail"]).command).toEqual({ kind: "tail", runId: undefined, follow: false });
 });
 
+test("parseCli: schedule carries the raw args (verbose stripped) for the shared parser", () => {
+  expect(parseCli(["b", "t", "schedule", "list"]).command).toEqual({ kind: "schedule", args: ["list"] });
+  expect(parseCli(["b", "t", "schedule", "add", "check", "logs", "--every", "1h", "-v"]))
+    .toEqual({ verbose: true, command: { kind: "schedule", args: ["add", "check", "logs", "--every", "1h"] } });
+  expect(parseCli(["b", "t", "schedule"]).command).toEqual({ kind: "schedule", args: [] });
+});
+
 // ── approval channel ──────────────────────────────────────────────────────
 
 test("makeApprovalChannel reject always rejects", async () => {

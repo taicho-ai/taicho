@@ -17,6 +17,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "runs", summary: "list runs", usage: "[agent]" },
   { name: "costs", summary: "cross-session spend rollup (agent / day / model)", usage: "[agent]" },
   { name: "tasks", summary: "list / cancel background tasks", usage: "[cancel <id>]" },
+  { name: "schedules", summary: "scheduled/triggered runs (cron / interval / watch)", usage: "list | add <goal> --every … | remove <id> | run <id>" },
   { name: "trace", summary: "open the waterfall inspector (no arg = latest run)", usage: "[id]" },
   { name: "view", summary: "switch the live view (persists)", usage: "bar|panes|both" },
   { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>", requiresArg: true },
@@ -100,8 +101,9 @@ export type McpCommand =
   | { kind: "reconnect"; name: string }
   | { kind: "error"; message: string };
 
-/** Split on whitespace but keep "double quoted" runs together (so --header "K: V" survives). */
-function tokenize(s: string): string[] {
+/** Split on whitespace but keep "double quoted" runs together (so --header "K: V" survives, and a
+ *  cron expr `--cron "0 9 * * *"` stays one token). Shared by /mcp and /schedules parsing. */
+export function tokenize(s: string): string[] {
   const out: string[] = [];
   let cur = "", q = false, has = false;
   for (const c of s) {
