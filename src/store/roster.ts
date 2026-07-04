@@ -108,6 +108,30 @@ export interface NewAgentDraft {
   id: string; role: string; identity: string; tools?: string[];
 }
 
+/** The default worker capability baseline (Plan 01 hand-off-by-reference + Plan 14 lifecycle contract).
+ *  EVERY worker created via create_agent gets these UNCONDITIONALLY: the structured artifact tools to
+ *  PRODUCE a work product (save_artifact — or the legacy simple-markdown write_artifact wrapper),
+ *  CONSUME others' by reference (read_artifact), DISCOVER them (list_artifacts), and give/receive
+ *  feedback that drives a revision (annotate_artifact / list_annotations). This is the squad's FLOOR:
+ *  a worker without it can only hand work back as loose `final.md` text — the root/2026-07-04-run6 gap.
+ *  Privileged / opt-in capabilities (delegate_task, run_command, create_agent, ask_human, the KB tools,
+ *  and any mcp:<server> ref — Plan 08 least privilege) are deliberately NOT here: a model requests those
+ *  explicitly via create_agent's `tools`, which ADDS to this baseline, never REPLACES it. */
+export const DEFAULT_WORKER_TOOLS = ["write_artifact", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations"];
+
+/** Merge a model-proposed tool list onto the worker baseline (Plan 14 T1 — baseline-merge, the robust
+ *  fix over empty-means-default). The artifact baseline is ALWAYS present (deduped, baseline-first);
+ *  `requested` only ADDS extras. So an explicit `tools: []` — or a `tools` list that simply forgot the
+ *  artifact tools — can no longer defeat the default and mint a toolless worker (the bug this closes:
+ *  `??` only filled null/undefined, so `tools: []` sailed through). */
+export function workerTools(requested?: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of [...DEFAULT_WORKER_TOOLS, ...(requested ?? [])])
+    if (t && !seen.has(t)) { seen.add(t); out.push(t); }
+  return out;
+}
+
 export function loadIndex(db: Database): RegistryRow[] {
   return db.query<RegistryRow, []>("SELECT id, role, is_root FROM registry").all();
 }
@@ -136,11 +160,15 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
   if (existsSync(file)) throw new Error(`agent "${draft.id}" already exists`);
   const agent = AgentDef.parse({
     id: draft.id, role: draft.role, identity: draft.identity,
-    // Default worker grant: the structured artifact trio (produce + hand off + consume by reference)
-    // plus write_artifact (legacy simple-markdown wrapper). NO MCP grant by default (Plan 08 least
-    // privilege — MCP tools are opt-in via an explicit "mcp:<server>" ref). To wire a worker to an
-    // MCP server, pass it in draft.tools (e.g. root proposes create_agent with tools incl. mcp:web).
-    tools: draft.tools ?? ["write_artifact", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations"],
+    // Lifecycle contract (Plan 14 T1/T2): the DEFAULT_WORKER_TOOLS artifact baseline (produce + hand
+    // off + consume by reference + annotate/revise) is ALWAYS merged in. An explicit `draft.tools`
+    // list ADDS extras (delegate_task, run_command, an "mcp:<server>" ref, …) — it does NOT replace
+    // the baseline. This is the enforced contract that create_agent can never again mint a toolless
+    // worker: the old `draft.tools ?? [defaults]` let an explicit `tools: []` sail through and defeat
+    // the default (?? only fills null/undefined), which is how the whole squad in root/2026-07-04-run6
+    // was born unable to save/read/hand-off artifacts. NO MCP grant by default (Plan 08 least
+    // privilege — MCP is opt-in via an explicit "mcp:<server>" ref passed in draft.tools).
+    tools: workerTools(draft.tools),
     canSee: ["*"], canDelegateTo: [], isRoot: false,
     created: new Date().toISOString(),
     budgets: defaults?.budgets,
@@ -149,4 +177,32 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
   await writeFile(file, serializeAgent(agent));
   syncRegistry(db, [agent]);
   return agent;
+}
+
+/** Plan 14 T3 backfill — rescue existing workers that were born TOOLLESS. A worker persisted with an
+ *  EMPTY tools list ([]) can't save/read/hand-off artifacts; it can only call the unconditional baseline
+ *  (find_skills/use_skill) and hand work back as loose text (the root/2026-07-04-run6 deck). On boot we
+ *  grant such workers the DEFAULT_WORKER_TOOLS baseline and rewrite their agent.md, so a live deck becomes
+ *  usable without hand-editing each file. This is deliberately a CODE-level migration keyed on the empty
+ *  list — the definitively-broken signal — NOT on "missing some artifact tool": a NON-empty explicit grant
+ *  is a deliberate curation choice (root, librarian, or a hand-restricted worker) and is left untouched.
+ *  Root/librarian are reconciled separately (seedRoot/seedLibrarian) and never carry an empty list, but we
+ *  skip isRoot defensively. Returns the ids fixed (for a boot notice). */
+export async function reconcileWorkerTools(ws: string): Promise<string[]> {
+  const dir = join(ws, "agents");
+  if (!existsSync(dir)) return [];
+  const fixed: string[] = [];
+  for (const id of await readdir(dir)) {
+    const file = paths.agentFile(ws, id);
+    if (!existsSync(file)) continue;
+    let agent: AgentDef;
+    try { agent = parseAgent(await readFile(file, "utf8")); }
+    catch (e) { log.warn(`reconcileWorkerTools: skipping ${id}`, e); continue; }
+    if (agent.isRoot || agent.id === LIBRARIAN_ID) continue; // built-ins reconcile via their seed fns
+    if (agent.tools.length > 0) continue;                    // deliberate non-empty grant — leave alone
+    agent.tools = workerTools([]);                           // born toolless → grant the worker baseline
+    await writeFile(file, serializeAgent(agent));
+    fixed.push(agent.id);
+  }
+  return fixed;
 }

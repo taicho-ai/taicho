@@ -3,7 +3,7 @@ import { render } from "ink";
 import { App } from "./ui/App";
 import { ensureWorkspace } from "./store/files";
 import { openDb } from "./store/db";
-import { seedRoot, seedLibrarian, reindex, loadIndex, LIBRARIAN_ID } from "./store/roster";
+import { seedRoot, seedLibrarian, reindex, loadIndex, reconcileWorkerTools, LIBRARIAN_ID } from "./store/roster";
 import { reindexKnowledge } from "./store/knowledge";
 import { diffSources } from "./store/sources";
 import { createEmbedder } from "./core/embed";
@@ -55,6 +55,9 @@ if (cli.command?.kind === "schedule" && cli.command.args[0] !== "run") {
 
 await seedRoot(ws, config.defaults);
 await seedLibrarian(ws, config.defaults);
+// Plan 14 T3: rescue any worker born toolless (`tools: []`) — grant it the default artifact baseline so
+// a live deck (root/2026-07-04-run6's 9 empty-tools agents) becomes usable without hand-editing each file.
+const backfilledWorkers = await reconcileWorkerTools(ws);
 await seedSkills(ws);
 const db = openDb(ws);
 const idx = loadIndex(db);
@@ -72,6 +75,8 @@ if (kbDrift.changed.length || kbDrift.deleted.length)
   notices.push(`kb: ${kbDrift.changed.length} changed / ${kbDrift.deleted.length} removed source(s) — run /kb sync`);
 if (interruptedTasks.length)
   notices.push(`tasks: ${interruptedTasks.length} interrupted last session (${interruptedTasks.slice(0, 3).map((t) => t.taskId).join(", ")}${interruptedTasks.length > 3 ? "…" : ""}) — /tasks to review`);
+if (backfilledWorkers.length)
+  notices.push(`agents: granted the artifact-tool baseline to ${backfilledWorkers.length} worker(s) born toolless (${backfilledWorkers.slice(0, 3).join(", ")}${backfilledWorkers.length > 3 ? "…" : ""})`);
 const startupNotice = notices.length ? notices.join(" · ") : undefined;
 const roster = loadIndex(db);
 

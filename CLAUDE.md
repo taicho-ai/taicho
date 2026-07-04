@@ -97,7 +97,11 @@ issues tsc won't).
     (see **Observability** below); `TraceInspector.tsx` is the view.
   - `prompt.ts`, `tools.ts`, `registry.ts`, `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
 - **`src/store/`** — persistence: `config.ts` (provider/model/auth resolution + `taicho.yaml`),
-  `db.ts` (SQLite), `roster.ts`, `thread.ts`, `trace.ts`, `policy.ts`, `files.ts`, `vectors.ts`,
+  `db.ts` (SQLite), `roster.ts` (agent.md canon + registry index; `createAgent` **baseline-merges**
+  `DEFAULT_WORKER_TOOLS` — the artifact grant — under any model-proposed `tools`, so an explicit
+  `tools: []` can never again mint a toolless worker (Plan 14); `reconcileWorkerTools` backfills that
+  baseline onto any EXISTING worker born with `tools: []` on boot), `thread.ts`, `trace.ts`,
+  `policy.ts`, `files.ts`, `vectors.ts`,
   `task-state.ts` (persistent task queue: `tasks/*.json` canon + a rebuildable `tasks` DB index;
   chat turns + background dispatches, `reconcileTasks`/`reindexTasks` on boot),
   `schedules.ts` (Plan 04 Ph6 durable schedules: `schedules/<id>.json` canon — a small captain-owned
@@ -208,6 +212,17 @@ resolution).
   and must stay unchanged). The checker is an INDEPENDENT call, not the parent's self-check; the
   retry consumes a `maxWorkItemsPerRequest` like any delegation. Verdicts surface to the captain via
   the `onStep` `note` breadcrumb and are recorded on `trace.verification` + task-state `verifications[]`.
+- **Workers are never born toolless (Plan 14):** `roster.ts`'s `DEFAULT_WORKER_TOOLS` (the artifact
+  grant: `write_artifact`/`save_artifact`/`read_artifact`/`list_artifacts`/`annotate_artifact`/
+  `list_annotations`) is the worker capability FLOOR — the hand-off-by-reference tools every worker
+  needs so it produces real artifacts, not loose `final.md` text. `createAgent` **baseline-merges**
+  it under any model-proposed `tools` (extras ADD, never REPLACE), so `create_agent` with a missing or
+  empty `tools: []` — which the old `draft.tools ?? [defaults]` let sail through (`??` only fills
+  null/undefined) — can no longer defeat the default. Privileged/opt-in capability (`delegate_task`,
+  `run_command`, `create_agent`, `ask_human`, KB tools, `mcp:<server>` — Plan 08 least privilege) is
+  NOT in the baseline; the model requests it explicitly. `reconcileWorkerTools` (boot, in `index.tsx`)
+  backfills the baseline onto any EXISTING worker persisted with `tools: []`, leaving deliberate
+  non-empty grants (and root/librarian) untouched.
 - **Logging (Plan 03):** never `console.error/warn` from engine/store code — a stray write corrupts
   the Ink TUI. Use the leveled `log` from `src/core/logger.ts`; it writes to `taicho.log` in the
   workspace and redacts auth material centrally (so no call site can leak a token). Raise to debug

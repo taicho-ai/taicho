@@ -2,8 +2,8 @@ import { test, expect } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeFile } from "node:fs/promises";
-import { serializeAgent, parseAgent, seedRoot, seedLibrarian, LIBRARIAN_ID, LIBRARIAN_TOOLS, reindex, loadIndex, loadAgent, createAgent, type RegistryRow } from "./roster";
+import { writeFile, mkdir } from "node:fs/promises";
+import { serializeAgent, parseAgent, seedRoot, seedLibrarian, LIBRARIAN_ID, LIBRARIAN_TOOLS, reindex, loadIndex, loadAgent, createAgent, reconcileWorkerTools, workerTools, DEFAULT_WORKER_TOOLS, type RegistryRow } from "./roster";
 import { AgentDef } from "../schemas/agent";
 import { openDb } from "./db";
 import { ensureWorkspace, paths } from "./files";
@@ -60,6 +60,65 @@ test("createAgent writes a file, a registry row, and is discoverable immediately
   const loaded = await loadAgent(ws, "writer");
   expect(loaded.identity).toBe("You write.");
   expect(loaded.tools).toEqual(["write_artifact", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations"]); // default worker grant (Plan 01: produce + hand off + consume + annotate/revise)
+});
+
+// ── Plan 14: workers must never be born toolless ──
+
+test("workerTools: baseline is the artifact grant; extras ADD on top; deduped, baseline-first", () => {
+  expect(workerTools()).toEqual(DEFAULT_WORKER_TOOLS);            // no request → the baseline
+  expect(workerTools([])).toEqual(DEFAULT_WORKER_TOOLS);         // explicit [] → still the baseline (the bug fix)
+  expect(workerTools(["delegate_task", "run_command"])).toEqual([...DEFAULT_WORKER_TOOLS, "delegate_task", "run_command"]);
+  // a request that re-lists a baseline tool doesn't duplicate it
+  expect(workerTools(["save_artifact", "mcp:web"])).toEqual([...DEFAULT_WORKER_TOOLS, "mcp:web"]);
+});
+
+test("createAgent with NO tools field binds the artifact baseline", async () => {
+  const { ws, db } = await freshWs();
+  await reindex(ws, db);
+  const a = await createAgent(ws, db, { id: "no-tools", role: "x", identity: "y" }, "root");
+  for (const t of ["save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations"])
+    expect(a.tools).toContain(t);
+  expect((await loadAgent(ws, "no-tools")).tools).toEqual(DEFAULT_WORKER_TOOLS); // persisted, not empty
+});
+
+test("createAgent with explicit tools:[] STILL binds the artifact baseline (the root/2026-07-04-run6 bug)", async () => {
+  const { ws, db } = await freshWs();
+  await reindex(ws, db);
+  const a = await createAgent(ws, db, { id: "empty-tools", role: "x", identity: "y", tools: [] }, "root");
+  // Before Plan 14, `draft.tools ?? [defaults]` let `[]` sail through → a toolless worker. Now baseline-merged.
+  expect(a.tools).toEqual(DEFAULT_WORKER_TOOLS);
+  for (const t of DEFAULT_WORKER_TOOLS) expect((await loadAgent(ws, "empty-tools")).tools).toContain(t);
+});
+
+test("createAgent merges the baseline UNDER model-requested extras (delegate_task + mcp)", async () => {
+  const { ws, db } = await freshWs();
+  await reindex(ws, db);
+  const a = await createAgent(ws, db, { id: "wired", role: "x", identity: "y", tools: ["delegate_task", "mcp:web"] }, "root");
+  for (const t of DEFAULT_WORKER_TOOLS) expect(a.tools).toContain(t); // baseline preserved
+  expect(a.tools).toContain("delegate_task");                        // extras added
+  expect(a.tools).toContain("mcp:web");
+});
+
+test("reconcileWorkerTools backfills a worker born toolless; leaves explicit grants + built-ins alone", async () => {
+  const { ws, db } = await freshWs();
+  await seedLibrarian(ws);
+  // A synthetic worker persisted with tools:[] — exactly the 9 broken squad agents in the live deck.
+  const toolless = AgentDef.parse({ id: "content-strategist", role: "x", identity: "y", tools: [], canSee: ["*"], canDelegateTo: [], isRoot: false, created: "2026-07-04T00:00:00.000Z" });
+  await mkdir(join(ws, "agents", "content-strategist"), { recursive: true });
+  await writeFile(join(ws, "agents", "content-strategist", "agent.md"), serializeAgent(toolless));
+  // A worker with a deliberate NON-empty (non-artifact) grant — must be left untouched.
+  const narrow = AgentDef.parse({ id: "narrow", role: "x", identity: "y", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: [], isRoot: false, created: "2026-07-04T00:00:00.000Z" });
+  await mkdir(join(ws, "agents", "narrow"), { recursive: true });
+  await writeFile(join(ws, "agents", "narrow", "agent.md"), serializeAgent(narrow));
+
+  const fixed = await reconcileWorkerTools(ws);
+  expect(fixed).toEqual(["content-strategist"]);                 // only the toolless worker
+  expect((await loadAgent(ws, "content-strategist")).tools).toEqual(DEFAULT_WORKER_TOOLS);
+  expect((await loadAgent(ws, "narrow")).tools).toEqual(["delegate_task"]); // deliberate grant preserved
+  expect((await loadAgent(ws, "root")).tools).toContain("create_agent");    // root untouched (isRoot)
+  expect((await loadAgent(ws, LIBRARIAN_ID)).tools).toEqual(LIBRARIAN_TOOLS); // librarian untouched
+  // idempotent: a second pass finds nothing to fix
+  expect(await reconcileWorkerTools(ws)).toEqual([]);
 });
 
 test("createAgent rejects a duplicate id", async () => {
