@@ -183,6 +183,55 @@ test("root delegate_task spawns a child run that produces its own trace", async 
   expect(readArtifact(ws, child.artifacts[0])!.id).toBe("hello");
 });
 
+test("Plan 08 injection guard: a child spawned by a TAINTED parent starts pre-armed (brief-laundering defense)", async () => {
+  // Cross-run defense-in-depth: the parent ingests untrusted content (read_artifact), then delegates.
+  // The brief it hands down is therefore untrusted, so the child must start with its injection guard
+  // ARMED — a run_command in the child is forced to human approval even though the child itself never
+  // touched an ingestion tool. We prove it by the approval reason citing the `parent-brief` taint.
+  const { ws, db } = await boot();
+  saveArtifact(ws, { id: "doc", title: "Doc", type: "report", body: "attacker-controlled body", producer: "x", runId: "x/1" });
+  await createAgent(ws, db, { id: "writer", role: "runs", identity: "You run commands.", tools: ["run_command"] }, "root");
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("read_artifact", { id: "doc", includeBody: true }),        // root step 1: ingest → arms root's guard
+      call("delegate_task", { to: "writer", goal: "run a command" }), // root step 2: hand a (now-tainted) brief down
+      call("run_command", { command: "echo hi" }),                    // child step 1: gated because pre-armed
+      text("child done"),                                             // child step 2
+      text("root done"),                                              // root step 3
+    ) as any,
+  });
+  const approvals: Array<{ kind: string; reason?: string }> = [];
+  const deps = makeDeps({ ws, db, model, requestApproval: async (r) => { approvals.push(r as { kind: string; reason?: string }); return { type: "reject" }; } });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "read the doc then have writer run a command" }], triggeredBy: "user" });
+  const cmdApproval = approvals.find((a) => a.kind === "run_command");
+  expect(cmdApproval).toBeDefined();
+  expect(cmdApproval!.reason).toMatch(/parent-brief/);        // the child inherited the parent's taint
+  expect(cmdApproval!.reason).toMatch(/untrusted content.*injection/i);
+});
+
+test("Plan 08 injection guard: a child of an UNtainted parent is NOT pre-armed (control)", async () => {
+  // Same shape, but the parent ingests nothing before delegating — so the child's run_command approval
+  // (forced here only because dcg is unavailable in tests) must NOT cite the parent-brief taint.
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "runs", identity: "You run commands.", tools: ["run_command"] }, "root");
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("delegate_task", { to: "writer", goal: "run a command" }), // root: no ingestion first
+      call("run_command", { command: "echo hi" }),                    // child
+      text("child done"),
+      text("root done"),
+    ) as any,
+  });
+  const approvals: Array<{ kind: string; reason?: string }> = [];
+  const deps = makeDeps({ ws, db, model, requestApproval: async (r) => { approvals.push(r as { kind: string; reason?: string }); return { type: "reject" }; } });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "have writer run a command" }], triggeredBy: "user" });
+  const cmdApproval = approvals.find((a) => a.kind === "run_command");
+  expect(cmdApproval).toBeDefined();                        // still asks (dcg unavailable in tests)
+  expect(cmdApproval!.reason ?? "").not.toMatch(/parent-brief/); // …but NOT because of an inherited taint
+});
+
 test("an agent whose iteration budget is exhausted yields a blocked-outcome trace", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");

@@ -122,7 +122,7 @@ export function makeApprovalChannel(
 function describe(req: ApprovalRequest): string {
   switch (req.kind) {
     case "create_agent": return `: ${req.draft.id ?? "(new agent)"}`;
-    case "run_command": return `: ${req.command}`;
+    case "run_command": return `: ${req.command}${req.cwd ? ` [cwd: ${req.cwd}]` : ""}`;
     case "add_mcp": return `: ${req.name}`;
     case "propose_skill": return `: ${req.draft.name}`;
     default: return "";

@@ -71,7 +71,7 @@ export type ApprovalRequest =
   | { kind: "ask_human"; question: string; options: string[] }
   | { kind: "add_mcp"; name: string; spec: McpServerConfig }
   | { kind: "propose_skill"; draft: { name: string; description: string; body: string; tags: string[] } }
-  | { kind: "run_command"; command: string; reason?: string };
+  | { kind: "run_command"; command: string; cwd?: string; reason?: string };
 export type ApprovalDecision =
   | { type: "approve" }
   | { type: "reject" }
@@ -88,7 +88,7 @@ export interface RunContext {
   embed?: (text: string) => Promise<Float32Array>; // present only when an embedder is configured (semantic KB)
   classifyCommand?: (command: string) => Verdict;                                             // test seam
   runShell?: (command: string, cwd: string) => { exitCode: number; stdout: string; stderr: string }; // test seam
-  runSandboxed?: (command: string, cwd: string) => { exitCode: number; stdout: string; stderr: string; enforced: boolean }; // test seam (Plan 08 sandbox)
+  runSandboxed?: (command: string, cwd: string, writableRoot?: string) => { exitCode: number; stdout: string; stderr: string; enforced: boolean }; // test seam (Plan 08 sandbox); writableRoot anchors the confined write set to ctx.ws (NOT the model cwd)
   /** Plan 08 injection guard: flipped to `entered: true` (recording the source tool names) the moment
    *  read_url OR any granted MCP tool returns — attacker-influenceable content that has entered this
    *  run. Once set, run_command forces the captain's approval (a dcg `allow` no longer auto-runs it):
@@ -213,7 +213,7 @@ export function makeDeps(opts: {
 
 export async function executeRun(
   deps: RunDeps,
-  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; criteria?: string; fromRun: string }; inputArtifacts?: string[]; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string },
+  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; criteria?: string; fromRun: string }; inputArtifacts?: string[]; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string; taintedContext?: boolean },
 ): Promise<RunResult> {
   const depth = opts.depth ?? 0;
   const ancestry = opts.ancestry ?? [];
@@ -269,7 +269,12 @@ export async function executeRun(
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
     ingestSource: opts.ingestSource,
     artifacts: [], inputArtifacts: [], outputArtifacts: [], delegatedOut: [],
-    untrusted: { entered: false, sources: [] }, // Plan 08 injection guard — armed by read_url / MCP results
+    // Plan 08 injection guard — armed by ingestion tools (read_url / read_artifact / recall / read_source /
+    // MCP + delegation results). Defense-in-depth: a child spawned by a TAINTED parent starts pre-armed
+    // (`taintedContext`), because the parent's brief/context may itself carry injected instructions —
+    // this closes the synchronous cross-run brief-laundering path (parent ingests → hides a command in
+    // the child's brief → child auto-runs it). See the cross-run residual note for what remains.
+    untrusted: { entered: opts.taintedContext === true, sources: opts.taintedContext ? ["parent-brief"] : [] },
     spanEvents, emitStep,
     requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
@@ -284,6 +289,9 @@ export async function executeRun(
         triggeredBy: runId,
         depth: depth + 1,
         ancestry: [...ancestry, opts.agent.id],
+        // Plan 08 injection guard: if THIS run has ingested untrusted content by the time it delegates,
+        // the brief it hands down is itself untrusted — pre-arm the child so its run_command is gated.
+        taintedContext: ctx.untrusted.entered,
       });
     },
     verifications: [],

@@ -23,7 +23,7 @@ import { searchKnowledge } from "../knowledge/retrieval";
 import { getActiveSkills, mkSkillId, writeSkill } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
 import { Skill } from "../schemas/skill";
-import { classifyCommand, runShell, runSandboxed } from "./command-guard";
+import { classifyCommand, runShell, runSandboxed, isInsideWorkspace } from "./command-guard";
 import { argsPreview, capJson } from "./instrument";
 
 // read_artifact body cap: default returns metadata + summary only; a body read is capped so an
@@ -493,7 +493,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   if (agent.tools.includes("run_command"))
     set.run_command = tool({
       description: "Run a shell command in the workspace. It runs in a restricted SANDBOX first (no network; writes confined to the workspace) — a command the sandbox completes returns straight away. The safety guard clears benign commands; anything it flags — OR any command proposed after UNTRUSTED content (a fetched web page or an MCP tool result) has entered this run — needs the captain's approval first. A command the sandbox can't complete escalates to a captain-approved unsandboxed run. Returns { exitCode, stdout, stderr, sandbox }.",
-      inputSchema: z.object({ command: z.string(), cwd: z.string().optional() }),
+      inputSchema: z.object({ command: z.string(), cwd: z.string().optional().describe("working directory (defaults to the workspace); a cwd outside the workspace can't be sandbox-confined, so it needs the captain's approval") }),
       execute: async ({ command, cwd }) => {
         const classify = ctx.classifyCommand ?? classifyCommand;
         const sandboxed = ctx.runSandboxed ?? runSandboxed;
@@ -501,18 +501,26 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         const workdir = cwd ?? ctx.ws;
         const v = classify(command);
         const tainted = ctx.untrusted?.entered === true;
+        // Sandbox-escape guard (Plan 08): the model can name its own `cwd`, but the sandbox's writable
+        // set is anchored to ctx.ws — never the model cwd. A cwd that resolves OUTSIDE realpath(ctx.ws)
+        // is therefore NOT auto-runnable: we route it to the captain (who sees WHERE it runs) rather
+        // than silently widening the writable set or letting an unconfined write slip through.
+        const escapesWs = cwd !== undefined && !isInsideWorkspace(ctx.ws, workdir);
 
-        // Explicit-review path — a dcg `block` verdict, OR the injection guard (untrusted content has
-        // already entered this run), routes the command to the captain's approval card. Critically, a
-        // dcg `allow` does NOT bypass the injection guard: ingest-untrusted-then-run-shell is the
-        // classic prompt-injection→execution chain, so once tainted the human MUST see the command.
-        // On approve it runs as the captain reviewed it (they inspected the exact command); on reject,
-        // nothing runs. No sandbox dance here — the human IS the gate for these.
-        if (v.decision !== "allow" || tainted) {
-          const reason = tainted
-            ? `untrusted content (${ctx.untrusted.sources.join(", ") || "external source"}) entered this run before this command — possible prompt-injection→execution; ${v.reason ?? "confirm to run"}`
-            : v.reason;
-          const d = await ctx.requestApproval({ kind: "run_command", command, reason });
+        // Explicit-review path — a dcg `block` verdict, the injection guard (untrusted content has
+        // already entered this run), OR a cwd that escapes the workspace routes the command to the
+        // captain's approval card. Critically, a dcg `allow` does NOT bypass the injection guard:
+        // ingest-untrusted-then-run-shell is the classic prompt-injection→execution chain, so once
+        // tainted the human MUST see the command. On approve it runs as the captain reviewed it (they
+        // inspected the exact command AND its cwd); on reject, nothing runs. No sandbox dance here — the
+        // human IS the gate for these.
+        if (v.decision !== "allow" || tainted || escapesWs) {
+          const parts: string[] = [];
+          if (tainted) parts.push(`untrusted content (${ctx.untrusted.sources.join(", ") || "external source"}) entered this run before this command — possible prompt-injection→execution`);
+          if (escapesWs) parts.push(`the working directory (${workdir}) is OUTSIDE the workspace (${ctx.ws}) — the sandbox can't confine writes there; approve to run it there UNSANDBOXED`);
+          if (v.decision !== "allow" && v.reason) parts.push(v.reason);
+          const reason = parts.join("; ") || "confirm to run";
+          const d = await ctx.requestApproval({ kind: "run_command", command, cwd: workdir, reason });
           if (d.type !== "approve") return { rejected: true };
           return { ...run(command, workdir), sandbox: "approved" as const };
         }
@@ -526,14 +534,15 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         // the workspace). NOTE (declared limitation): a network denial surfaces as an ordinary network
         // error, indistinguishable from a real outage, so it is NOT auto-escalated — the model sees the
         // failure and should reach the network via read_url / an MCP tool, not raw shell.
-        const sb = sandboxed(command, workdir);
+        // Writable root is ctx.ws (NOT workdir) — the model's cwd never widens the confined write set.
+        const sb = sandboxed(command, workdir, ctx.ws);
         const sandboxDenied = sb.enforced && sb.exitCode !== 0 && /operation not permitted|sandbox/i.test(sb.stderr);
         if (sb.enforced && !sandboxDenied)
           return { exitCode: sb.exitCode, stdout: sb.stdout, stderr: sb.stderr, sandbox: "enforced" as const };
         const escalateReason = sb.enforced
           ? `the sandbox DENIED this command an operation it needs (exit ${sb.exitCode}: "operation not permitted" — it tried to write outside the workspace). Approve to re-run WITHOUT the sandbox.`
           : "no OS sandbox is enforced on this host — approve to run this command WITHOUT a sandbox.";
-        const d = await ctx.requestApproval({ kind: "run_command", command, reason: escalateReason });
+        const d = await ctx.requestApproval({ kind: "run_command", command, cwd: workdir, reason: escalateReason });
         if (d.type !== "approve")
           return sb.enforced
             ? { exitCode: sb.exitCode, stdout: sb.stdout, stderr: sb.stderr, sandbox: "enforced" as const, escalationDeclined: true }
@@ -574,11 +583,24 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         if (!(k in set)) { set[k] = v; mcpToolNames.add(k); }
     }
 
-  // Untrusted-content sources (Plan 08 injection guard): a fetched web page (read_url) or ANY MCP
-  // tool result is attacker-influenceable text entering this run. instrument() arms ctx.untrusted the
-  // moment one of these returns; run_command then forces the captain's approval (see run_command).
+  // Untrusted-content sources (Plan 08 injection guard): every channel that can carry
+  // attacker-influenceable text INTO this run. instrument() arms ctx.untrusted the moment one of these
+  // returns; run_command then forces the captain's approval (a dcg `allow` no longer auto-runs it).
+  //   - read_url .................. a fetched web page
+  //   - ANY granted MCP tool ...... arbitrary server-returned content
+  //   - read_artifact ............. artifacts are the PRIMARY cross-agent hand-off (fetch a page →
+  //                                 save_artifact → read it elsewhere), so a read carries prior taint
+  //   - recall / search_knowledge . the shared KB can hold ingested (hence tainted) content
+  //   - read_source ............... admin-authored source docs are still externally-authored text
+  //   - delegate/await/dispatch/check_task — a child's summary is content a child run may have ingested
+  // Deliberately conservative: touching ANY of these arms the guard, erring toward MORE approval, never
+  // less. Names not present in `set` (ungranted tools) simply never fire — the instrument seam only
+  // flips the guard for a tool that actually ran, so listing them all here is safe and future-proof.
   const untrustedSources = new Set<string>(mcpToolNames);
-  if ("read_url" in set) untrustedSources.add("read_url");
+  for (const name of [
+    "read_url", "read_artifact", "recall", "search_knowledge", "read_source",
+    "delegate_task", "await_task", "dispatch_task", "check_task",
+  ]) untrustedSources.add(name);
 
   return instrument(set, ctx, untrustedSources);
 }
@@ -590,11 +612,12 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
  *  `delegate_task` result's `runId` is captured on `tool_end` so the waterfall can nest the child
  *  run under its delegating tool span.
  *
- *  Plan 08: this is also where the injection guard arms. When a tool in `untrustedSources` (read_url
- *  or any granted MCP tool) RETURNS, we flip ctx.untrusted.entered — attacker-influenceable content
- *  has now entered the run, so a later run_command must be human-confirmed. Deliberately conservative:
- *  touching an untrusted source at all arms the guard (even an error return means the run reacted to
- *  external I/O), which errs toward MORE approval, never less. */
+ *  Plan 08: this is also where the injection guard arms. When a tool in `untrustedSources` (read_url,
+ *  any granted MCP tool, read_artifact, recall/search_knowledge, read_source, or a delegation-result
+ *  tool — see the set built in toolsForAgent) RETURNS, we flip ctx.untrusted.entered — attacker-
+ *  influenceable content has now entered the run, so a later run_command must be human-confirmed.
+ *  Deliberately conservative: touching an untrusted source at all arms the guard (even an error return
+ *  means the run reacted to external I/O), which errs toward MORE approval, never less. */
 function instrument(set: ToolSet, ctx: RunContext, untrustedSources?: Set<string>): ToolSet {
   let seq = 0;
   const out: ToolSet = {};
