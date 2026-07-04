@@ -97,6 +97,9 @@ export const TaichoConfig = z.object({
     // Plan 05: fraction (0..1) of a model's context window at which the loop folds the oldest tool
     // round-trips into one compact summary. Default ~0.7 (see compaction.ts DEFAULT_COMPACT_AT).
     compactAt: z.number().positive().max(1).optional(),
+    // Plan 05 Ph3: how many recent conversation turns boot-replay keeps VERBATIM; older turns fold
+    // into a rolling summary. Default 6 (conversation-replay.ts DEFAULT_REPLAY_KEEP_TURNS).
+    replayKeepTurns: z.number().int().nonnegative().optional(),
   }).optional(),
   // Deck-level ceilings (Plan 09) — top-level because they bound the whole deck, not one agent.
   budgets: DeckBudgets,

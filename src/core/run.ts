@@ -25,6 +25,7 @@ import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
 import { recentRunsDigest } from "./memory";
 import { compactionThreshold } from "./compaction";
+import { recordUserTurn, recordTurnOutcome } from "./turn-audit";
 import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
@@ -236,6 +237,16 @@ export async function executeRun(
     messagesPassedToModel: opts.messages,
     parentRunId: opts.brief?.fromRun,
   });
+
+  // Plan 01 Ph5 — the turn-outcome audit is an ENGINE seam (was App-local; PR #17), so every caller
+  // (REPL, headless, tests) gets identical ledger + task + replay audit. A user CONVERSATION turn is
+  // triggeredBy "user" and NOT a `/kb sync` ingest (ingestSource): those get run evidence but no
+  // ledger/task, exactly as before. Open the user turn + task record now, before any model call, so
+  // an interrupted/failed run still leaves the turn audited. Closed at run end by recordTurnOutcome.
+  const isUserTurn = opts.triggeredBy === "user" && !opts.ingestSource;
+  const userTurn = isUserTurn
+    ? recordUserTurn(deps.ws, deps.db, { agent: opts.agent.id, runId, text: lastUserText(opts.messages) })
+    : undefined;
 
   // Resolve THIS agent's model up front (before tools are built) so the delegation checker can run
   // on the same model plumbing the loop uses — an independent call on the delegating agent's model.
@@ -505,9 +516,19 @@ export async function executeRun(
   // Verdicts are part of the run's story ("why did it retry?") — record them in the transcript too.
   for (const v of ctx.verifications) appendRunTranscript(deps.ws, runId, { ts: new Date().toISOString(), kind: "verification", data: v });
   writeChildRuns(deps.ws, runId, ctx.childTraces);
-  writeRunFinal(deps.ws, runId, result.error ? `error: ${result.error}` : result.text);
-  writeRunFailure(deps.ws, runId, trace, result.error ? `error: ${result.error}` : result.text);
+  const finalText = result.error ? `error: ${result.error}` : result.text;
+  writeRunFinal(deps.ws, runId, finalText);
+  writeRunFailure(deps.ws, runId, trace, finalText);
   writeTrace(deps.ws, trace);
+  // Plan 01 Ph5 seam (close): record the assistant turn + context decision + task update, and rebuild
+  // the derived boot-replay cache (Plan 05 Ph3 folds older turns into a rolling summary here). Guarded
+  // to user conversation turns; children (triggeredBy = runId) and ingest runs are untouched.
+  if (isUserTurn) {
+    recordTurnOutcome(deps.ws, deps.db, {
+      agent: opts.agent.id, runId, userTurn, trace, children: ctx.childTraces, text: finalText,
+      keepRecentTurns: deps.configDefaults?.replayKeepTurns,
+    });
+  }
   deps.onRunEnd?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, outcome });
-  return { runId, text: result.error ? `error: ${result.error}` : result.text, trace };
+  return { runId, text: finalText, trace };
 }
