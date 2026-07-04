@@ -86,6 +86,13 @@ export interface RunContext {
   embed?: (text: string) => Promise<Float32Array>; // present only when an embedder is configured (semantic KB)
   classifyCommand?: (command: string) => Verdict;                                             // test seam
   runShell?: (command: string, cwd: string) => { exitCode: number; stdout: string; stderr: string }; // test seam
+  runSandboxed?: (command: string, cwd: string) => { exitCode: number; stdout: string; stderr: string; enforced: boolean }; // test seam (Plan 08 sandbox)
+  /** Plan 08 injection guard: flipped to `entered: true` (recording the source tool names) the moment
+   *  read_url OR any granted MCP tool returns — attacker-influenceable content that has entered this
+   *  run. Once set, run_command forces the captain's approval (a dcg `allow` no longer auto-runs it):
+   *  ingest-untrusted-then-execute is the classic prompt-injection→execution chain. Set by the
+   *  instrument() seam in tools.ts. */
+  untrusted: { entered: boolean; sources: string[] };
   ingestSource?: string; // when set (a source-ingestion run), remember stamps this instead of agentId:runId
   artifacts: string[];
   inputArtifacts: string[];   // artifact handles this run handed DOWN to children (hand-off graph)
@@ -255,6 +262,7 @@ export async function executeRun(
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
     ingestSource: opts.ingestSource,
     artifacts: [], inputArtifacts: [], outputArtifacts: [], delegatedOut: [],
+    untrusted: { entered: false, sources: [] }, // Plan 08 injection guard — armed by read_url / MCP results
     spanEvents, emitStep,
     requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),

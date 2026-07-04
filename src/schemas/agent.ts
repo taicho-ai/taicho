@@ -5,6 +5,10 @@ export const AgentDef = z.object({
   id: z.string().regex(/^[a-z][a-z0-9-]*$/),
   role: z.string(),                       // one-line capability description (shown in discovery)
   identity: z.string(),                   // body of agent.md — the SOUL
+  // Capability allowlist. Built-in tool names (e.g. "delegate_task", "run_command") grant those
+  // tools. MCP capabilities are opt-in the SAME way (Plan 08 security hardening): "mcp:<server>"
+  // grants every tool that connected server exposes; "mcp:<server>/<tool>" grants exactly one.
+  // Anything NOT listed is not exposed to the agent — MCP tools included (no blanket grant).
   tools: z.array(z.string()).default([]),
   canSee: z.array(z.string()).default(["*"]),        // org visibility ACL
   canDelegateTo: z.array(z.string()).default(["*"]),

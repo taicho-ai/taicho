@@ -15,10 +15,10 @@ export type McpStatus = "connected" | "error" | "needs-auth";
 export interface McpServerStatus { name: string; kind: "stdio" | "http"; status: McpStatus; toolCount: number; error?: string }
 
 export interface McpManager {
-  /** Resolve an agent.tools ref ("server" or "server/tool") to namespaced AI-SDK tools. */
+  /** Resolve a per-agent MCP grant ("server" or "server/tool", from an agent's `mcp:<…>` tool ref)
+   *  to namespaced AI-SDK tools. This is the ONLY way MCP tools reach an agent — there is no blanket
+   *  "all tools to all agents" grant (Plan 08 security hardening). */
   toolsForRef(ref: string): ToolSet;
-  /** Every connected server's tools, namespaced (server_tool) — used to grant all agents all MCP tools. */
-  allTools(): ToolSet;
   list(): McpServerStatus[];
   addServer(name: string, spec: McpServerConfig): Promise<McpServerStatus>;
   removeServer(name: string): Promise<boolean>;
@@ -115,14 +115,6 @@ export async function createMcpManager(opts: McpManagerOptions): Promise<McpMana
       if (toolName) return e.set[toolName] ? { [toolKey(server, toolName)]: e.set[toolName] } : {};
       const out: ToolSet = {};
       for (const [n, t] of Object.entries(e.set)) out[toolKey(server, n)] = t;
-      return out;
-    },
-    allTools() {
-      const out: ToolSet = {};
-      for (const [name, e] of entries) {
-        if (e.status !== "connected") continue;
-        for (const [n, t] of Object.entries(e.set)) { const k = toolKey(name, n); if (!(k in out)) out[k] = t; }
-      }
       return out;
     },
     list() {
