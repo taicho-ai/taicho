@@ -20,8 +20,18 @@ import { makeDeps, executeRun, type Model, type RunDeps, type ApprovalRequest, t
 import { loadAgent } from "../store/roster";
 import { tailRun } from "./events";
 import { log } from "./logger";
+import type { Schedule } from "../schemas/schedule";
 
 export type ApprovalMode = "reject" | "approve" | "prompt";
+
+/** The `runHeadless` options for an UNATTENDED scheduled fire. The `triggeredBy: "schedule:<id>"` marker
+ *  is what EXCLUDES the fire from the target agent's conversation ledger + boot-replay cache (it still
+ *  gets full run evidence) — see runHeadless's `triggeredBy` note. Constructed in ONE place so every fire
+ *  site — the REPL (App.tsx), the boot CLI + `taicho schedule run` (index.tsx / schedule-cli), and the
+ *  audit test — share the SAME wiring and cannot drift. Callers spread the result and add `out`/`signal`. */
+export function scheduleFireOptions(s: Schedule): { goal: string; agent: string; approve: ApprovalMode; triggeredBy: string } {
+  return { goal: s.goal, agent: s.agent, approve: s.approve, triggeredBy: `schedule:${s.id}` };
+}
 
 export type CliCommand =
   | { kind: "run"; goal: string; agent: string; approve: ApprovalMode }

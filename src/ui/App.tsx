@@ -20,7 +20,7 @@ import { listPolicies, deletePolicy, approvePolicy } from "../store/policy";
 import { updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
 import { TaskScheduler } from "../core/tasks";
 import { SchedulerRunner, parseScheduleCommand, describeTrigger, formatScheduleLine } from "../core/scheduler";
-import { runHeadless } from "../core/headless";
+import { runHeadless, scheduleFireOptions } from "../core/headless";
 import { listSchedules, createSchedule, removeSchedule, readSchedule, updateSchedule } from "../store/schedules";
 import type { Schedule } from "../schemas/schedule";
 import { statSync } from "node:fs";
@@ -292,10 +292,11 @@ export function App(props: {
     try {
       const res = await runHeadless(
         { ws: props.ws, db: props.db, model: activeModel, resolveModel, priceUsd, configDefaults: props.configDefaults, mcp: props.mcp, embed: props.embed, deckLedger: props.deckLedger },
-        // triggeredBy: schedule:<id> keeps this UNATTENDED fire OUT of the target agent's conversation
-        // ledger + boot-replay cache (it still gets full run evidence). Otherwise every cron/interval/watch
-        // fire appended a user+assistant pair and replayed as prior "conversation" on the next launch.
-        { goal: s.goal, agent: s.agent, approve: s.approve, triggeredBy: `schedule:${s.id}`, out: (l) => say({ kind: "system", text: `  ${l}` }) },
+        // scheduleFireOptions stamps triggeredBy: schedule:<id> — keeps this UNATTENDED fire OUT of the
+        // target agent's conversation ledger + boot-replay cache (it still gets full run evidence).
+        // Otherwise every cron/interval/watch fire appended a user+assistant pair and replayed as prior
+        // "conversation" on the next launch. Shared with index.tsx so the wiring can't drift.
+        { ...scheduleFireOptions(s), out: (l) => say({ kind: "system", text: `  ${l}` }) },
       );
       // Record the outcome of this fire (lastRunId/lastStatus). The runner already advanced cadence.
       updateSchedule(props.ws, s.id, { lastRunId: res.runId, lastStatus: res.outcome ?? (res.ok ? "completed" : "failed") });

@@ -24,7 +24,7 @@ import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
 import { reindexTasks, reconcileTasks } from "./store/task-state";
 import { createE2eModel } from "./core/e2e-model";
-import { parseCli, runHeadless, runTail } from "./core/headless";
+import { parseCli, runHeadless, runTail, scheduleFireOptions } from "./core/headless";
 import { runScheduleCli } from "./core/schedule-cli";
 import { configureLogger, log } from "./core/logger";
 
@@ -202,7 +202,7 @@ if (cli.command?.kind === "schedule") {
   const r = await runScheduleCli(
     // `schedule run` is the same UNATTENDED path a live scheduled fire uses — mark it schedule:<id> so it
     // is EXCLUDED from the target agent's conversation ledger + boot-replay cache (still gets run evidence).
-    { ws, out: (l) => process.stdout.write(l + "\n"), fire: (s) => runHeadless(hd, { goal: s.goal, agent: s.agent, approve: s.approve, triggeredBy: `schedule:${s.id}` }) },
+    { ws, out: (l) => process.stdout.write(l + "\n"), fire: (s) => runHeadless(hd, scheduleFireOptions(s)) },
     cli.command.args,
   );
   if (mcp) await mcp.closeAll().catch((e) => log.warn("mcp closeAll failed", e));

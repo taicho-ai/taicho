@@ -3,7 +3,7 @@
  *  or ingest runs); boot replay = rolling summary + recent-K tail; the LEDGER stays append-only truth
  *  while the replay shrinks; replay carries handles, not payloads. Models are mocked — NO network. */
 import { test, expect } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockLanguageModelV3, mockValues } from "./mock-model";
@@ -75,6 +75,40 @@ test("a PRE-RUN throw (resolveModel) settles the OPEN turn — no dangling submi
   expect(readTaskState(ws, taskIdForRun(led[0].runId))?.status).toBe("failed");
   // a failed turn is EXCLUDED from replay, so the boot-replay cache stays empty
   expect(loadThread(ws, "root")).toEqual([]);
+});
+
+test("a POST-loop finalization throw does NOT re-settle a COMPLETED user turn as failed (PR #27 follow-up)", async () => {
+  const { ws, db } = await boot();
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("all done")) as any });
+  const root = await loadAgent(ws, "root");
+
+  // Force a targeted I/O fault in a POST-loop finalization step: recordTurnOutcome → rebuildReplayCache →
+  // writeThread writes agents/root/thread.jsonl. Pre-create it as a DIRECTORY so writeFileSync throws
+  // EISDIR — the loop has ALREADY produced a terminal `completed` result, so this is a throw AFTER the run
+  // completed, not before it (conversations/ + the DB stay fully writable). The run's turn is already
+  // closed, so the catch's recordTurnFailure must NOT run over a completed run.
+  mkdirSync(join(ws, "agents", "root", "thread.jsonl"), { recursive: true });
+
+  await expect(
+    executeRun(makeDeps({ ws, db, model }), { agent: root, messages: [{ role: "user", content: "do it" }], triggeredBy: "user" }),
+  ).rejects.toThrow(); // the finalization fault PROPAGATES to the caller — it is not swallowed …
+
+  // … but the run had already COMPLETED — recordTurnFailure must NOT fire over it. Were `turnClosed` set
+  // too late (the bug), the catch would append a 3rd `failed` ledger turn, flip both context decisions to
+  // excluded, and mark the task failed. It must leave the completed close intact instead:
+  const led = loadLedger(ws, "root");
+  expect(led.length).toBe(2);                                              // user + assistant only — NO 3rd `failed` turn
+  expect(led[0]).toMatchObject({ role: "user", content: "do it", status: "submitted" });
+  expect(led[1]).toMatchObject({ role: "assistant", status: "completed" });// stays completed, not re-settled to failed
+  expect(led.some((t) => t.status === "failed")).toBe(false);              // no duplicate/failed ledger turn
+
+  // both turns stay INCLUDED in replay context (recordTurnFailure would have flipped them to excluded)
+  const ctx = loadContext(ws, "root");
+  expect(ctx.includedTurns.length).toBe(2);
+  expect(ctx.excludedTurns).toEqual([]);
+
+  // the task keeps its `completed` outcome — recordTurnFailure would have flipped it to `failed`
+  expect(readTaskState(ws, taskIdForRun(led[0].runId))?.status).toBe("completed");
 });
 
 test("a failed user turn is recorded in the ledger but EXCLUDED from replay (append-only truth)", async () => {

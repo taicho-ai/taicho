@@ -43,6 +43,30 @@ test("loadThread pins the compaction-summary head when truncating a large replay
   expect(String(out[1].content)).toBe("msg 21");
 });
 
+// Regression (PR #27 follow-up, Finding 2): the pinned summary head steals a slot, so a RAW-message tail
+// cut can land mid-pair when `1 + 2*replayKeepTurns > maxTurns` — orphaning an assistant reply from its
+// user turn as the FIRST replayed tail message. loadThread must slice at a turn (user+assistant PAIR)
+// boundary so replay opens on a user turn (or the summary), never a dangling assistant reply.
+test("loadThread never opens the tail on a dangling assistant reply (pair-boundary slice)", () => {
+  const w = ws();
+  const head: ModelMessage = { role: "user", content: "[CONVERSATION COMPACTION] Folded 5 earlier turns …" };
+  // 20 user+assistant PAIRS ⇒ 40 tail messages; with the head that's 41 lines > maxTurns=40, so a raw cut
+  // drops the OLDEST user msg ("ask 0") and would leave its reply ("reply 0") orphaned at the tail head.
+  const tail: ModelMessage[] = [];
+  for (let i = 0; i < 20; i++) {
+    tail.push({ role: "user", content: `ask ${i}` });
+    tail.push({ role: "assistant", content: `reply ${i}` });
+  }
+  writeThread(w, "root", [head, ...tail]);
+
+  const out = loadThread(w, "root", 40);
+  expect(String(out[0].content)).toContain("[CONVERSATION COMPACTION]"); // head still pinned
+  expect(out[1].role).toBe("user");                                      // first tail message is a USER turn …
+  expect(String(out[1].content)).toBe("ask 1");                          // … "ask 0" + its orphaned reply were dropped
+  expect(String(out.at(-1)!.content)).toBe("reply 19");                  // newest tail kept
+  expect(out.length).toBeLessThanOrEqual(40);                            // still within the cap
+});
+
 test("corrupt lines are skipped", () => {
   const w = ws();
   writeThread(w, "root", [{ role: "user", content: "ok" }, { role: "user", content: "ok2" }]);
