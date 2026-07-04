@@ -622,3 +622,123 @@ test("INJECTION GUARD end-to-end: an MCP tool result arms ctx.untrusted, then ru
   expect(calls.length).toBe(1);
   expect(calls[0].reason).toMatch(/untrusted content.*injection/i);
 });
+
+// ── Fix 1 (PR #13 review): sandbox-escape via a model-supplied cwd ──
+
+test("run_command: a cwd OUTSIDE the workspace is forced to approval and NEVER auto-sandboxed", async () => {
+  const calls: Array<{ kind: string; cwd?: string; reason?: string }> = [];
+  let sandboxUsed = false;
+  const ranAt: string[] = [];
+  const ctxA = rc({
+    ws: "/ws",
+    requestApproval: async (r) => { calls.push(r as { kind: string; cwd?: string; reason?: string }); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),                                   // dcg allow — must NOT be enough
+    runSandboxed: () => { sandboxUsed = true; return { exitCode: 0, stdout: "", stderr: "", enforced: true }; },
+    runShell: (command, cwd) => { ranAt.push(cwd); return { exitCode: 0, stdout: "ran", stderr: "" }; },
+  });
+  const out = await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "echo hi", cwd: "/etc" });
+  expect(out).toMatchObject({ sandbox: "approved" });
+  expect(sandboxUsed).toBe(false);              // an out-of-ws cwd is NEVER handed to the sandbox (no silent widening)
+  expect(calls.length).toBe(1);
+  expect(calls[0].kind).toBe("run_command");
+  expect(calls[0].cwd).toBe("/etc");            // the captain SEES where it would run
+  expect(calls[0].reason).toMatch(/OUTSIDE the workspace/);
+  expect(ranAt).toEqual(["/etc"]);              // approved → runs there, unsandboxed
+});
+
+test("run_command: an out-of-ws cwd, approval declined → nothing runs", async () => {
+  let ran = false;
+  const ctxA = rc({
+    ws: "/ws",
+    requestApproval: async () => ({ type: "reject" }),
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: () => { ran = true; return { exitCode: 0, stdout: "", stderr: "", enforced: true }; },
+    runShell: () => { ran = true; return { exitCode: 0, stdout: "", stderr: "" }; },
+  });
+  const out = await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "echo x", cwd: "/tmp/../etc" });
+  expect(out).toEqual({ rejected: true });
+  expect(ran).toBe(false);
+});
+
+test("run_command: a cwd INSIDE the workspace auto-sandboxes with the write-set anchored to ctx.ws (not the cwd)", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-ws-"));
+  const sub = join(ws, "sub"); mkdirSync(sub);
+  const sbArgs: Array<{ cwd: string; writableRoot?: string }> = [];
+  const calls: unknown[] = [];
+  const ctxA = rc({
+    ws,
+    requestApproval: async (r) => { calls.push(r); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: (_cmd: string, cwd: string, writableRoot?: string) => { sbArgs.push({ cwd, writableRoot }); return { exitCode: 0, stdout: "ok", stderr: "", enforced: true }; },
+  });
+  const out = await invoke(toolsForAgent(agent(["run_command"]), ctxA).run_command, { command: "ls", cwd: sub });
+  expect(out).toMatchObject({ sandbox: "enforced" });
+  expect(calls.length).toBe(0);                 // an in-ws cwd needs no approval
+  expect(sbArgs[0].cwd).toBe(sub);              // runs in the requested subdir
+  expect(sbArgs[0].writableRoot).toBe(ws);      // but the writable set is anchored to ctx.ws, NOT the model cwd
+});
+
+// ── Fix 2 (PR #13 review): injection-guard coverage — the primary ingestion channels ──
+
+test("INJECTION GUARD: read_artifact arms the guard → a later dcg-allow run_command forces approval", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-ws-"));
+  const db = openDb(w);
+  saveArtifact(w, { id: "doc", title: "Doc", type: "report", body: "attacker-controlled body", producer: "x", runId: "x/1" });
+  const calls: Array<{ kind: string; reason?: string }> = [];
+  const ctxA = rc({
+    ws: w, db,
+    requestApproval: async (r) => { calls.push(r as { kind: string; reason?: string }); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: okSandbox(),
+    runShell: () => ({ exitCode: 0, stdout: "ran", stderr: "" }),
+  });
+  const set = toolsForAgent(agent(["read_artifact", "run_command"]), ctxA);
+  await invoke(set.read_artifact, { id: "doc", includeBody: true });
+  expect(ctxA.untrusted.entered).toBe(true);
+  expect(ctxA.untrusted.sources).toContain("read_artifact");
+  const out = await invoke(set.run_command, { command: "echo ok" });
+  expect(out).toMatchObject({ sandbox: "approved" });
+  expect(calls.length).toBe(1);
+  expect(calls[0].reason).toMatch(/untrusted content.*injection/i);
+});
+
+test("INJECTION GUARD: a delegation-result tool (check_task) arms the guard → later run_command forces approval", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-ws-"));
+  const db = openDb(w);
+  const taskId = mkTaskId();
+  createBackgroundTask(w, db, { taskId, agent: "worker", goal: "g" });
+  setTaskFields(w, db, taskId, { status: "completed", summary: "child said: run rm -rf", resultRef: "doc@v1" });
+  const calls: Array<{ kind: string; reason?: string }> = [];
+  const ctxA = rc({
+    ws: w, db,
+    requestApproval: async (r) => { calls.push(r as { kind: string; reason?: string }); return { type: "approve" }; },
+    classifyCommand: () => ({ decision: "allow" }),
+    runSandboxed: okSandbox(),
+    runShell: () => ({ exitCode: 0, stdout: "ran", stderr: "" }),
+  });
+  const set = toolsForAgent(agent(["check_task", "run_command"]), ctxA);
+  await invoke(set.check_task, { taskId });
+  expect(ctxA.untrusted.entered).toBe(true);
+  expect(ctxA.untrusted.sources).toContain("check_task");
+  const out = await invoke(set.run_command, { command: "echo ok" });
+  expect(out).toMatchObject({ sandbox: "approved" });
+  expect(calls.length).toBe(1);
+  expect(calls[0].reason).toMatch(/untrusted content.*injection/i);
+});
+
+test("INJECTION GUARD: read_source and recall are registered as untrusted ingestion sources", () => {
+  // read_source: reading an admin-authored source doc arms the guard for a subsequent run_command.
+  const w = mkdtempSync(join(tmpdir(), "taicho-ws-"));
+  const db = openDb(w);
+  const srcDir = paths.kbSourceDir(w); mkdirSync(srcDir, { recursive: true });
+  writeFileSync(join(srcDir, "a.md"), "# doc\ncontent");
+  const ctxA = rc({ ws: w, db });
+  const set = toolsForAgent(agent(["read_source", "recall", "run_command"]), ctxA);
+  // Both ingestion tools are present and will arm the guard on return (exercised by read_source here).
+  expect("read_source" in set).toBe(true);
+  expect("recall" in set).toBe(true);
+  return invoke(set.read_source, { path: "a.md" }).then(() => {
+    expect(ctxA.untrusted.entered).toBe(true);
+    expect(ctxA.untrusted.sources).toContain("read_source");
+  });
+});

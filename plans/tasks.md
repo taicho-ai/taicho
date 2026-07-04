@@ -319,10 +319,24 @@ Known-v1 posture that should become deliberate instead of implicit:
       grants one; ungranted MCP tools are never exposed. `toolsForAgent` resolves refs via
       `mcp.toolsForRef` (the blanket `allTools()` grant is deleted). `schemas/agent.ts` documents the
       convention; `roster.ts` default worker grant carries no MCP (least privilege).
-- [x] **Injection-aware guard** — `ctx.untrusted` is armed the moment `read_url` or any granted MCP
-      tool returns (the `instrument()` seam). Once armed, `run_command` routes to the captain's
-      approval card **even when dcg says `allow`** — a dcg allow cannot bypass the injection guard.
-      Deterministic + conservative (touching an untrusted source at all arms it).
+- [x] **Injection-aware guard** — `ctx.untrusted` is armed the moment an ingestion tool returns (the
+      `instrument()` seam). Once armed, `run_command` routes to the captain's approval card **even when
+      dcg says `allow`** — a dcg allow cannot bypass the injection guard. Deterministic + conservative
+      (touching an untrusted source at all arms it). **Ingestion sources** (PR #13 review — Fix 2):
+      `read_url`, **any** granted MCP tool, `read_artifact` (artifacts are the primary cross-agent
+      hand-off), `recall`/`search_knowledge` (shared KB), `read_source`, and the delegation-result
+      tools (`delegate_task`/`await_task`/`dispatch_task`/`check_task`). Cross-run defense-in-depth: a
+      child spawned by a TAINTED parent starts **pre-armed** (`executeRun` `taintedContext`, threaded by
+      `runChild`) — closes the synchronous brief-laundering path (parent ingests → hides a command in
+      the child's brief → child auto-runs it).
+      - **Declared residual (cross-run laundering):** taint is propagated in-memory for *synchronous*
+        delegation only. It is **not** persisted onto artifacts / KB nodes / task-state, so these paths
+        remain: (a) content ingested in run A, saved as an artifact/KB node, then read in an unrelated
+        run B — run B does re-arm because `read_artifact`/`recall` are ingestion sources, but only if it
+        actually reads them (not if the laundered command rides in B's *prompt*); (b) a **background**
+        `dispatch_task` (async, host-scheduled, separate run) does NOT inherit the parent taint — the
+        brief is persisted and picked up by a detached `executeRun` that starts untainted. Fully closing
+        these needs a persisted taint bit on artifacts/KB/task-state; deferred as invasive.
 - [x] **Sandbox-then-escalate** for `run_command` — the auto-run path (dcg cleared + untainted) runs
       the command CONFINED first (`runSandboxed`); a clean confined run returns with zero friction, a
       sandbox that can't be enforced or a command that fails inside it ESCALATES to a captain-approved
@@ -330,6 +344,13 @@ Known-v1 posture that should become deliberate instead of implicit:
       writes confined to the workspace — real, tested); **declared stub** (does NOT run, forces
       escalation) on non-macOS hosts where no mechanism exists (never faked). dcg-block/injection
       commands skip the sandbox dance — the human review IS the gate there.
+      - **cwd containment (PR #13 review — Fix 1):** the Seatbelt writable set is anchored to `ctx.ws`
+        (+ scratch temp) **ONLY** — never the model-supplied `cwd` (`runSandboxed(cmd, cwd, writableRoot=ctx.ws)`).
+        A `cwd` that `realpath`-resolves OUTSIDE `realpath(ctx.ws)` (symlinks followed) is not
+        auto-runnable — it routes to the captain's approval card, which now shows the `cwd`, so a model
+        can't self-authorize writes outside the workspace by naming its own cwd.
+      - **network deny is now tested (Fix 3):** `command-guard.test.ts` proves a loopback request that
+        succeeds unsandboxed is DENIED inside `runSandboxed` (macOS), not just the filesystem escape.
 
 ## Plan 09 — Global budgets & cost accounting *(placeholder)*
 
