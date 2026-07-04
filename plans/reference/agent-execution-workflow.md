@@ -74,6 +74,10 @@ Every PR body must include:
 
 PRs are reviewed **against the plan + reference doc**, not just for code quality:
 
+0. **`baseRefName` is `main`.** A stacked PR (based on another PR's branch) must be
+   retargeted to `main` before review — merging a stacked PR lands it on the stale base branch,
+   not `main` (this happened with PR #3; fixed manually). `gh pr view N --json baseRefName`.
+
 1. Does it implement what the plan says, honoring the closed Phase 0 decisions and the design
    principles (payload-agnostic artifacts; video-is-evidence-not-assertion; model proposes,
    config disposes; resolver shape kept in sync across its four mirrors)?
