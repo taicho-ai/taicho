@@ -62,7 +62,10 @@ export function formatEvent(event: RunTranscriptEvent): string {
   let detail = "";
   switch (event.kind) {
     case "model_request":
-      detail = d?.messageCount != null ? `${d.messageCount} msgs` : "";
+      detail = [d?.messageCount != null ? `${d.messageCount} msgs` : "", d?.contextTokens != null ? `~${d.contextTokens} tok` : "", d?.compacted ? "compacted" : ""].filter(Boolean).join(" · ");
+      break;
+    case "compaction":
+      detail = `folded ${d?.foldedRoundTrips ?? "?"} round-trip(s) / ${d?.foldedMessages ?? "?"} msgs · ${d?.before ?? "?"}→${d?.after ?? "?"} tok`;
       break;
     case "model_response": {
       const text = typeof d?.text === "string" ? d.text.replace(/\s+/g, " ").trim() : "";

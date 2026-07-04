@@ -50,6 +50,14 @@ issues tsc won't).
     the delegating agent's resolved model, via `runLoop` with an empty toolset. `tools.ts` owns the
     policy (check → one bounded retry with feedback → surface the failed verdict); `run.ts` owns the
     checker's model plumbing (`ctx.checkCriteria`). Verdicts land on `trace.verification` + transcript.
+  - `compaction.ts` — Plan 05 in-run context compaction (deterministic; no LLM call). Cheap `chars/4`
+    token estimate over system + messages; a per-model context-window table × `defaults.compactAt`
+    (default ~70%) gives the threshold (config-disposed). When the next-call estimate crosses it, the
+    loop folds the OLDEST tool round-trips into ONE `user` summary message — keeping the system prompt,
+    the original brief (`keepHead`), and the most recent `compactKeepRecent` round-trips VERBATIM — and
+    emits a `compaction` transcript event (never invisible). Peak estimate is recorded as
+    `trace.contextTokens` and surfaced in the waterfall LLM-span detail. **Cross-turn (boot-replay)
+    compaction is deferred** — it depends on Plan 01 Phase 5's `recordTurnOutcome` seam (not yet built).
   - `model.ts` — provider+model → AI-SDK model instance (`buildModel`, `createModelResolver`).
   - `providers/openai-codex.ts` — ChatGPT-subscription (Codex backend) provider: a `createOpenAI`
     instance with a custom `fetch` that injects the OAuth bearer + Codex headers and refreshes on 401.
