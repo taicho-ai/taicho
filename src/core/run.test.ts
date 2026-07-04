@@ -503,3 +503,98 @@ test("create_agent honors an edited identity, not just role", async () => {
   await executeRun(deps, { agent: root, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
   expect((await loadAgent(ws, "newbie")).identity).toBe("EDITED SOUL");
 });
+
+// ---------------------------------------------------------------------------
+// Plan 06 — Delegation verification (acceptance criteria + independent checker + one retry)
+// ---------------------------------------------------------------------------
+
+/** boss delegates; worker does the work. Both have generous budgets unless overridden. */
+function bossAndWorker(ws: string, db: import("bun:sqlite").Database, over: { workItems?: number } = {}) {
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You delegate.", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 10, maxWorkItemsPerRequest: over.workItems ?? 20 } });
+  putAgent(ws, db, { id: "worker", role: "worker", identity: "You work.", tools: [], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+}
+
+test("delegation WITHOUT criteria skips the checker — no extra model call, no verdict recorded", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "do X" }), // boss step 1 (no criteria)
+    text("worker result"),                                  // worker
+    text("boss done"),                                      // boss step 2
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.text).toBe("boss done");
+  expect(res.trace.delegatedOut.length).toBe(1);
+  expect(res.trace.verification.length).toBe(0);                 // no criteria ⇒ no check ⇒ today's behavior
+  expect((model as any).doGenerateCalls.length).toBe(3);         // delegate + worker + boss final — NO checker call (zero cost when unused)
+});
+
+test("criteria that first fails → one independent retry with the verdict as feedback → passes", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // boss
+    text("attempt one, no Y"),                                    // worker (1st)
+    text('{"pass": false, "reasons": ["missing Y"]}'),           // checker (1st) — independent model call
+    text("attempt two, mentions Y"),                             // worker (retry)
+    text('{"pass": true, "reasons": []}'),                       // checker (2nd)
+    text("boss done"),                                           // boss final
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.text).toBe("boss done");
+  expect(res.trace.delegatedOut.length).toBe(2);                 // initial + exactly one retry
+  expect(res.trace.verification.length).toBe(2);
+  expect(res.trace.verification[0]).toMatchObject({ retried: false });
+  expect(res.trace.verification[0].verdict.pass).toBe(false);
+  expect(res.trace.verification[1]).toMatchObject({ retried: true });
+  expect(res.trace.verification[1].verdict.pass).toBe(true);
+  // the retry child's brief carried the failed verdict's reasons as feedback
+  const retryChildId = res.trace.delegatedOut[1];
+  const retryInput = readFileSync(join(paths.runRecordDir(ws, retryChildId), "input.json"), "utf8");
+  expect(retryInput).toContain("missing Y");
+});
+
+test("criteria that fails twice surfaces the result WITH the failed verdict attached (not a silent lie)", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }),
+    text("attempt one"),
+    text('{"pass": false, "reasons": ["missing Y"]}'),
+    text("attempt two"),
+    text('{"pass": false, "reasons": ["still missing Y"]}'),
+    text("boss done"),
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut.length).toBe(2);                 // one retry, then it stops (no second retry)
+  expect(res.trace.verification.length).toBe(2);
+  expect(res.trace.verification.every((v) => v.verdict.pass === false)).toBe(true);
+  expect(res.trace.verification[1].retried).toBe(true);
+  expect(res.trace.verification[1].verdict.reasons.join(" ")).toContain("still missing Y");
+  // recorded in the transcript too (the ledger answer to "why did it retry?")
+  const tr = readFileSync(join(paths.runRecordDir(ws, res.runId), "transcript.jsonl"), "utf8");
+  expect(tr).toContain("verification");
+  expect(tr).toContain("still missing Y");
+});
+
+test("the verification retry consumes a work item — a budget-exhausted retry is refused, result surfaced with the failed verdict", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db, { workItems: 1 }); // boss may delegate ONCE; the retry needs a 2nd → refused
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }),
+    text("attempt one"),
+    text('{"pass": false, "reasons": ["missing Y"]}'),
+    text("boss done"),
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.text).toBe("boss done");
+  expect(res.trace.delegatedOut.length).toBe(1);                 // the retry never spawned a 2nd child
+  expect(res.trace.verification.length).toBe(1);
+  expect(res.trace.verification[0].verdict.pass).toBe(false);
+  expect(res.trace.notes.some((n) => /retry refused|work item/i.test(n))).toBe(true);
+  expect((model as any).doGenerateCalls.length).toBe(4);         // delegate + worker + checker + boss final — no retry child, no 2nd checker
+});

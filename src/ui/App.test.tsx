@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { App } from "./App";
 import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
-import { seedRoot, reindex, loadIndex, seedLibrarian } from "../store/roster";
+import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "../store/roster";
 import { listTraces } from "../store/trace";
 import { loadContext, loadLedger } from "../store/conversation";
 import { readTaskState, taskIdForRun } from "../store/task-state";
@@ -495,4 +495,34 @@ test("a non-streaming agent reply renders markdown (bold stripped of ** markers)
   await waitFor(lastFrame, "bold");
   expect(lastFrame()).toContain("bold");
   expect(lastFrame()).not.toContain("**bold**"); // markdown was rendered, not shown raw
+});
+
+test("delegation with acceptance criteria: a twice-failed verdict is surfaced to the captain and recorded (Plan 06)", async () => {
+  // root delegates WITH criteria; the independent checker (same mock model) fails both the first
+  // attempt and the one bounded retry, so the result comes back with the failed verdict attached.
+  const delegateCall = {
+    content: [{ type: "tool-call", toolCallId: "c1", toolName: "delegate_task", input: JSON.stringify({ to: "writer", goal: "write X", criteria: "must mention Y" }) }],
+    finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+  } as unknown as LanguageModelV3GenerateResult;
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    delegateCall,                                                    // root: delegate with criteria
+    finalText("attempt one, no Y"),                                  // writer (1st attempt)
+    finalText('{"pass": false, "reasons": ["missing Y"]}'),          // checker (1st) — independent call
+    finalText("attempt two, still no Y"),                            // writer (retry)
+    finalText('{"pass": false, "reasons": ["still missing Y"]}'),    // checker (2nd)
+    finalText("Writer produced X; note it did not pass verification."), // root final reply
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ) as any });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "get writer to write X", ENTER);
+  await waitFor(lastFrame, "still failed verification", 8000);        // the captain SEES the failed-verdict breadcrumb
+  // …and the verdict is durably recorded on the trace and the task-state.
+  const done = listTraces(ws, "root").filter((t) => t.outcome === "completed");
+  const root = done.at(-1)!;
+  expect(root.verification.length).toBe(2);
+  expect(root.verification.every((v) => v.verdict.pass === false)).toBe(true);
+  const task = readTaskState(ws, taskIdForRun(root.id));
+  expect(task?.verifications.length).toBe(2);
 });

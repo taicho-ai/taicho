@@ -78,7 +78,8 @@ export function assemble(
     s.push({
       name: "brief", tier: "context",
       text: `## Delegated task (from ${opts.brief.from})\nGOAL: ${opts.brief.goal}` +
-        (opts.brief.context ? `\nCONTEXT: ${opts.brief.context}` : ""),
+        (opts.brief.context ? `\nCONTEXT: ${opts.brief.context}` : "") +
+        (opts.brief.criteria ? `\nCRITERIA (your output is checked against these before it is accepted): ${opts.brief.criteria}` : ""),
     });
   if (opts.memoryBlock)
     s.push({ name: "memory", tier: "context", text: opts.memoryBlock });

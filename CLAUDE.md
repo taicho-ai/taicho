@@ -35,6 +35,11 @@ issues tsc won't).
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.
   - `run.ts` — orchestrates ONE run: assemble prompt → build tools → `runLoop` → write trace.
     `RunDeps` are the seams; `executeRun` recurses for delegation (depth/cycle/run caps).
+  - `verification.ts` — the delegation checker (Plan 06): when `delegate_task` carries `criteria`,
+    `runChecker` runs ONE independent model call (child output + criteria → `{pass, reasons[]}`) on
+    the delegating agent's resolved model, via `runLoop` with an empty toolset. `tools.ts` owns the
+    policy (check → one bounded retry with feedback → surface the failed verdict); `run.ts` owns the
+    checker's model plumbing (`ctx.checkCriteria`). Verdicts land on `trace.verification` + transcript.
   - `model.ts` — provider+model → AI-SDK model instance (`buildModel`, `createModelResolver`).
   - `providers/openai-codex.ts` — ChatGPT-subscription (Codex backend) provider: a `createOpenAI`
     instance with a custom `fetch` that injects the OAuth bearer + Codex headers and refreshes on 401.
@@ -89,6 +94,12 @@ resolution).
 - Keep the resolver return shape (`{ model, modelId, subscription?, captureCost? }`) in sync across
   its mirrors: `model.ts` (`ResolvedModel`), `run.ts` (`RunDeps`), `index.tsx` (`BuiltAuth`),
   `ui/App.tsx` (`ResolveModelFn`).
+- **Delegation verification is criteria-gated (Plan 06):** `delegate_task` runs a checker + one
+  bounded retry ONLY when the model passes `criteria`. No criteria ⇒ no extra model call, zero cost,
+  today's trust-everything behavior — keep it that way (the agent-flow e2e delegates without criteria
+  and must stay unchanged). The checker is an INDEPENDENT call, not the parent's self-check; the
+  retry consumes a `maxWorkItemsPerRequest` like any delegation. Verdicts surface to the captain via
+  the `onStep` `note` breadcrumb and are recorded on `trace.verification` + task-state `verifications[]`.
 - Never log auth tokens; use `redactAuthHeader` for any debug output. `TAICHO_DEBUG=1` prints
   `taicho codex <status> <url> :: <body>` on non-2xx (token never logged).
 - Design docs live in `docs/superpowers/specs/`; plans in `docs/superpowers/plans/`.

@@ -64,25 +64,78 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
 
   if (agent.tools.includes("delegate_task"))
     set.delegate_task = tool({
-      description: "Delegate a goal to another agent by id and receive its result.",
-      inputSchema: z.object({ to: z.string(), goal: z.string(), context: z.string().optional() }),
-      execute: async ({ to, goal, context }) => {
+      description:
+        "Delegate a goal to another agent by id and receive its result. Optionally pass `criteria` — " +
+        "a plain-language contract for what 'done' means (e.g. \"a markdown dossier with ≥5 cited, dated " +
+        "sources\"). When you set criteria, the child's output is judged by an independent check before " +
+        "you get it; a failing check triggers one automatic retry with feedback, and a still-failing " +
+        "result comes back with its failed verdict attached so you can see the caveat. Set criteria " +
+        "whenever the output has concrete requirements you'd otherwise have to re-check by hand.",
+      inputSchema: z.object({
+        to: z.string(),
+        goal: z.string(),
+        context: z.string().optional(),
+        criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
+      }),
+      execute: async ({ to, goal, context, criteria }) => {
+        const budgetMsg = () => `work item budget (${agent.budgets.maxWorkItemsPerRequest}) exhausted`;
+        // Each delegation (initial AND the verification retry) consumes one work item — config
+        // disposes, so the retry is no new runaway vector.
         ctx.workItems.n += 1;
         if (ctx.workItems.n > agent.budgets.maxWorkItemsPerRequest) {
-          const msg = `work item budget (${agent.budgets.maxWorkItemsPerRequest}) exhausted`;
-          ctx.notes.push(`delegate refused: ${msg}`);
-          return { error: msg };
+          ctx.notes.push(`delegate refused: ${budgetMsg()}`);
+          return { error: budgetMsg() };
         }
         const guard = ctx.delegationGuard(to);
         if (!guard.ok) { ctx.notes.push(`delegate refused: ${guard.error}`); return { error: guard.error }; }
-        try {
-          const child = await ctx.runChild({ to, goal, context });
+
+        // Spawn one child run and fold its spend into this run's aggregate.
+        const spawn = async (childContext?: string) => {
+          const child = await ctx.runChild({ to, goal, context: childContext, criteria });
           ctx.delegatedOut.push(child.runId);
           ctx.childTraces.push(child.trace);
-          const childAgg = child.trace.aggregate ?? { tokens: child.trace.tokens, costUsd: child.trace.costUsd };
-          ctx.childSpend.tokens += childAgg.tokens;
-          ctx.childSpend.costUsd += childAgg.costUsd ?? 0;
-          return { to, runId: child.runId, result: child.text };
+          const agg = child.trace.aggregate ?? { tokens: child.trace.tokens, costUsd: child.trace.costUsd };
+          ctx.childSpend.tokens += agg.tokens;
+          ctx.childSpend.costUsd += agg.costUsd ?? 0;
+          return child;
+        };
+
+        try {
+          let child = await spawn(context);
+
+          // No criteria ⇒ no check ⇒ today's trust-everything behavior, zero extra cost.
+          if (!criteria) return { to, runId: child.runId, result: child.text };
+
+          // Independent checker call, BEFORE the result reaches the parent's context.
+          const first = await ctx.checkCriteria({ goal, criteria, output: child.text });
+          ctx.verifications.push({ criteria, verdict: first.verdict, runId: child.runId, retried: false, tokens: first.tokens, costUsd: first.costUsd });
+          let verdict = first.verdict;
+
+          if (!verdict.pass) {
+            ctx.emit?.({ note: `↻ ${to} output failed verification: ${verdict.reasons.join("; ")} — retrying once` });
+            // Exactly ONE bounded retry — consumes a work item like any delegation.
+            ctx.workItems.n += 1;
+            const overBudget = ctx.workItems.n > agent.budgets.maxWorkItemsPerRequest;
+            const retryGuard = ctx.delegationGuard(to);
+            if (overBudget || !retryGuard.ok) {
+              const why = overBudget ? budgetMsg() : !retryGuard.ok ? retryGuard.error : "retry blocked";
+              ctx.notes.push(`verification retry refused: ${why}`);
+              ctx.emit?.({ note: `⚠ ${to} result surfaced WITHOUT a passing verification (retry blocked: ${why})` });
+              return { to, runId: child.runId, result: child.text, verification: verdict };
+            }
+            const feedback = "Your previous attempt did NOT meet the acceptance criteria. Fix these before returning:\n" +
+              verdict.reasons.map((r) => `- ${r}`).join("\n");
+            const retry = await spawn(context ? `${context}\n\n${feedback}` : feedback);
+            const second = await ctx.checkCriteria({ goal, criteria, output: retry.text });
+            ctx.verifications.push({ criteria, verdict: second.verdict, runId: retry.runId, retried: true, tokens: second.tokens, costUsd: second.costUsd });
+            child = retry;
+            verdict = second.verdict;
+            if (verdict.pass) ctx.emit?.({ note: `✓ ${to} passed verification after one retry` });
+            else ctx.emit?.({ note: `⚠ ${to} still failed verification after retry: ${verdict.reasons.join("; ")} — surfacing result with the failed verdict` });
+          }
+
+          // Criteria was set: always attach the verdict so the parent (and captain) sees the caveat.
+          return { to, runId: child.runId, result: child.text, verification: verdict };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           ctx.notes.push(`delegate failed: ${msg}`);
