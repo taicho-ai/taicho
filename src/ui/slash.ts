@@ -18,6 +18,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "costs", summary: "cross-session spend rollup (agent / day / model)", usage: "[agent]" },
   { name: "tasks", summary: "list / cancel background tasks", usage: "[cancel <id>]" },
   { name: "trace", summary: "open the waterfall inspector (no arg = latest run)", usage: "[id]" },
+  { name: "view", summary: "switch the live view (persists)", usage: "bar|panes|both" },
   { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>", requiresArg: true },
   { name: "policies", summary: "list an agent's coaching notes", usage: "<agent>", requiresArg: true },
   { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>", requiresArg: true },

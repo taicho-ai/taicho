@@ -5,6 +5,7 @@ import type { Database } from "bun:sqlite";
 import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCard";
 import { QuestionCard } from "./QuestionCard";
 import { StatusBar } from "./StatusBar";
+import { SquadPanes, resolveLayout, type PaneEntry, type PaneFeedMap } from "./SquadPanes";
 import { TraceInspector } from "./TraceInspector";
 import { parseInput } from "./input";
 import { BANNER } from "./banner";
@@ -35,6 +36,7 @@ import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand } f
 import { syncKnowledgeSources } from "../knowledge/sync";
 import { listNodeRows, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { listSkills, readSkill, deleteSkill, reindexSkills } from "../store/skills";
+import { getViewMode, setViewMode as persistViewMode, isViewMode, VIEW_MODES, type ViewMode } from "../store/prefs";
 
 /** One pending approval request in the queue: a stable id (the card's React key — stays fixed while
  *  this request is the head, so queuing a sibling behind it never remounts the visible card), the
@@ -119,10 +121,26 @@ export function App(props: {
   embed?: (text: string) => Promise<Float32Array>;
   startupNotice?: string;
   deckLedger?: DeckLedger; // Plan 09: deck-wide spend ledger (undefined ⇒ no deck ceilings configured)
+  viewMode?: ViewMode;     // Plan 10: initial live-view mode (defaults to the persisted pref / `both`)
+  terminalSize?: { columns: number; rows: number }; // Plan 10: authoritative size seam (tests/embeds); else live stdout
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const mdWidth = (stdout?.columns ?? 80) - 2; // small margin so wrapping never hugs the edge
+  // Terminal size is reactive so the bar + panes (and markdown wrap) re-flow on a resize. An explicit
+  // prop is authoritative (tests/embeds); otherwise we track the live stdout and its "resize" events.
+  const liveSize = () => ({ columns: stdout?.columns ?? 80, rows: (stdout as { rows?: number })?.rows ?? 24 });
+  const [termSize, setTermSize] = useState(() => props.terminalSize ?? liveSize());
+  useEffect(() => {
+    if (props.terminalSize) { setTermSize(props.terminalSize); return; }
+    const update = () => setTermSize(liveSize());
+    update();
+    stdout?.on?.("resize", update);
+    return () => { stdout?.off?.("resize", update); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stdout, props.terminalSize]);
+  const mdWidth = termSize.columns - 2; // small margin so wrapping never hugs the edge
+  // Plan 10: the live view mode (bar/panes/both), seeded from the persisted pref. /view switches it.
+  const [viewMode, setViewMode] = useState<ViewMode>(() => props.viewMode ?? getViewMode(props.ws));
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
   const [input, setInput] = useState("");
   // @inkjs/ui TextInput is uncontrolled (defaultValue only, no `value`). To set its text
@@ -186,6 +204,19 @@ export function App(props: {
   const [statuses, setStatuses] = useState<AgentStatus[]>([]);
   const [inspect, setInspect] = useState<{ rootId: string; spans: Span[] } | null>(null);
   const clearStatuses = () => { statusRef.current = new Map(); setStatuses([]); };
+  // Plan 10 Phase 4: per-run activity feed for the split-pane view (recent tool lines + the live
+  // streamed/final text), built off the SAME event stream the status map is. Reset at each new turn.
+  const PANE_FEED_LINES = 4;
+  const paneFeedRef = useRef<Map<string, PaneEntry>>(new Map());
+  const [paneFeed, setPaneFeed] = useState<PaneFeedMap>(new Map());
+  const clearPaneFeed = () => { paneFeedRef.current = new Map(); setPaneFeed(new Map()); };
+  const bumpPaneFeed = (runId: string, mut: (e: PaneEntry) => PaneEntry) => {
+    const cur = paneFeedRef.current.get(runId) ?? { lines: [] };
+    const next = new Map(paneFeedRef.current);
+    next.set(runId, mut(cur));
+    paneFeedRef.current = next;
+    setPaneFeed(next);
+  };
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
@@ -355,10 +386,15 @@ export function App(props: {
     requestApproval,
     onStep: (ev) => {
       const { phase, tool, agent, delta, note, argsPreview } = ev;
-      // Plan 10: fold every phase-tagged event into the live status map (drives the StatusBar).
+      // Plan 10: fold every phase-tagged event into the live status map (drives the StatusBar) and
+      // the per-run pane feed (drives SquadPanes). Both read the one event stream; nothing invented.
       if (phase && ev.runId) {
         statusRef.current = statusReducer(statusRef.current, ev, Date.now());
         setStatuses(statusList(statusRef.current));
+        // The pane feed carries tool activity only (the streamed/final reply stays in the scrollback
+        // reply channel — duplicating it in the pane raced that channel; see SquadPanes PaneEntry).
+        if (phase === "tool_start" && tool)
+          bumpPaneFeed(ev.runId, (e) => ({ lines: [...e.lines, `→ ${tool}${argsPreview ? ` ${argsPreview}` : ""}`].slice(-PANE_FEED_LINES) }));
       }
       if (delta) {
         streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
@@ -486,6 +522,7 @@ export function App(props: {
     aborter.current = new AbortController();
     streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
     clearStatuses();
+    clearPaneFeed();
     try {
       if (parsed.kind === "chat") {
         pendingAuditRef.current = { agent: "root", text: parsed.text };
@@ -578,6 +615,15 @@ export function App(props: {
   };
 
   const runSlash = async (cmd: string, arg: string) => {
+    if (cmd === "view") {
+      const mode = arg.trim().toLowerCase();
+      if (!mode) { say({ kind: "system", text: `  live view: ${viewMode} (usage: /view ${VIEW_MODES.join("|")})` }); return; }
+      if (!isViewMode(mode)) { say({ kind: "system", text: `  unknown view "${mode}" — try /view ${VIEW_MODES.join("|")}` }); return; }
+      setViewMode(mode);
+      persistViewMode(props.ws, mode);
+      say({ kind: "system", text: `  live view → ${mode}` });
+      return;
+    }
     if (cmd === "status") { say({ kind: "system", text: `  ${formatAuthStatus(authSource)}` }); return; }
     if (cmd === "login") {
       if (arg && arg !== "openai") { say({ kind: "system", text: `  unknown login target: ${arg} (try /login openai)` }); return; }
@@ -783,6 +829,9 @@ export function App(props: {
     return userRuns.length ? userRuns[userRuns.length - 1].id : undefined;
   };
 
+  // Plan 10: which live surfaces render for the current mode + terminal size (bar-only when small).
+  const layout = resolveLayout(viewMode, termSize.columns, termSize.rows);
+
   return (
     <Box flexDirection="column">
       <Text color="cyan">{BANNER}</Text>
@@ -843,9 +892,14 @@ export function App(props: {
           />
         );
       })()}
+      {/* Plan 10 Phase 4: split panes (one per live agent) sit above the spinner + bar. The mode
+          (bar/panes/both) and terminal size decide what shows; too small ⇒ degrade to bar-only. */}
+      {!inspect && layout.showPanes && (
+        <SquadPanes statuses={statuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
+      )}
       {!inspect && !pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
-      {!inspect && statuses.length > 0 && <StatusBar statuses={statuses} width={mdWidth + 2} />}
+      {!inspect && layout.showBar && statuses.length > 0 && <StatusBar statuses={statuses} width={termSize.columns} />}
       {!inspect && !pending && (
         <>
           <Box>

@@ -24,6 +24,7 @@ import { loadContext, loadLedger } from "../store/conversation";
 import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
+import { getViewMode } from "../store/prefs";
 import { KbNode } from "../schemas/knowledge";
 import type { AuthSource } from "../store/config";
 import type { McpManager, McpServerStatus } from "../core/mcp/manager";
@@ -789,6 +790,84 @@ test("waterfall: ↓↑ navigate, ← collapses a run's subtree, → re-expands,
   await waitFor(lastFrame, "llm #1");
   await send(stdin, ESC);                             // Esc closes the inspector
   await waitForGone(lastFrame, "TRACE");
+});
+
+// ── Plan 10 Phase 4: the split-pane view (Layer-1, through the real App) ──
+
+test("Plan 10 Phase 4: a pane appears on a delegation, streams the tool line with argsPreview, and collapses on completion", async () => {
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "write the fusion timeline" }),
+    finalText("root done"),
+  ) as any });
+  // A slow writer so the delegation is observable mid-flight (parent `delegating` + child live).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slowWriter = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(350); return finalText("writer done"); }) as any });
+  const { ws, db, props } = await setup({ model: rootModel });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (props as any).resolveModel = (id: string) => id === "writer" ? { model: slowWriter, modelId: "m" } : { model: rootModel, modelId: "m" };
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/view panes", ENTER);          // isolate the panes (bar hidden) so pane content is unambiguous
+  await waitFor(lastFrame, "live view → panes");
+  await send(stdin, "have writer do it", ENTER);
+
+  await waitFor(lastFrame, "root delegating", 8000); // the PARENT pane shows delegate_task in flight (a pane-only status)
+  const frame = () => lastFrame() ?? "";
+  // the pane HEADER carries the current tool + its argsPreview on one line
+  const header = frame().split("\n").find((l) => l.includes("root delegating"));
+  expect(header).toContain("fusion");
+  // the pane BODY streams the tool line with its argsPreview ("→ …", distinct from the "↳" scrollback breadcrumb)
+  const body = frame().split("\n").find((l) => l.includes("→ delegate_task") && l.includes("fusion") && !l.includes("↳"));
+  expect(body).toBeTruthy();
+  expect(frame()).toContain("writer thinking");      // the CHILD is live in its own pane at the same time
+  expect(frame()).toContain("▎");                    // left-accent split panes actually rendered
+
+  await waitFor(lastFrame, "root done", 8000);
+  await waitForGone(lastFrame, "root delegating", 6000); // the pane collapses after completion (settle → gone)
+});
+
+test("Plan 10 Phase 4: /view switches the live surfaces (bar / panes / both) and persists the choice", async () => {
+  let calls = 0;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(300); calls++; return finalText(`reply ${calls}`); }) as any });
+  const { ws, props } = await setup({ model: slow });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  // bar-only: a live run shows the bar's live state but NO bordered pane
+  await send(stdin, "/view bar", ENTER);
+  await waitFor(lastFrame, "live view → bar");
+  expect(getViewMode(ws)).toBe("bar");               // persisted to disk (the mechanism prefs use)
+  await send(stdin, "run one", ENTER);
+  await waitFor(lastFrame, "root thinking");          // the bar renders the live status…
+  expect(lastFrame()).not.toContain("▎");             // …and the split panes are suppressed
+  await waitFor(lastFrame, "reply 1");                // run finishes → idle again
+
+  // panes-only: a live run renders a bordered pane
+  await send(stdin, "/view panes", ENTER);
+  await waitFor(lastFrame, "live view → panes");
+  expect(getViewMode(ws)).toBe("panes");             // persisted
+  await send(stdin, "run two", ENTER);
+  await waitFor(lastFrame, "▎");                      // a split pane rendered
+  await waitFor(lastFrame, "reply 2");
+
+  // both (the default): confirm the toggle + persistence round-trips back
+  await send(stdin, "/view both", ENTER);
+  await waitFor(lastFrame, "live view → both");
+  expect(getViewMode(ws)).toBe("both");
+});
+
+test("Plan 10 Phase 4: below the minimum terminal size the panes degrade to bar-only", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(400); return finalText("done"); }) as any });
+  const { props } = await setup({ model: slow });
+  // An explicit tiny terminal (below MIN_PANE_COLS/ROWS) is authoritative over the live stdout.
+  const small = { ...props, terminalSize: { columns: 40, rows: 8 } };
+  const { stdin, lastFrame } = render(<App {...small} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "root thinking");          // the bar (the complete summary) still renders…
+  expect(lastFrame()).not.toContain("▎");             // …but the panes are degraded away
+  await waitFor(lastFrame, "done");
 });
 
 // ── Plan 04: routeSteer routing (Layer-1, through the real App) ──

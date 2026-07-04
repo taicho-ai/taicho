@@ -405,17 +405,17 @@ background tasks stay visible.
 - [x] Layer-1 `App.test.tsx`: bar appears on run start, shows tool during execution, shows waiting during an approval card, clears on completion.
 
 ### Phase 4 — Split panes
-- [ ] `SquadPanes` layout: terminal splits into one pane per **live** agent (status line + its live stream: tool lines with argsPreview, streamed/final text), REPL pane keeps focus and full width when the squad is idle.
-- [ ] Pane lifecycle: panes appear when an agent goes live, collapse on completion (brief settle state so results are seen); cap visible panes by terminal size with "+N more" overflow (bar remains the complete summary).
-- [ ] View modes + toggle: `/view bar` · `/view panes` · `/view both` (default **both**: panes above, bar pinned above the input); persist the choice.
-- [ ] Resize handling: re-flow panes on terminal resize; degrade to bar-only below a minimum size.
-- [ ] Focus/keys: REPL always owns the keyboard (panes are display-only in this plan — steering stays via the input, targeted per Plan 04 Phase 4).
-- [ ] Layer-1 `App.test.tsx`: pane appears on delegation, streams tool lines, collapses on completion; degradation below min size.
+- [x] `SquadPanes` layout: terminal splits into one pane per **live** agent (status line + its live stream: tool lines with argsPreview), REPL pane keeps focus and full width when the squad is idle. *(`src/ui/SquadPanes.tsx`. Deviation: the pane shows tool lines + live state, NOT the streamed/final REPLY text — that stays in the scrollback reply channel; echoing it in the pane raced that channel and broke the "waitFor reply → assert trace" test contract. See TESTING.md.)*
+- [x] Pane lifecycle: panes appear when an agent goes live, collapse on completion (brief `done` settle state so results are seen); cap visible panes by terminal height with "+N more" overflow (bar remains the complete summary).
+- [x] View modes + toggle: `/view bar` · `/view panes` · `/view both` (default **both**: panes above, bar pinned above the input); persisted via `store/prefs.ts` (`<ws>/agents/.prefs.json`). Added to `COMMANDS`/`/help`.
+- [x] Resize handling: re-flow panes on terminal resize (App tracks live `stdout` + its `resize` event); degrade to bar-only below a minimum size (`resolveLayout`).
+- [x] Focus/keys: REPL always owns the keyboard (panes are display-only in this plan — steering stays via the input, targeted per Plan 04 Phase 4).
+- [x] Layer-1 `App.test.tsx`: pane appears on delegation, streams tool lines with argsPreview, collapses on completion; `/view` toggles + persists; degradation below min size. Plus pure units in `ui/SquadPanes.test.tsx` + `store/prefs.test.ts`.
 
 ### Phase 5 — Tests & docs
-- [ ] Real-binary e2e (tui-test): delegation run shows both agents in panes + both statuses in the bar; `/view` toggles work.
-- [ ] Evidence scenario (Plan 11): tape showing two agents live in panes + bar during a delegation.
-- [ ] Update `TESTING.md`, `CLAUDE.md`.
+- [ ] Real-binary e2e (tui-test): delegation run shows both agents in panes + both statuses in the bar; `/view` toggles work. *(deferred — Layer 2/4 harness work, out of this unit's scope.)*
+- [ ] Evidence scenario (Plan 11): tape showing two agents live in panes + bar during a delegation. *(deferred — bespoke tape; the existing `agent-flow` mp4 now shows a child pane + bar during its delegation, but a dedicated two-panes tape is a stretch.)*
+- [x] Update `TESTING.md`, `CLAUDE.md`. *(Squad UI section in TESTING.md; `src/ui/` line in CLAUDE.md.)*
 
 ---
 
