@@ -22,6 +22,7 @@ import { RunTrace } from "../schemas/trace";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { loadContext, loadLedger } from "../store/conversation";
+import { loadThread } from "../store/thread";
 import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
 import { listSchedules } from "../store/schedules";
 import { readMcpStore } from "../store/mcp-store";
@@ -298,6 +299,27 @@ test("failed chat turn is audited but excluded from future context", async () =>
 
   const task = readTaskState(ws, taskIdForRun(failed!.id));
   expect(task?.status).toBe("failed");
+});
+
+// Plan 01 Ph5: the App-local recordTurnOutcome was removed; the ENGINE seam must still audit a
+// COMPLETED chat turn (ledger user+assistant, context includes both) AND write the boot-replay cache
+// (thread.jsonl) that Plan 05 Ph3 compacts — proven from the real App submit path, not a unit call.
+test("completed chat turn is audited by the engine seam and populates the boot-replay cache", async () => {
+  const { ws, props } = await setup({ model: mockModel("all done") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "please summarize the report", ENTER);
+  await waitFor(lastFrame, "all done");
+
+  const led = loadLedger(ws, "root");
+  expect(led.map((t) => t.content)).toContain("please summarize the report"); // user turn recorded
+  expect(led.some((t) => t.role === "assistant" && t.status === "completed" && String(t.content).includes("all done"))).toBe(true);
+  const ctx = loadContext(ws, "root");
+  expect(ctx.includedTurns.length).toBe(2);   // both turns safe to replay
+  expect(ctx.excludedTurns).toEqual([]);
+
+  // the derived boot-replay cache (what a relaunch would load) now carries the completed turn
+  const replay = loadThread(ws, "root");
+  expect(replay.map((m) => String(m.content))).toEqual(["please summarize the report", "all done"]);
 });
 
 test("shows the animated run status (spinner + activity + elapsed + hint) while a run is in flight", async () => {
