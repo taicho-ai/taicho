@@ -1045,3 +1045,38 @@ test("/artifacts gc archives old unreferenced versions and reports what it colle
   expect(readArtifact(ws, "doc@v1")).toBeNull();        // v1/v2 archived out of the live store
   expect(readArtifact(ws, "doc")!.version).toBe(5);     // latest untouched
 });
+
+// PRODUCTION CONDITION (PR #17 review): each version is pinned by its OWN producing trace.artifacts —
+// the real state after iterative revision. The handler must protect by the CONSUMPTION/hand-off graph,
+// not the producing record, or gc is a no-op (keep-latest-N shadowed). The pre-fix handler folded
+// t.artifacts into `referenced`, so every version was protected and nothing was ever archived.
+test("/artifacts gc still archives superseded versions when each is pinned by its producing trace", async () => {
+  const { ws, props } = await setup();
+  for (let i = 1; i <= 5; i++) {
+    saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: `root/2026-07-04-run${i}` });
+    writeTrace(ws, mkTrace({ id: `root/2026-07-04-run${i}`, agent: "root", artifacts: [`doc@v${i}`] }));
+  }
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts gc", ENTER);
+  await waitFor(lastFrame, "archived 2 version(s)"); // v1/v2 collected despite being trace-pinned
+  expect(readArtifact(ws, "doc@v1")).toBeNull();
+  expect(readArtifact(ws, "doc@v2")).toBeNull();
+  expect(readArtifact(ws, "doc")!.version).toBe(5);
+});
+
+// A version CONSUMED via the hand-off graph (inputArtifacts/outputArtifacts) must survive gc, however
+// old — this is the safety invariant the re-scoped protected set must still honor.
+test("/artifacts gc never archives a version handed off across a delegation edge", async () => {
+  const { ws, props } = await setup();
+  for (let i = 1; i <= 5; i++) {
+    saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: `root/2026-07-04-run${i}` });
+    writeTrace(ws, mkTrace({ id: `root/2026-07-04-run${i}`, agent: "root", artifacts: [`doc@v${i}`] }));
+  }
+  // A later run handed old doc@v1 DOWN to a child and received doc@v2 UP — both are live references.
+  writeTrace(ws, mkTrace({ id: "root/2026-07-04-run9", agent: "root", inputArtifacts: ["doc@v1"], outputArtifacts: ["doc@v2"] }));
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts gc", ENTER);
+  await waitFor(lastFrame, "nothing to collect"); // v1+v2 protected by hand-off; v3/v4/v5 are keep-latest-3
+  expect(readArtifact(ws, "doc@v1")!.title).toBe("v1");
+  expect(readArtifact(ws, "doc@v2")!.title).toBe("v2");
+});

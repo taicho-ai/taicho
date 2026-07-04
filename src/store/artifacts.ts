@@ -202,17 +202,56 @@ export function rebuildArtifactIndex(ws: string): Artifact[] {
 
 // ── retention & GC (Plan 01 Phase 4b) ────────────────────────────────────────
 // Immutable-per-version + heavy media = unbounded disk. Policy (Phase 0): keep-latest-N per id +
-// archive UNREFERENCED old versions; NEVER break an id referenced by a trace/policy/task. "Archive"
+// archive UNREFERENCED old versions; NEVER break an id CONSUMED by a hand-off/policy/task. "Archive"
 // relocates a version's files into artifacts/<id>/_archive/ — out of the live scan (artifactVersions
 // only reads the id dir's top level), so the addressable store shrinks WITHOUT losing history and no
-// referenced version ever disappears from under a trace.
+// referenced version ever disappears from under a live reference.
+//
+// A version is "referenced" iff something CONSUMES or PINS it — a hand-off edge (inputArtifacts /
+// outputArtifacts), a task's resultRef, an approved-output exemplar (policy.artifact), an annotation,
+// or the parent-closure of a kept version. It is NOT referenced merely because its own producing run
+// recorded emitting it: EVERY version an agent saves lands in that run's `trace.artifacts`, so
+// treating the producing record as a reference would pin every version ever produced and shadow
+// keep-latest-N entirely (the retention feature would archive nothing — the PR #17 GC no-op bug).
+// `collectReferencedArtifacts` below deliberately draws ONLY from the consumption/hand-off graph.
 
 // underscore prefix ⇒ can never collide with a valid artifact id dir; also where a version's files go.
 const ARCHIVE = "_archive";
 
+/** The live-reference sources GC honors: everything that CONSUMES or PINS an artifact handle, as
+ *  opposed to a producing run's own record of what it emitted (`trace.artifacts`, deliberately absent
+ *  here — see the GC-section note above). Annotation targets + parent-closure are protected INSIDE
+ *  gcArtifacts (off the on-disk annotations log + lineage fixpoint), not gathered here. */
+export interface GcReferenceSources {
+  // Hand-off graph only — the handles that flowed ACROSS delegation edges (down to children /
+  // up from them). NEVER a trace's own `artifacts` (its production record).
+  traces?: { inputArtifacts?: string[]; outputArtifacts?: string[] }[];
+  taskResultRefs?: (string | null | undefined)[];   // task-state hand-off refs (an id@vN, or a run id → harmlessly ignored)
+  exemplarArtifacts?: (string | null | undefined)[]; // approved-output exemplars (policy.artifact handles)
+  extra?: (string | null | undefined)[];            // any other live handles the caller knows about
+}
+
+/** PURE: collect the deduped set of artifact handles GC must protect because something CONSUMES,
+ *  HANDS OFF, or PINS them — the union of every source in `src`. Deliberately draws from the
+ *  consumption/hand-off graph, NOT a producing run's own `trace.artifacts` (which lists every version
+ *  it ever saved and would shadow keep-latest-N). A superseded intermediate that nothing here points
+ *  at, and that falls outside keep-latest-N, is therefore archivable. */
+export function collectReferencedArtifacts(src: GcReferenceSources): string[] {
+  const out = new Set<string>();
+  const add = (h?: string | null) => { const t = h?.trim(); if (t) out.add(t); };
+  for (const t of src.traces ?? []) {
+    for (const h of t.inputArtifacts ?? []) add(h);
+    for (const h of t.outputArtifacts ?? []) add(h);
+  }
+  for (const h of src.taskResultRefs ?? []) add(h);
+  for (const h of src.exemplarArtifacts ?? []) add(h);
+  for (const h of src.extra ?? []) add(h);
+  return [...out];
+}
+
 export interface GcOptions {
   keepLatest?: number;    // per id: always keep the N newest versions (default 3)
-  referenced?: string[];  // extra protected handles the CALLER knows are live (trace/policy/task refs)
+  referenced?: string[];  // protected handles the CALLER knows are live (hand-off/policy/task refs — see collectReferencedArtifacts)
 }
 export interface GcReport {
   archived: string[];     // version handles ("id@vN") relocated into _archive
