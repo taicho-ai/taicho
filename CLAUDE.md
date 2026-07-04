@@ -35,7 +35,10 @@ issues tsc won't).
   agent; the panes are one-per-agent detail (status line + recent tool lines with `argsPreview`).
   Both render from `core/agent-status.ts` (the reducer over the `onStep` event stream); `/view
   bar|panes|both` (default `both`) switches surfaces and persists via `store/prefs.ts`. Panes are
-  display-only — the REPL always owns the keyboard.
+  display-only — the REPL always owns the keyboard. Layer-4 recorded proof (Plan 10 Phase 5):
+  `bun scripts/e2e-evidence.ts squad-panes` shows both panes + bar live during a delegation, driven by
+  a **slow-mode e2e model** (`e2e-model.ts` `squad-panes` mode) that holds the child's model call
+  in-flight ~4s so the pane doesn't flash faster than a recorded frame — see TESTING.md's Squad UI section.
 - **`src/core/`** — the engine:
   - `loop.ts` — the single metered agent loop. Model proposes, config disposes: budgets/caps and
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.
