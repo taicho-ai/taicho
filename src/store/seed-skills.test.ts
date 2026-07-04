@@ -16,6 +16,12 @@ test("seedSkills writes the starter skills when skills/ is empty", async () => {
   for (const s of STARTER_SKILLS) expect(readSkill(w, s.id)?.name).toBe(s.name);
 });
 
+test("Plan 14: write-a-clear-artifact points at the granted save_artifact, not the dangling write_artifact call", () => {
+  const skill = STARTER_SKILLS.find((s) => s.name === "write-a-clear-artifact")!;
+  expect(skill.body).toContain("save_artifact");                  // the structured, always-granted tool
+  expect(skill.body).not.toMatch(/calling write_artifact/);       // the old dangling reference is gone
+});
+
 test("seedSkills is a no-op when skills already exist (doesn't clobber curation)", async () => {
   const w = ws();
   mkdirSync(paths.skillsDir(w), { recursive: true });

@@ -192,7 +192,12 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         id: z.string().regex(/^[a-z][a-z0-9-]*$/),
         role: z.string(),
         identity: z.string(),
-        tools: z.array(z.string()).optional(),
+        // Lifecycle contract (Plan 14): the worker ALWAYS gets the artifact-tool baseline
+        // (save_artifact/read_artifact/list_artifacts/annotate_artifact/…) so it can produce and hand
+        // off work BY REFERENCE. This field only ADDS extra capabilities on top — e.g. "delegate_task",
+        // "run_command", "ask_human", or an "mcp:<server>" ref — it does NOT replace the baseline. Omit
+        // it (or pass []) for a plain worker; you never need to list the artifact tools yourself.
+        tools: z.array(z.string()).optional().describe("EXTRA capabilities to grant on top of the always-present artifact baseline (e.g. delegate_task, run_command, ask_human, mcp:<server>); omit for a plain worker — never list the artifact tools, they are always granted"),
       }),
       execute: async (draft) => {
         const decision = await ctx.requestApproval({ kind: "create_agent", draft });

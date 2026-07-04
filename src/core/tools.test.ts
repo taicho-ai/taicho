@@ -17,6 +17,8 @@ import { writeSkill, getActiveSkills } from "../store/skills";
 import { Skill } from "../schemas/skill";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { createBackgroundTask, setTaskFields, mkTaskId } from "../store/task-state";
+import { createAgent, loadAgent, reindex } from "../store/roster";
+import { ensureWorkspace } from "../store/files";
 
 const fakeTool = tool({ description: "x", inputSchema: z.object({}), execute: async () => ({}) });
 // Mirrors the real manager: `mcp:web` (ref "web") → all of that server's tools; `mcp:web/search`
@@ -376,6 +378,50 @@ test("save/read/list_artifacts: present only when granted", () => {
   expect("save_artifact" in granted).toBe(true);
   expect("read_artifact" in granted).toBe(true);
   expect("list_artifacts" in granted).toBe(true);
+});
+
+// ── Plan 14: a create_agent'd worker is born WITH the artifact tools and can hand off by reference ──
+
+test("PLAN 14: a worker created with NO tools AND one created with tools:[] BOTH get the artifact tools bound", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-p14-"));
+  await ensureWorkspace(ws);
+  const db = openDb(ws);
+  await reindex(ws, db);
+  const artifactTools = ["save_artifact", "read_artifact", "list_artifacts", "annotate_artifact"];
+  for (const [id, draft] of [
+    ["no-field", { id: "no-field", role: "r", identity: "i" }],
+    ["empty-arr", { id: "empty-arr", role: "r", identity: "i", tools: [] as string[] }],
+  ] as const) {
+    await createAgent(ws, db, draft, "root");
+    const def = await loadAgent(ws, id);
+    const set = toolsForAgent(def, { ws } as unknown as RunContext);
+    for (const t of artifactTools) expect(t in set).toBe(true); // bound, not defeated by tools:[]
+  }
+});
+
+test("PLAN 14: the created worker actually produces an artifact and hands it off BY REFERENCE (not loose text)", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "taicho-p14-"));
+  await ensureWorkspace(ws);
+  const db = openDb(ws);
+  await reindex(ws, db);
+  const child = await createAgent(ws, db, { id: "researcher", role: "researches", identity: "i", tools: [] }, "root");
+  // A delegated child's run ctx: it saves its work product and records the HANDLE for the parent.
+  const c = { ws, agentId: child.id, runId: "researcher/2026-07-04-run6", artifacts: [] as string[], notes: [] as string[] } as unknown as RunContext;
+  const set = toolsForAgent(child, c);
+  const saved = await invoke(set.save_artifact, { title: "Research dossier", type: "dossier", summary: "the findings", body: "THE FULL DOSSIER BODY" }) as { handle: string };
+  // Hand-off is BY REFERENCE: the parent receives a handle, and the body lives on disk — not inlined.
+  expect(c.artifacts).toEqual([saved.handle]);
+  expect(saved.handle).toBe("research-dossier@v1");
+  const stored = readArtifact(ws, saved.handle)!;
+  expect(stored.producer).toBe("researcher");
+  expect(readArtifact(ws, saved.handle)?.summary).toBe("the findings");
+});
+
+test("PLAN 14 (regression witness): the OLD toolless state (tools:[]) binds NONE of the artifact tools", () => {
+  // This is what every child in root/2026-07-04-run6 was: only the unconditional baseline was bound.
+  const set = toolsForAgent(agent([]), ctx);
+  expect(Object.keys(set).sort()).toEqual(["find_skills", "use_skill"]);
+  for (const t of ["save_artifact", "read_artifact", "list_artifacts", "annotate_artifact"]) expect(t in set).toBe(false);
 });
 
 test("save_artifact stamps provenance from ctx (agentId + runId), pushes the handle, returns id@vN", async () => {

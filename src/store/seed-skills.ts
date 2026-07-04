@@ -14,12 +14,12 @@ export const STARTER_SKILLS: Skill[] = [
     description: "Produce a clean, useful artifact when a task asks you to write or document something.",
     tags: ["writing", "artifact", "documentation"], created: SEED_TS,
     body: [
-      "Follow this before calling write_artifact:",
+      "Follow this before you save_artifact a work product (the structured, always-granted hand-off tool):",
       "1. Put the goal/answer in one line at the top — lead with the conclusion, then the detail.",
       "2. Structure with headings; prefer lists and tables over walls of prose where they aid scanning.",
       "3. Be concrete: real names, paths, commands, numbers. Cut vague filler.",
       "4. Self-check: does it answer the ACTUAL request? Is anything unverified? Cut it or flag it explicitly.",
-      "5. Use a lowercase-hyphen topicSlug that names the deliverable.",
+      "5. Give it a clear title and a lowercase-hyphen id that names the deliverable, plus a short summary readers see before they pull the body; you get back a handle (id@vN) to hand off by reference.",
     ].join("\n"),
   }),
   Skill.parse({

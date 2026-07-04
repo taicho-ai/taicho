@@ -484,3 +484,29 @@ the tracking view; the runbook is the build view.
 ### Phase 4 — Docs & CI
 - [x] Rewrite `CLI_TESTING.md` around the new harness; add Layer 4 to `TESTING.md`'s table; update `CLAUDE.md`. *CLI_TESTING.md rewritten (assertion contract kept, manifest = deliverable, gotchas documented); TESTING.md now four layers + a Layer 4 section; CLAUDE.md testing line updated.*
 - [ ] (later) `charmbracelet/vhs-action` in CI, evidence folder as build artifact — only once tapes prove stable locally.
+
+---
+
+## Plan 14 — Worker agents born toolless (artifact tools never bound)
+
+**One line:** Every worker agent in a real deck was created with `tools: []`, so NONE of the
+artifact tools (`save_artifact`/`read_artifact`/`list_artifacts`/`annotate_artifact`/`write_artifact`)
+— nor `delegate`, `ask_human`, etc. — are bound. The squad can only call the unconditional baseline
+(`use_skill`/`search_skills`), which is why every child in `root/2026-07-04-run6` produced ZERO
+artifacts and handed work back as loose `final.md` text.
+
+**Root cause (verified):** the default worker grant is correct — `roster.ts:143` grants the
+artifact trio via `draft.tools ?? [ ...defaults ]`. But `??` only fills `null`/`undefined`; an
+explicit `tools: []` (which `create_agent`'s optional schema, `tools.ts:195`, permits a model to
+emit) sails through and **defeats the default**. All 9 squad agents (`content-strategist`,
+`researcher`, `creative-director`, `master-scriptwriter`, `shot-planner`, `performance-analyst`,
+`platform-adapter`, `production-coordinator`, `short-form-editor`) carry `tools: []`. `use_skill`
+runs only because it's baseline (unguarded, `tools.ts:668`). Secondary: the `write-a-clear-artifact`
+skill (`skills/skill_write_artifact.md`) coaches "before calling write_artifact" — a **dangling
+reference** to a tool the agent doesn't have.
+
+- [x] Fix the bind-time fallback so an empty/`[]` tools list does NOT silently defeat the sensible default — treat empty as "apply the default worker grant," OR make the artifact trio part of an always-merged baseline (decide which; empty-means-default is the smaller change, baseline-merge is the more robust one). *Chose **baseline-merge**: `roster.ts` `DEFAULT_WORKER_TOOLS` + `workerTools(requested)` merge the artifact grant UNDER any model-proposed `tools` (extras ADD, never REPLACE), deduped, baseline-first. `createAgent` now calls `workerTools(draft.tools)`, so `tools: []` — and even a non-empty list that forgot the artifact tools — can never again mint a toolless worker. Rationale: the artifact tools are the squad's hand-off-by-reference floor (Plan 01); they're low-risk shared-store read/write, so baseline-merge doesn't weaken Plan 08 least-privilege (MCP + `run_command` stay opt-in). Tested in `roster.test.ts` (`workerTools`, no-field, `tools:[]`, extras-merge).*
+- [x] Decide the intended lifecycle contract: what SHOULD `create_agent` with no/empty `tools` grant? Document it where the grant is defined so a future create path can't reintroduce the toolless worker. *Contract documented at BOTH grant sites: `roster.ts` (`DEFAULT_WORKER_TOOLS`/`workerTools`/`createAgent` doc comments) and the `create_agent` schema `tools.describe(...)` in `tools.ts` (the model reads: this field only ADDS extras on top of the always-present artifact baseline). Plus a CLAUDE.md convention bullet.*
+- [x] Backfill the existing 9 toolless agents (a boot reconcile / migration that grants the default trio to any worker with `tools: []`), so the live deck is usable without hand-editing each `agent.md`. *`reconcileWorkerTools(ws)` in `roster.ts` — a CODE-level boot migration (the 9 live agents are in the captain's gitignored `agents/`, not in-repo): scans `agents/`, grants the baseline to any non-root worker persisted with `tools: []`, rewrites its `agent.md`, and returns the fixed ids for a boot notice. Wired into `index.tsx` boot after `seedLibrarian`. A deliberate non-empty grant (and root/librarian) is left untouched. Tested with a synthetic `content-strategist` `tools:[]` worker in `roster.test.ts` (fixes it, preserves a narrow grant, idempotent).*
+- [x] Reconcile the dangling skill: point `write-a-clear-artifact` at the real `save_artifact` (not the legacy `write_artifact`), or gate the guidance on the tool actually being granted. *`seed-skills.ts` `write-a-clear-artifact` now coaches "before you save_artifact a work product (the structured, always-granted hand-off tool)" and its step 5 uses `save_artifact`'s `id`/`title`/`summary`/handle vocabulary (was `write_artifact`'s `topicSlug`). `write_artifact` is confirmed still a REAL tool (a back-compat wrapper over `saveArtifact`, `tools.ts:57`) and stays in the grant baseline — only the skill guidance repoints to the preferred structured tool. Locked by a test in `seed-skills.test.ts` (references `save_artifact`, no longer says "calling write_artifact").*
+- [x] Test: a freshly `create_agent`'d worker (no `tools` field AND explicit `tools: []`) ends up with the artifact trio bound; a delegated child can `save_artifact` and hand off by reference (proves the `root/2026-07-04-run6` gap is closed). Update `CLAUDE.md`. *`tools.test.ts` Plan 14 block: both create paths bind the artifact tools via `toolsForAgent`; a created child `save_artifact`s a dossier and hands back the HANDLE (`c.artifacts === [research-dossier@v1]`, body on disk — not loose text); a regression-witness test proves the OLD `tools:[]` state bound only `find_skills`/`use_skill`. `CLAUDE.md` updated (store `roster.ts` note + a "Workers are never born toolless" convention bullet).*
