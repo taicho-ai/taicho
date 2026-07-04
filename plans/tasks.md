@@ -293,15 +293,23 @@ question (recommended: rename → `verifications[]` and populate, or cut — dec
 
 ---
 
-## Plan 07 — Unified streaming *(placeholder)*
+## Plan 07 — Unified streaming
 
-Only the Codex path streams (`loop.ts` `codexBackend` branch); Anthropic / OpenAI / OpenRouter use
-plain `generateText` — no live deltas, so the streaming-markdown UI only lights up for subscription
+Only the Codex path streamed (`loop.ts` `codexBackend` branch); Anthropic / OpenAI / OpenRouter used
+plain `generateText` — no live deltas, so the streaming-markdown UI only lit up for subscription
 users.
-- [ ] Unify the loop on `streamText` for every provider (the codex branch already proves the
-      drain-to-completion shape); delete the two-branch split.
-- [ ] Verify usage/cost/toolCalls parity per provider (OpenRouter `providerMetadata` arrives on the
+- [x] Unify the loop on `streamText` for every provider (the codex branch already proves the
+      drain-to-completion shape); delete the two-branch split. *(loop.ts: the `if (opts.codexBackend)`
+      generateText/streamText split is gone — one `streamText` call drains to completion for all
+      providers; codex-only routing (system → `providerOptions.openai.instructions` + `store:false`)
+      kept as a conditional spread. Env providers now stream deltas too.)*
+- [x] Verify usage/cost/toolCalls parity per provider (OpenRouter `providerMetadata` arrives on the
       streamed path too) and that `guardModelCall`'s idle watchdog gets chunk pings everywhere.
+      *(loop reads usage/toolCalls/response messages/providerMetadata off the drained stream; the
+      `onChunk` progress()+delta ping now fires on EVERY provider. Parity covered by mocked loop tests
+      — a new env-path test asserts usage+cost+toolCalls+live deltas, and the OpenRouter-cost test now
+      reads providerMetadata from the finish part; real-provider cost paths are unverifiable here
+      without keys. The e2e model was moved to `doStream` so the mp4 harness stays green.)*
 
 ## Plan 08 — Security hardening *(placeholder)*
 
