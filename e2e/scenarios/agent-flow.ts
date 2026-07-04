@@ -14,22 +14,7 @@
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-
-export interface AssertionResult {
-  name: string;
-  pass: boolean;
-  expected: string;
-  actual: string;
-}
-
-export interface Scenario {
-  name: string;
-  e2eModelMode: string;
-  /** Full .tape source. `binary` is the absolute path to dist/taicho (fine inside a Type string).
-   *  Output/Screenshot paths are RELATIVE — see the file header for why. */
-  tape: (p: { binary: string; evidenceDir: string }) => string;
-  assertions: (ws: string) => Promise<AssertionResult[]>;
-}
+import type { AssertionResult, Scenario } from "./types";
 
 /** The second user prompt — asserted verbatim in the ledger. */
 const SECOND_PROMPT = "use the proof worker to prove delegation works";
@@ -93,6 +78,11 @@ function check(name: string, expected: string, fn: () => { pass: boolean; actual
 const scenario: Scenario = {
   name: "agent-flow",
   e2eModelMode: "agent-flow",
+
+  // Artifacts this tape writes (relative filenames — the wrapper copies them out of the temp ws
+  // into evidence/agent-flow/ and records them in the manifest). Keep in sync with the tape below.
+  video: "session.mp4",
+  screenshots: ["approval-card.png", "final.png"],
 
   // The two prompt submits gate Enter on the typed text being on screen (Wait+Screen, not a
   // fixed Sleep) — same wait-for-render-before-Enter discipline as the Layer-1/2 tests, which
