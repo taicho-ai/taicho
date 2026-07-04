@@ -17,7 +17,8 @@ import { App } from "./App";
 import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "../store/roster";
-import { listTraces } from "../store/trace";
+import { listTraces, writeTrace } from "../store/trace";
+import { RunTrace } from "../schemas/trace";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { loadContext, loadLedger } from "../store/conversation";
 import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
@@ -142,6 +143,31 @@ test("/status shows the env auth source", async () => {
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "/status", ENTER);
   await waitFor(lastFrame, "openai");
+});
+
+// Plan 09: /costs is a cross-session rollup over the SAME traces /runs reads. Seed two traces on disk
+// — one priced, one subscription (costUsd:null) — and prove the REPL wiring reports tokens for the
+// subscription run instead of a fabricated $0.
+const mkTrace = (over: Partial<RunTrace>): RunTrace =>
+  RunTrace.parse({
+    id: "root/2026-07-04-run1", agent: "root", task: "t", triggeredBy: "user",
+    ledger: { retrieved: [], applied: [], skipped: [] },
+    toolCalls: [], artifacts: [], delegatedOut: [], outcome: "completed",
+    tokens: 0, costUsd: 0, durationMs: 0, started: "2026-07-04T10:00:00.000Z", ...over,
+  });
+
+test("/costs rolls up spend and reports subscription tokens, never a fabricated $0", async () => {
+  const { ws, props } = await setup();
+  writeTrace(ws, mkTrace({ id: "root/2026-07-04-run1", agent: "root", tokens: 100, costUsd: 2, model: "gpt-5.5" }));
+  writeTrace(ws, mkTrace({ id: "writer/2026-07-04-run1", agent: "writer", tokens: 300, costUsd: null, costNote: "subscription", model: "codex" }));
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/costs", ENTER);
+  await waitFor(lastFrame, "by agent");
+  const frame = lastFrame() ?? "";
+  expect(frame).toContain("400 tok");             // 100 priced + 300 subscription tokens, combined
+  expect(frame).toContain("$2.0000 priced");      // only the priced run contributes USD
+  expect(frame).toContain("subscription run(s)"); // subscription surfaced honestly
+  expect(frame).not.toContain("$0.00");           // never a fabricated zero-dollar cost
 });
 
 test("suggester: ↓ moves the › highlight and Enter runs the highlighted no-arg command", async () => {

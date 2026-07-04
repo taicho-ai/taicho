@@ -138,6 +138,7 @@ export interface HeadlessDeps {
   configDefaults?: RunDeps["configDefaults"];
   mcp?: RunDeps["mcp"];
   embed?: RunDeps["embed"];
+  deckLedger?: RunDeps["deckLedger"]; // Plan 09: deck-wide ceilings enforced in the loop
 }
 
 export interface HeadlessResult {
@@ -200,6 +201,7 @@ export async function runHeadless(
     configDefaults: hd.configDefaults,
     mcp: hd.mcp,
     embed: hd.embed,
+    deckLedger: hd.deckLedger,
     signal: opts.signal,
   });
 

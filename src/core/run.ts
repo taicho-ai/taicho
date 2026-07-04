@@ -27,6 +27,7 @@ import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
+import type { DeckLedger } from "../store/deck-budget";
 import type { Verdict } from "./command-guard";
 import { log, redact } from "./logger";
 
@@ -161,6 +162,9 @@ export interface RunDeps {
   /** Plan 04 Phase 2: back await_task — block until a background task settles (host-owned). The
    *  optional awaiterAgentId (stamped by run.ts) lets the host fail fast on a same-agent self-block. */
   awaitTask?: (taskId: string, timeoutMs?: number, awaiterAgentId?: string) => Promise<TaskAwaitResult>;
+  /** Plan 09: deck-wide spend ledger, shared by ALL runs in a session (including delegated children),
+   *  enforced in the loop and persisted across sessions. Undefined ⇒ no deck ceilings configured. */
+  deckLedger?: DeckLedger;
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -182,6 +186,7 @@ export function makeDeps(opts: {
   onRunEnd?: RunDeps["onRunEnd"];
   dispatch?: RunDeps["dispatch"];
   awaitTask?: RunDeps["awaitTask"];
+  deckLedger?: RunDeps["deckLedger"];
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
@@ -194,6 +199,7 @@ export function makeDeps(opts: {
     mcp: opts.mcp, embed: opts.embed,
     onRunStart: opts.onRunStart, onRunEnd: opts.onRunEnd,
     dispatch: opts.dispatch, awaitTask: opts.awaitTask,
+    deckLedger: opts.deckLedger,
   };
 }
 
@@ -420,6 +426,9 @@ export async function executeRun(
     // so a crash mid-run leaves legible evidence and a resume point instead of nothing.
     onEvent: (e) => appendRunTranscript(deps.ws, runId, e),
     checkpoint: (s) => writeRunCheckpoint(deps.ws, runId, s),
+    // Plan 09: deck-wide ceilings are metered + enforced here, the same place per-run caps are. Shared
+    // across every run (parent + delegated children) so the whole deck's spend counts against them.
+    deckLedger: deps.deckLedger,
   });
   const outcome: RunTrace["outcome"] =
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";
@@ -433,6 +442,7 @@ export async function executeRun(
     delegatedOut: ctx.delegatedOut, verification: ctx.verifications, outcome,
     tokens: result.tokens, costUsd: subscription ? null : result.costUsd,
     costNote: subscription ? "subscription" : undefined,
+    model: picked?.modelId, // the /costs "by provider/model" dimension; undefined in headless/unit contexts without a resolver
     // aggregate = this run's own loop + child RUNS + this run's delegation-checker calls. All three
     // are real model spend this run caused; verifier spend is 0 for subscription (costUsd stays null).
     aggregate: {

@@ -22,6 +22,7 @@ import type { RunResult, TaskAwaitResult, RunDeps } from "../core/run";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { isStdioServer } from "../store/config";
+import type { DeckLedger } from "../store/deck-budget";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
 import { renderMarkdown } from "./markdown";
@@ -116,6 +117,7 @@ export function App(props: {
   mcpYamlServers?: string[];
   embed?: (text: string) => Promise<Float32Array>;
   startupNotice?: string;
+  deckLedger?: DeckLedger; // Plan 09: deck-wide spend ledger (undefined ⇒ no deck ceilings configured)
 }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -384,6 +386,7 @@ export function App(props: {
     configDefaults: props.configDefaults,
     mcp: props.mcp,
     embed: props.embed,
+    deckLedger: props.deckLedger, // Plan 09: deck-wide ceilings enforced in the loop, shared by all runs
     dispatch,
     awaitTask,
     onRunStart: ({ runId, agent, triggeredBy }) => {

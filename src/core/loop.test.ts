@@ -5,6 +5,7 @@ import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { z } from "zod";
 import { runLoop } from "./loop";
 import type { AgentDef } from "../schemas/agent";
+import type { DeckLedger, DeckSpend, DeckCeilings } from "../store/deck-budget";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const toolCallResp = {
@@ -106,6 +107,67 @@ test("stops with exhausted when the cost cap is reached (not the iteration cap)"
   const res = await runLoop({ model, agent: capped, system: "S", messages: [{ role: "user", content: "go" }], tools, priceUsd: () => 1 });
   expect(res.exhausted).toBe(true);
   expect((model as any).doGenerateCalls.length).toBe(1); // one $1 call exceeds the $0.001 cap
+});
+
+// --- Plan 09: deck-wide ceilings, enforced in the loop (the one meter) -----------------------------
+// A fake ledger stands in for the DB-backed one: current() is the running cross-session total; add()
+// accumulates the way the real rolling counter does, so a test can watch spend cross a ceiling.
+function fakeLedger(init: Partial<DeckSpend>, ceilings: DeckCeilings) {
+  const s: DeckSpend = { dayTokens: 0, weekTokens: 0, dayCostUsd: 0, weekCostUsd: 0, ...init };
+  const adds: { tokens: number; costUsd: number }[] = [];
+  const ledger: DeckLedger = {
+    ceilings,
+    current: () => ({ ...s }),
+    add: (d) => { adds.push(d); s.dayTokens += d.tokens; s.weekTokens += d.tokens; s.dayCostUsd += d.costUsd; s.weekCostUsd += d.costUsd; },
+  };
+  return { ledger, adds };
+}
+
+test("deck ceiling ALREADY crossed refuses the run before any model call", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(finalResp) as any });
+  const { ledger } = fakeLedger({ dayTokens: 1000 }, { dailyTokens: 1000 });
+  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, deckLedger: ledger });
+  expect(res.exhausted).toBe(true);
+  expect(res.text).toContain("deck budget exhausted");
+  expect((model as any).doGenerateCalls.length).toBe(0); // refused at the top of the loop, before spending
+});
+
+test("deck ceiling stops the run once ACCUMULATED spend crosses it (not the iteration cap)", async () => {
+  // Always tool-calls, so only a budget stops it. usage fixture = 2 tok/call; dailyTokens:5 is crossed
+  // after the 3rd call (2→4→6), so the 4th iteration's top-of-loop check refuses.
+  const model = new MockLanguageModelV3({ doGenerate: (async () => toolCallResp) as any });
+  const roomy = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 50 } };
+  const { ledger, adds } = fakeLedger({}, { dailyTokens: 5 });
+  const res = await runLoop({ model, agent: roomy, system: "S", messages: [{ role: "user", content: "go" }], tools, deckLedger: ledger });
+  expect(res.exhausted).toBe(true);
+  expect(res.text).toContain("deck budget exhausted");
+  expect((model as any).doGenerateCalls.length).toBe(3); // 3 calls committed 6 tok, then refused
+  expect(adds.length).toBe(3);
+});
+
+test("a subscription (codexBackend) call commits TOKENS but 0 USD to the deck ledger", async () => {
+  const model = new MockLanguageModelV3({
+    doStream: (async () => ({
+      stream: simulateReadableStream({
+        initialDelayInMs: 0, chunkDelayInMs: 0,
+        chunks: [
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "1" },
+          { type: "text-delta", id: "1", delta: "done" },
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
+        ],
+      }),
+    })) as any,
+  });
+  const { ledger, adds } = fakeLedger({}, { weeklyTokens: 1_000_000 });
+  await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
+    codexBackend: true, priceUsd: () => 999, deckLedger: ledger, // priceUsd would be $999 — must be ignored
+  });
+  expect(adds.length).toBe(1);
+  expect(adds[0].tokens).toBeGreaterThan(0); // tokens ALWAYS metered
+  expect(adds[0].costUsd).toBe(0);           // USD unmeasurable for a subscription → never fabricated
 });
 
 test("aborts when the signal is already aborted", async () => {

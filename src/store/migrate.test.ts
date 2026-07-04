@@ -41,9 +41,14 @@ test("v4 creates the skills table", () => {
   expect(() => db.query("SELECT id, name, description, tags, status, body FROM skills").all()).not.toThrow();
 });
 
-test("v5 creates the tasks index table and bumps SCHEMA_VERSION to 5", () => {
+test("v5 creates the tasks index table", () => {
   const db = openDb(ws());
-  expect(SCHEMA_VERSION).toBe(5);
-  expect(getMeta(db, "schema_version")).toBe("5");
   expect(() => db.query("SELECT id, agent, goal, status, kind, root_run_id, result_ref, summary, created, updated FROM tasks").all()).not.toThrow();
+});
+
+test("v6 creates the deck_spend counter table and bumps SCHEMA_VERSION to 6", () => {
+  const db = openDb(ws());
+  expect(SCHEMA_VERSION).toBe(6);
+  expect(getMeta(db, "schema_version")).toBe("6");
+  expect(() => db.query("SELECT period_kind, period_key, tokens, cost_usd, updated FROM deck_spend").all()).not.toThrow();
 });

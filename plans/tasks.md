@@ -314,13 +314,14 @@ Known-v1 posture that should become deliberate instead of implicit:
 - [ ] **Sandbox-then-escalate** for `run_command` (the documented future hardening in the
       root-capabilities spec).
 
-## Plan 09 — Global budgets & cost accounting *(placeholder)*
+## Plan 09 — Global budgets & cost accounting
 
 Budgets stop at the request boundary; nobody can answer "what did this week cost."
-- [ ] **Deck-level spend ceilings** — daily/weekly token + USD caps in `taicho.yaml`, enforced in
-      the same place per-run caps are (the loop meters; config disposes).
-- [ ] **`/costs`** — cross-session rollup from traces (by agent / day / provider), honest about
-      `costUsd: null` subscription runs (report tokens there).
+- [x] **Deck-level spend ceilings** — daily/weekly token + USD caps in `taicho.yaml` (`budgets:`),
+      enforced in the same place per-run caps are (the loop meters; config disposes). Backed by a
+      DB-rolling counter (`deck_spend`, keyed by UTC day / ISO week) so ceilings span sessions.
+- [x] **`/costs`** — cross-session rollup from traces (by agent / day / model), honest about
+      `costUsd: null` subscription runs (reports tokens there, never a fabricated $0).
 
 ---
 

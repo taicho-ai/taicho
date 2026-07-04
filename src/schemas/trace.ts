@@ -48,6 +48,7 @@ export const RunTrace = z.object({
   tokens: z.number().default(0),
   costUsd: z.number().nullable().default(0),
   costNote: z.string().optional(),
+  model: z.string().optional(),           // resolved model id — the /costs "by provider" dimension (default keeps old traces parseable)
   aggregate: z.object({ tokens: z.number(), costUsd: z.number().nullable() }).optional(),
   notes: z.array(z.string()).default([]),
   durationMs: z.number().default(0),
