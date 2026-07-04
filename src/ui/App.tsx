@@ -33,7 +33,7 @@ import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
 import { addMcpServer, removeMcpServer } from "../store/mcp-store";
 import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand, parseArtifactsCommand } from "./slash";
-import { listArtifacts, readArtifact, artifactVersions, gcArtifacts } from "../store/artifacts";
+import { listArtifacts, readArtifact, artifactVersions, gcArtifacts, collectReferencedArtifacts } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { artifactHandle } from "../schemas/artifact";
 import { syncKnowledgeSources } from "../knowledge/sync";
@@ -796,8 +796,15 @@ export function App(props: {
         } catch (e) { say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` }); }
         return;
       }
-      // gc — never archives a version referenced by a trace (keep-latest-N + lineage honored inside).
-      const referenced = listTraces(props.ws).flatMap((t) => [...t.artifacts, ...t.inputArtifacts, ...t.outputArtifacts]);
+      // gc — protect a version by what CONSUMES it, never by its own producing run's record. Every
+      // version an agent saves lands in that run's `trace.artifacts`, so folding that in would pin
+      // every version ever produced and shadow keep-latest-N (nothing would ever be archived). Draw
+      // the protected set from the hand-off graph (inputArtifacts/outputArtifacts) + task resultRefs;
+      // annotations + parent-closure are honored inside gcArtifacts.
+      const referenced = collectReferencedArtifacts({
+        traces: listTraces(props.ws),
+        taskResultRefs: listTaskIndex(props.db).map((t) => t.result_ref),
+      });
       const r = gcArtifacts(props.ws, { referenced });
       say({ kind: "system", text: `  gc: archived ${r.archived.length} version(s), kept ${r.kept}${r.archived.length ? ` — ${r.archived.join(", ")}` : " (nothing to collect)"}` });
       return;

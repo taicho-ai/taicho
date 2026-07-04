@@ -5,8 +5,11 @@ import { join } from "node:path";
 import {
   saveArtifact, readArtifact, readArtifactBody, listArtifacts,
   artifactVersions, rebuildArtifactIndex, readManifest, gcArtifacts,
+  collectReferencedArtifacts,
 } from "./artifacts";
 import { annotateArtifact } from "./annotations";
+import { writeTrace, listTraces } from "./trace";
+import type { RunTrace } from "../schemas/trace";
 import { paths } from "./files";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-art-"));
@@ -195,4 +198,123 @@ test("gcArtifacts is a no-op when nothing is collectable", () => {
   const r = gcArtifacts(w);
   expect(r.archived).toEqual([]);
   expect(listArtifacts(w).map((x) => x.id).sort()).toEqual(["a", "b"]);
+});
+
+// ── collectReferencedArtifacts (the /artifacts gc protected-set gather) ───────────────────────────
+
+test("collectReferencedArtifacts draws from the HAND-OFF graph, NOT a producing run's own artifacts", () => {
+  // The producing trace lists every version it emitted in `artifacts` — that MUST NOT protect them
+  // (else keep-latest-N is shadowed and gc archives nothing). Only inputArtifacts/outputArtifacts count.
+  const traces = [
+    { artifacts: ["doc@v1", "doc@v2", "doc@v3"], inputArtifacts: ["src@v1"], outputArtifacts: ["out@v2"] },
+    { artifacts: ["doc@v4"], inputArtifacts: [], outputArtifacts: [] },
+  ];
+  const refs = collectReferencedArtifacts({ traces }).sort();
+  expect(refs).toEqual(["out@v2", "src@v1"]);          // hand-off edges only
+  expect(refs).not.toContain("doc@v1");                // producing record is NOT a reference
+  expect(refs).not.toContain("doc@v4");
+});
+
+test("collectReferencedArtifacts unions task resultRefs, exemplars and extras, deduped & trimmed", () => {
+  const refs = collectReferencedArtifacts({
+    traces: [{ inputArtifacts: ["a@v1"], outputArtifacts: [] }],
+    taskResultRefs: ["b@v2", "researcher/2026-07-04-run3", null, undefined, "  c@v1  "],
+    exemplarArtifacts: ["d@v9", "a@v1"],               // a@v1 already present ⇒ deduped
+    extra: ["e@v1", ""],
+  }).sort();
+  expect(refs).toEqual(["a@v1", "b@v2", "c@v1", "d@v9", "e@v1", "researcher/2026-07-04-run3"]);
+  // empty/null entries dropped; whitespace trimmed
+  expect(refs).not.toContain("");
+  expect(refs).toContain("c@v1");
+});
+
+test("collectReferencedArtifacts is empty for no sources", () => {
+  expect(collectReferencedArtifacts({})).toEqual([]);
+});
+
+// ── PRODUCTION-CONDITION gc (real traces pin each version, as executeRun writes them) ─────────────
+// The existing gc tests seed versions via raw saveArtifact with NO run/trace, so listTraces() is []
+// and the protected set is trivially just keep-latest-N. That never reproduces production, where
+// EVERY save pushes the version into its run's ctx.artifacts → persisted as trace.artifacts. These
+// tests write real traces (exactly what run.ts writes) and drive the SAME protected-set gather the
+// /artifacts gc handler uses (collectReferencedArtifacts), catching the "gc is a no-op" regression.
+
+/** A real per-run trace, mirroring run.ts: `artifacts` = every version this run emitted. */
+function writeProductionTrace(
+  w: string, agent: string, n: number,
+  emitted: string[], handoff: { inputArtifacts?: string[]; outputArtifacts?: string[] } = {},
+): void {
+  const trace: RunTrace = {
+    id: `${agent}/2026-07-04-run${n}`, agent, task: "(chat)", triggeredBy: "user",
+    ledger: { retrieved: [], applied: [], skipped: [], knowledge: [], skills: [] },
+    toolCalls: [{ tool: "save_artifact", count: 1 }],
+    artifacts: emitted,                                        // ← the production pin: what THIS run produced
+    inputArtifacts: handoff.inputArtifacts ?? [],
+    outputArtifacts: handoff.outputArtifacts ?? [],
+    delegatedOut: [], verification: [], outcome: "completed",
+    tokens: 0, contextTokens: 0, costUsd: 0, verifierTokens: 0, verifierCostUsd: 0,
+    notes: [], durationMs: 1, started: new Date().toISOString(),
+  };
+  writeTrace(w, trace);
+}
+
+test("PRODUCTION: gc archives superseded intermediates even though each version is pinned by its own trace", () => {
+  const w = ws();
+  // Iterative revision: doc@v1..v5, each produced by its own run whose trace.artifacts pins it.
+  for (let i = 1; i <= 5; i++) {
+    saveArtifact(w, { id: "doc", title: `Doc v${i}`, body: `${i}`, ...prov });
+    writeProductionTrace(w, "researcher", i, [`doc@v${i}`]);
+  }
+  expect(artifactVersions(w, "doc")).toEqual([1, 2, 3, 4, 5]);
+  // The BUG (folding trace.artifacts into `referenced`) protects all 5 → archives nothing. Running it
+  // first is a safe no-op (it archives nothing, so it leaves the store untouched for the fix below).
+  const buggy = listTraces(w).flatMap((t) => [...t.artifacts, ...t.inputArtifacts, ...t.outputArtifacts]);
+  expect(gcArtifacts(w, { keepLatest: 3, referenced: buggy }).archived).toEqual([]);
+  expect(artifactVersions(w, "doc")).toEqual([1, 2, 3, 4, 5]); // proven no-op: nothing archived
+
+  // The FIX: gather from the consumption/hand-off graph only (what the /artifacts gc handler now does).
+  const referenced = collectReferencedArtifacts({ traces: listTraces(w) });
+  expect(referenced).toEqual([]);                             // no hand-off edges ⇒ nothing pinned by consumption
+  const r = gcArtifacts(w, { keepLatest: 3, referenced });
+  expect(r.archived.sort()).toEqual(["doc@v1", "doc@v2"]);    // superseded intermediates collected
+  expect(artifactVersions(w, "doc")).toEqual([3, 4, 5]);      // live store shrank
+  expect(readArtifact(w, "doc")!.version).toBe(5);            // latest untouched
+});
+
+test("PRODUCTION: a version handed off (inputArtifacts/outputArtifacts) survives gc, however old", () => {
+  const w = ws();
+  for (let i = 1; i <= 5; i++) {
+    saveArtifact(w, { id: "doc", title: `Doc v${i}`, body: `${i}`, ...prov });
+    writeProductionTrace(w, "researcher", i, [`doc@v${i}`]);
+  }
+  // A LATER run handed doc@v1 down to a child (inputArtifacts) and received doc@v2 up (outputArtifacts).
+  writeProductionTrace(w, "planner", 1, [], { inputArtifacts: ["doc@v1"], outputArtifacts: ["doc@v2"] });
+  const referenced = collectReferencedArtifacts({ traces: listTraces(w) }).sort();
+  expect(referenced).toEqual(["doc@v1", "doc@v2"]);
+  const r = gcArtifacts(w, { keepLatest: 3, referenced });
+  expect(r.archived).toEqual([]);                            // v1 (hand-off down) + v2 (hand-off up) both protected
+  expect(readArtifact(w, "doc@v1")!.title).toBe("Doc v1");
+  expect(readArtifact(w, "doc@v2")!.title).toBe("Doc v2");
+});
+
+test("PRODUCTION: a version pinned by a task resultRef / annotation / parent-closure survives gc", () => {
+  const w = ws();
+  for (let i = 1; i <= 5; i++) {
+    saveArtifact(w, { id: "doc", title: `Doc v${i}`, body: `${i}`, ...prov });
+    writeProductionTrace(w, "researcher", i, [`doc@v${i}`]);
+  }
+  // doc@v1 kept by a task's resultRef; doc@v2 kept by an annotation; a derived artifact pins doc@v3 via lineage.
+  annotateArtifact(w, { target: "doc@v2", author: "human", body: "approved baseline" });
+  saveArtifact(w, { id: "derived", title: "Derived", body: "d", parents: ["doc@v3"], ...prov });
+  const referenced = collectReferencedArtifacts({
+    traces: listTraces(w),
+    taskResultRefs: ["doc@v1", "researcher/2026-07-04-run5" /* run-id resultRef → harmlessly ignored */],
+  });
+  const r = gcArtifacts(w, { keepLatest: 1, referenced });   // keep-latest-1 ⇒ only doc@v5 kept by recency
+  // v1 (task ref), v2 (annotation), v3 (parent of kept `derived`) all survive; only v4 is collectable.
+  expect(r.archived).toEqual(["doc@v4"]);
+  expect(readArtifact(w, "doc@v1")!.title).toBe("Doc v1");
+  expect(readArtifact(w, "doc@v2")!.title).toBe("Doc v2");
+  expect(readArtifact(w, "doc@v3")!.title).toBe("Doc v3");
+  expect(readArtifact(w, "doc@v4")).toBeNull();              // superseded + unreferenced ⇒ archived
 });
