@@ -62,6 +62,27 @@ test("redacts token fields in serialized JSON", () => {
   expect(out).toContain("acc_1"); // non-secret fields survive
 });
 
+test("redacts GitHub tokens (classic prefixes + fine-grained PAT)", () => {
+  const classic = redact("gh push token=ghp_0123456789ABCDEFabcdef0123456789ABCD done");
+  expect(classic).toContain("ghp_***");
+  expect(classic).not.toContain("0123456789ABCDEF");
+  expect(redact("oauth gho_ABCdef0123456789ABCdef0123456789ABCD")).toContain("gho_***");
+  const pat = "github_pat_11ABCDEFG0abcdefghij_KLMNOPqrstuvwxyz0123456789ABCDEFGHIJ";
+  const patOut = redact(`GITHUB_TOKEN=${pat}`);
+  expect(patOut).toBe("GITHUB_TOKEN=github_pat_***");
+});
+
+test("redacts a bare JWT (header.payload.signature)", () => {
+  const jwt =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+  expect(redact(`session=${jwt}`)).toBe("session=eyJ***");
+});
+
+test("redact leaves ordinary prose untouched (no over-redaction)", () => {
+  const s = "The gh command staged 20 files; check the api overview in README before you push skills.";
+  expect(redact(s)).toBe(s);
+});
+
 test("never writes an auth token to the log file even when handed one as data", () => {
   const file = tmpFile();
   const logger = createLogger({ file, level: "debug" });

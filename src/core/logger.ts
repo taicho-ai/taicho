@@ -31,11 +31,18 @@ export interface Logger {
 
 /** Scrub anything that looks like a bearer token or API key BEFORE it reaches disk. Mirrors
  *  `redactAuthHeader` (Bearer <token> → Bearer ***) and adds the common key/secret shapes an error
- *  string or serialized profile might carry. Targeted on purpose — it must not maul ordinary prose. */
+ *  string or serialized profile might carry. Targeted on purpose — it must not maul ordinary prose.
+ *  Beyond Bearer/`sk-`/named-JSON-field shapes it also covers GitHub tokens (`ghp_`/`gho_`/`ghu_`/
+ *  `ghs_`/`ghr_` and fine-grained `github_pat_…`) and bare JWTs, so a gh-backed MCP or a new provider
+ *  can't leak a credential shape the original three rules miss. Each new rule requires a distinctive
+ *  prefix + a long opaque body, so it stays off ordinary text. */
 export function redact(s: string): string {
   return s
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer ***")
     .replace(/\bsk-[A-Za-z0-9._-]{8,}/g, "sk-***") // OpenAI/Anthropic/OpenRouter: sk-, sk-ant-, sk-proj-, sk-or-
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "github_pat_***") // GitHub fine-grained PAT
+    .replace(/\bgh[oprsu]_[A-Za-z0-9]{20,}/g, (m) => m.slice(0, 4) + "***") // GitHub gho_/ghp_/ghr_/ghs_/ghu_ tokens
+    .replace(/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g, "eyJ***") // bare JWT: header.payload.signature
     .replace(/"(access_token|refresh_token|id_token|api[_-]?key|apiKey|authorization)"\s*:\s*"[^"]*"/gi, '"$1":"***"');
 }
 

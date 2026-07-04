@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable, PassThrough } from "node:stream";
 import { MockLanguageModelV3, mockValues } from "ai/test";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { ensureWorkspace } from "../store/files";
@@ -62,6 +63,30 @@ test("makeApprovalChannel approve approves, and answers ask_human with the first
   const ch = makeApprovalChannel("approve");
   expect(await ch({ kind: "run_command", command: "ls" })).toEqual({ type: "approve" });
   expect(await ch({ kind: "ask_human", question: "pick", options: ["a", "b"] })).toEqual({ type: "answered", answer: "a" });
+});
+
+test("makeApprovalChannel prompt degrades to reject on EOF — BOTH first and second requests, no throw", async () => {
+  // Regression: `rl` is created once and reused; after stdin EOF the first request rejected fine but the
+  // second called `rl.question` on a closed interface and threw ("readline was closed"). Drive with an
+  // immediately-ending stream so the very first request already sees EOF.
+  const ch = makeApprovalChannel("prompt", { input: Readable.from([]), out: () => {} });
+  const first = await ch({ kind: "run_command", command: "ls" });
+  const second = await ch({ kind: "run_command", command: "whoami" });
+  expect(first).toEqual({ type: "reject" });
+  expect(second).toEqual({ type: "reject" });
+});
+
+test("makeApprovalChannel prompt reads a 'y' line, then degrades to reject once stdin EOFs", async () => {
+  // Proves the fix doesn't break the normal interactive path: a 'y' still approves, and a later request
+  // after EOF degrades to reject instead of throwing.
+  const input = new PassThrough();
+  const ch = makeApprovalChannel("prompt", { input, out: () => {} });
+  const p1 = ch({ kind: "run_command", command: "ls" });
+  input.write("y\n"); // answers the first request
+  expect(await p1).toEqual({ type: "approve" });
+  input.end(); // EOF
+  await new Promise((r) => setImmediate(r)); // let readline emit 'close'
+  expect(await ch({ kind: "run_command", command: "whoami" })).toEqual({ type: "reject" });
 });
 
 // ── runHeadless drives executeRun without Ink ─────────────────────────────
