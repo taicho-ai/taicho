@@ -28,6 +28,14 @@ export interface TaskVerification {
 
 export type TaskKind = "chat" | "background";
 
+/** The canonical set of TERMINAL task statuses — a settled task whose outcome must not be overwritten.
+ *  Single source of truth so the cancel guard (cancelTaskState) and the await guard (App's awaitTask)
+ *  can never drift: cancelling an already-`blocked`/`interrupted`/`partial` task must be a no-op, not
+ *  an outcome-erasing overwrite. Non-terminal = requested | queued | running. */
+export const TERMINAL_TASK_STATUS = new Set<TaskStatus>([
+  "completed", "partial", "failed", "blocked", "interrupted", "cancelled",
+]);
+
 export interface TaskState {
   taskId: string;
   title: string;
@@ -189,11 +197,14 @@ export function setTaskFields(
   return task;
 }
 
-/** Mark a task cancelled (the caller aborts the live run separately). No-op if already terminal. */
+/** Mark a task cancelled (the caller aborts the live run separately). No-op if already terminal —
+ *  cancelling a settled task (completed/partial/failed/blocked/interrupted/cancelled) must NOT erase
+ *  its recorded outcome. Guard aligned with TERMINAL_TASK_STATUS (was too narrow, dropping
+ *  blocked/interrupted/partial). */
 export function cancelTaskState(ws: string, db: Database, taskId: string): TaskState | null {
   const task = readTaskState(ws, taskId);
   if (!task) return null;
-  if (["completed", "failed", "cancelled"].includes(task.status)) return task;
+  if (TERMINAL_TASK_STATUS.has(task.status)) return task;
   task.status = "cancelled";
   task.updated = new Date().toISOString();
   writeTask(ws, task, db);

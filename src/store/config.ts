@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { YAML } from "bun";
 import { join } from "node:path";
+import { log } from "../core/logger";
 
 export type Provider = "anthropic" | "openai" | "openrouter";
 export interface ResolvedConfig { provider: Provider; model: string; }
@@ -85,6 +86,9 @@ export const TaichoConfig = z.object({
   }).optional(),
   agents: z.record(z.string(), AgentOverride).optional(),
   auth: z.object({ chatgpt_signin: z.boolean().optional() }).optional(),
+  // Plan 04: a global ceiling on total in-flight + queued BACKGROUND runs (dispatch_task). Bounds
+  // system-wide fan-out independent of per-agent maxConcurrentRuns; default applied in the REPL (32).
+  tasks: z.object({ maxBackgroundRuns: z.number().int().positive().optional() }).optional(),
   mcp: McpConfig,
   embeddings: z.object({ provider: z.enum(["off", "local", "openai"]).optional() }).optional(), // semantic KB backend
 }).default({});
@@ -126,12 +130,12 @@ export async function loadConfig(ws: string): Promise<TaichoConfig> {
   try {
     raw = YAML.parse(await Bun.file(file).text());
   } catch (e) {
-    console.warn(`taicho: failed to parse taicho.yaml — using defaults (${e instanceof Error ? e.message : String(e)})`);
+    log.warn(`failed to parse taicho.yaml — using defaults`, e);
     return TaichoConfig.parse({});
   }
   const result = TaichoConfig.safeParse(raw);
   if (!result.success) {
-    console.warn("taicho: invalid taicho.yaml — using defaults");
+    log.warn("invalid taicho.yaml — using defaults");
     return TaichoConfig.parse({});
   }
   return result.data;

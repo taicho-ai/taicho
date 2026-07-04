@@ -22,8 +22,8 @@ function call(name: string, input: object): LanguageModelV3GenerateResult {
   } as unknown as LanguageModelV3GenerateResult;
 }
 
-export function createE2eModel(mode: string | undefined): Model | null {
-  if (mode !== "agent-flow") return null;
+/** agent-flow: create_agent → approve → delegate_task → roll the child's proof back up. */
+function agentFlowModel(): Model {
   let n = 0;
   return new MockLanguageModelV3({
     provider: "taicho-e2e",
@@ -44,4 +44,41 @@ export function createE2eModel(mode: string | undefined): Model | null {
       return text("Root used proof-agent: proof-agent completed delegated work");
     },
   }) as unknown as Model;
+}
+
+/** conversation-audit: the run gets one quick, offline tool cycle, then the NEXT model call HANGS
+ *  until the run's abort signal fires — so the run is genuinely in-flight and an Esc mid-run marks it
+ *  `interrupted` (not a race with an instant return). On abort we reject with the signal's reason (a
+ *  real AbortError), which the loop treats as a clean cancellation — the same interrupted-turn path
+ *  the tui-test drives, but deterministic under vhs.
+ *
+ *  Why the first call is a `find_skills` tool call (not an immediate hang): it makes the loop finish
+ *  one full model→tool cycle BEFORE hanging, which (a) writes model_request/model_response/tool_call
+ *  to `transcript.jsonl` so the interrupted turn still has a transcript (the tui-test asserts this),
+ *  and (b) emits a "↳ root → find_skills()" breadcrumb the tape gates the Esc on — a deterministic
+ *  screen signal that the run has moved past first-turn workspace setup into a hanging model call, so
+ *  no load-bearing fixed Sleep is needed. `find_skills` is granted to every agent and runs offline
+ *  (keyword ranking over the seeded skills — no network, no approval, no side effects). */
+function conversationAuditModel(): Model {
+  let n = 0;
+  return new MockLanguageModelV3({
+    provider: "taicho-e2e",
+    modelId: "conversation-audit",
+    doGenerate: async (options: { abortSignal?: AbortSignal }) => {
+      n += 1;
+      if (n === 1) return call("find_skills", { query: "delegate work to a worker agent" });
+      const signal = options.abortSignal;
+      return await new Promise<LanguageModelV3GenerateResult>((_resolve, reject) => {
+        const onAbort = () => reject(signal?.reason ?? new Error("aborted by e2e conversation-audit model"));
+        if (signal?.aborted) { onAbort(); return; }
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  }) as unknown as Model;
+}
+
+export function createE2eModel(mode: string | undefined): Model | null {
+  if (mode === "agent-flow") return agentFlowModel();
+  if (mode === "conversation-audit") return conversationAuditModel();
+  return null;
 }

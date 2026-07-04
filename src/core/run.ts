@@ -17,7 +17,8 @@ import { getActiveSkills } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
 import { reserveRunId, writeTrace } from "../store/trace";
-import { appendRunTranscript, writeChildRuns, writeRunCheckpoint, writeRunFailure, writeRunFinal, writeRunInput } from "../store/run-transcript";
+import { appendRunTranscript, writeChildRuns, writeRunCheckpoint, writeRunFailure, writeRunFinal, writeRunInput, type RunTranscriptEvent } from "../store/run-transcript";
+import type { StepInfo, StepEvent } from "./step-events";
 import type { ProposalDraft } from "../coaching/proposal";
 import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
@@ -27,6 +28,7 @@ import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
 import type { Verdict } from "./command-guard";
+import { log } from "./logger";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -45,6 +47,18 @@ function lastUserText(messages: ModelMessage[]): string {
 
 const MAX_DELEGATION_DEPTH = 5;
 const MAX_RUNS_PER_REQUEST = 50;
+
+/** A short label for an approval span (what the captain is being asked to decide). */
+function approvalLabel(req: ApprovalRequest): string {
+  switch (req.kind) {
+    case "create_agent": return `create_agent ${req.draft.id}`;
+    case "run_command": return `run_command ${req.command}`.slice(0, 60);
+    case "add_mcp": return `add_mcp ${req.name}`;
+    case "propose_skill": return `propose_skill ${req.draft.name}`;
+    case "propose_coaching": return "propose_coaching";
+    case "ask_human": return "ask_human";
+  }
+}
 
 export type ApprovalRequest =
   | { kind: "create_agent"; draft: NewAgentDraft }
@@ -104,6 +118,11 @@ export interface RunContext {
   /** Plan 04: block until a background task settles (bounded by timeoutMs). Status + summary +
    *  resultRef only — hand-off stays BY REFERENCE, never the inlined payload. */
   awaitTask?: (taskId: string, timeoutMs?: number) => Promise<TaskAwaitResult>;
+  /** The shared instrumentation seam (Plan 02 + Plan 10). tools.ts wraps every tool `execute()` and
+   *  run.ts wraps `requestApproval` to (a) push tool/approval span events into `spanEvents` (flushed
+   *  to transcript.jsonl for the waterfall) and (b) emit a live typed phase via `emitStep`. */
+  spanEvents: RunTranscriptEvent[];
+  emitStep?: (info: StepInfo) => void;
 }
 
 /** What check_task / await_task hand back: a reference, never the payload (Plan 01 discipline). */
@@ -114,7 +133,7 @@ export interface RunDeps {
   db: Database;
   model: Model;
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
-  onStep?: (info: { text?: string; tool?: string; delta?: string; note?: string; agent: string }) => void;
+  onStep?: (info: StepEvent) => void;
   pollSteer?: () => string | null;
   /** Plan 04 Phase 4: per-run steer routing. run.ts binds the loop's pollSteer to THIS run's id, so
    *  a steer routed to a specific runId reaches only that run (not a random descendant). Falls back
@@ -135,9 +154,10 @@ export interface RunDeps {
   /** Plan 04 Phase 2: start a detached BACKGROUND run for a dispatched task. The host (REPL) owns
    *  the scheduler + settle/notify; the engine just hands it a resolved child agent + brief.
    *  Returns the taskId immediately (fire-and-forget). Undefined ⇒ dispatch_task is unavailable. */
-  dispatch?: (opts: { agent: AgentDef; goal: string; context?: string; criteria?: string; inputArtifacts?: string[]; parentRunId: string; parentAgentId: string }) => { taskId: string } | { error: string };
-  /** Plan 04 Phase 2: back await_task — block until a background task settles (host-owned). */
-  awaitTask?: (taskId: string, timeoutMs?: number) => Promise<TaskAwaitResult>;
+  dispatch?: (opts: { agent: AgentDef; goal: string; context?: string; criteria?: string; inputArtifacts?: string[]; parentRunId: string; parentAgentId: string; parentAncestry: string[] }) => { taskId: string } | { error: string };
+  /** Plan 04 Phase 2: back await_task — block until a background task settles (host-owned). The
+   *  optional awaiterAgentId (stamped by run.ts) lets the host fail fast on a same-agent self-block. */
+  awaitTask?: (taskId: string, timeoutMs?: number, awaiterAgentId?: string) => Promise<TaskAwaitResult>;
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -206,11 +226,34 @@ export async function executeRun(
   const model = picked?.model ?? deps.model;
   const priceUsd = picked ? pricerFor(picked.modelId) : deps.priceUsd;
 
+  // The shared instrumentation seam (Plan 02 waterfall spans + Plan 10 live status). Tool spans are
+  // pushed by the execute() wrapper in tools.ts; approval spans by the wrapped requestApproval below.
+  // Both are merged (by ts) into transcript.jsonl at run end and streamed live via emitStep.
+  const spanEvents: RunTranscriptEvent[] = [];
+  const emitStep = deps.onStep
+    ? (info: StepInfo) => deps.onStep!({ ...info, agent: opts.agent.id, runId })
+    : undefined;
+  // Time approval / ask_human waits as their own `approval` spans — core, not optional: in this
+  // system the human wait frequently dominates wall-clock, and a waterfall that folds it into the
+  // enclosing tool span would lie about where the time went.
+  const wrappedRequestApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
+    const label = approvalLabel(req);
+    spanEvents.push({ ts: new Date().toISOString(), kind: "approval_start", data: { kind: req.kind, label } });
+    emitStep?.({ phase: "approval_start", tool: label, argsPreview: label });
+    try {
+      return await deps.requestApproval(req);
+    } finally {
+      spanEvents.push({ ts: new Date().toISOString(), kind: "approval_end", data: { kind: req.kind, label } });
+      emitStep?.({ phase: "approval_end", tool: label });
+    }
+  };
+
   const ctx: RunContext = {
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
     ingestSource: opts.ingestSource,
     artifacts: [], inputArtifacts: [], outputArtifacts: [], delegatedOut: [],
-    requestApproval: deps.requestApproval,
+    spanEvents, emitStep,
+    requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
     canDelegate: (toId) => canDelegate(opts.agent, toId),
     runChild: async ({ to, goal, context, criteria, inputArtifacts }) => {
@@ -231,16 +274,22 @@ export async function executeRun(
       captureProviderCost: picked?.captureCost, signal: deps.signal,
       goal: p.goal, criteria: p.criteria, output: p.output,
     }),
-    emit: deps.onStep ? (info) => deps.onStep!({ note: info.note, agent: opts.agent.id }) : undefined,
+    emit: emitStep ? (info) => emitStep({ note: info.note }) : undefined,
     // Plan 04: dispatch resolves the child agent (like runChild) then hands it to the host scheduler,
     // which starts a detached run and returns the taskId immediately. Undefined when unwired.
+    // parentAncestry threads the dispatching run's ancestry so the cross-agent cycle guard spans
+    // dispatch hops — a detached A→B→A ping-pong is refused by delegationGuard, not just per-agent caps.
     dispatchTask: deps.dispatch
       ? async ({ to, goal, context, criteria, inputArtifacts }) => {
           const child = await loadAgent(deps.ws, to);
-          return deps.dispatch!({ agent: child, goal, context, criteria, inputArtifacts, parentRunId: runId, parentAgentId: opts.agent.id });
+          return deps.dispatch!({ agent: child, goal, context, criteria, inputArtifacts, parentRunId: runId, parentAgentId: opts.agent.id, parentAncestry: ancestry });
         }
       : undefined,
-    awaitTask: deps.awaitTask,
+    // awaiterAgentId lets the host fail fast on a self-block deadlock: awaiting a task queued behind
+    // THIS agent's own concurrency slot (the awaiting run holds it) would park until timeout.
+    awaitTask: deps.awaitTask
+      ? (taskId, timeoutMs) => deps.awaitTask!(taskId, timeoutMs, opts.agent.id)
+      : undefined,
     // Discovery respects the caller's visibility ACL, consistent with the inline-roster path.
     findAgents: (query, k) =>
       rankAgents(
@@ -282,7 +331,7 @@ export async function executeRun(
     const globals = cache.notes.filter((n) => n.agent !== opts.agent.id);
     applied = [...own, ...globals];
   } catch (e) {
-    console.error(`policy load failed for ${opts.agent.id}:`, e);
+    log.error(`policy load failed for ${opts.agent.id}`, e);
   }
 
   // Auto-inject relevant deck knowledge for agents that use the KB (like coaching notes): keyword+
@@ -299,7 +348,7 @@ export async function executeRun(
           knowledgeBlock = "## Relevant knowledge (shared deck memory — call recall for more)\n" +
             kb.hits.map((h) => `- [${h.id}] ${h.title}${h.summary ? " — " + h.summary : ""}`).join("\n");
         }
-      } catch (e) { console.error(`kb recall failed for ${opts.agent.id}:`, e); }
+      } catch (e) { log.error(`kb recall failed for ${opts.agent.id}`, e); }
     }
   }
 
@@ -325,7 +374,7 @@ export async function executeRun(
       skillIds = shown.map((s) => s.id);
       skillsBlock = header + "\n" + shown.map((s) => `- ${s.name}: ${s.description}`).join("\n");
     }
-  } catch (e) { console.error(`skill inject failed for ${opts.agent.id}:`, e); }
+  } catch (e) { log.error(`skill inject failed for ${opts.agent.id}`, e); }
 
   // Input artifacts handed in by a delegating parent: render HANDLES + summaries, never inline the
   // body — the child pulls what it needs with read_artifact (size-capped). This is hand-off by reference.
@@ -354,7 +403,7 @@ export async function executeRun(
 
   const result = await runLoop({
     model, agent: opts.agent, system, messages: opts.messages, tools,
-    onStep: deps.onStep ? (i) => deps.onStep!({ ...i, agent: opts.agent.id }) : undefined,
+    onStep: emitStep, // stamps agent + runId (Plan 02/10) then forwards to deps.onStep
     // Per-run steer routing (Phase 4): a steer aimed at THIS runId reaches only this run; fall back
     // to the flat queue for unit contexts that don't route.
     pollSteer: (deps.pollSteerFor || deps.pollSteer)
@@ -371,7 +420,7 @@ export async function executeRun(
   });
   const outcome: RunTrace["outcome"] =
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";
-  if (result.error) console.error(`run ${runId} failed:`, result.error);
+  if (result.error) log.error(`run ${runId} failed`, result.error);
 
   const trace: RunTrace = {
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,
@@ -390,7 +439,12 @@ export async function executeRun(
     notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };
-  // Loop transcript events were already flushed live (onEvent). Only the post-loop verdicts remain.
+  // The loop's model events (model_request/response/tool_call) were flushed LIVE via onEvent
+  // (incremental recovery, Plan 04 Phase 5). The tool/approval SPAN events (Plan 02/10) buffer in
+  // ctx.spanEvents — flush them here. The waterfall reader pairs spans by callId/iteration and times
+  // them by each event's `ts`, so append order is irrelevant. Do NOT re-write result.transcript:
+  // onEvent already persisted it live, and doing both would double-write every loop event.
+  for (const event of ctx.spanEvents) appendRunTranscript(deps.ws, runId, event);
   // Verdicts are part of the run's story ("why did it retry?") — record them in the transcript too.
   for (const v of ctx.verifications) appendRunTranscript(deps.ws, runId, { ts: new Date().toISOString(), kind: "verification", data: v });
   writeChildRuns(deps.ws, runId, ctx.childTraces);

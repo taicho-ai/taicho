@@ -25,6 +25,31 @@ interface RunningHandle { controller: AbortController; promise: Promise<unknown>
 export class TaskScheduler {
   private running = new Map<string, RunningHandle>();
   private queue: QueuedTask[] = [];
+  /** Global background-run ceiling: a hard bound on total in-flight (running) + queued tasks across
+   *  ALL agents. The per-agent `cap` bounds one agent's fan-out; this bounds the whole system so a
+   *  model-initiated dispatch chain (which resets per-request budgets on each hop) can't run away.
+   *  Infinity ⇒ unbounded. Config disposes the number the model proposes via dispatch_task. */
+  private readonly globalCap: number;
+
+  constructor(opts: { globalCap?: number } = {}) {
+    this.globalCap = opts.globalCap ?? Infinity;
+  }
+
+  /** Total tasks this scheduler is currently accountable for: running + queued. */
+  inFlight(): number {
+    return this.running.size + this.queue.length;
+  }
+
+  /** The configured global ceiling (Infinity ⇒ unbounded). */
+  get ceiling(): number {
+    return this.globalCap;
+  }
+
+  /** True when a new submit would meet or exceed the global ceiling — the dispatch pre-check refuses
+   *  over-ceiling so we never create an orphan task record for a task the scheduler can't accept. */
+  atCapacity(): boolean {
+    return this.inFlight() >= this.globalCap;
+  }
 
   /** Enqueue a task and pump: it starts immediately if the agent is under its cap, else stays queued. */
   submit(task: QueuedTask): void {

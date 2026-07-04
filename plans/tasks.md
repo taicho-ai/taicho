@@ -101,33 +101,33 @@ gap at once (see `reference/observability-waterfall.md` §2 for the gap→featur
 - `/trace` with no arg opens the **latest** run.
 
 ### Phase 0 — Span capture gaps (small adds for accurate bars)
-- [ ] Wrap tool `execute()` to emit tool-span **start/end** in `transcript.jsonl` (today only the emit ts exists).
-- [ ] Time approval / `ask_human` waits as `approval` spans — **core, not optional**: approval waits dominate wall-clock in this system; a waterfall without them misattributes the wait to whatever span contains it.
+- [x] Wrap tool `execute()` to emit tool-span **start/end** in `transcript.jsonl` (today only the emit ts exists). *(shared seam in `tools.ts` `instrument()`; events buffered on `ctx.spanEvents` → merged into transcript by ts.)*
+- [x] Time approval / `ask_human` waits as `approval` spans — **core, not optional**: approval waits dominate wall-clock in this system; a waterfall without them misattributes the wait to whatever span contains it. *(wrapped `ctx.requestApproval` in `run.ts`.)*
 
 ### Phase 1 — Span model & derivation (pure, testable)
-- [ ] Define the `Span` type — `kind: run|llm|tool|approval`, `parentId`, `startMs`/`endMs`, `tokens`/`cost`, `status`, `error`, `detail`.
-- [ ] `deriveTrace(rootRunId)`: walk `delegatedOut` recursively (`readTrace`) → run spans; read each run's `transcript.jsonl` → llm/tool spans; link a `delegate_task` tool span to its child run span.
-- [ ] Roll up tokens/cost onto run spans (reuse `aggregate`).
-- [ ] Unit tests over fixture traces + transcripts.
+- [x] Define the `Span` type — `kind: run|llm|tool|approval`, `parentId`, `startMs`/`endMs`, `tokens`/`cost`, `status`, `error`, `detail`. *(`src/core/trace-tree.ts`.)*
+- [x] `deriveTrace(rootRunId)`: walk `delegatedOut` recursively (`readTrace`) → run spans; read each run's `transcript.jsonl` → llm/tool spans; link a `delegate_task` tool span to its child run span. *(child run nested under the delegate tool span via the captured `childRunId`.)*
+- [x] Roll up tokens/cost onto run spans (reuse `aggregate`).
+- [x] Unit tests over fixture traces + transcripts. *(`trace-tree.test.ts` — real engine runs generate the fixtures.)*
 
 ### Phase 2 — Waterfall layout (pure)
-- [ ] Timeline scale: map `[traceStart, traceEnd]` → N columns; **min-width floor** ≥1 cell/bar; adaptive to total duration.
-- [ ] Row render: indent by depth + tree glyphs, status icon, bar, duration, tokens.
-- [ ] Expand/collapse state + visible-rows computation.
-- [ ] Unit tests: tiny spans get the floor, nesting indent, collapse hides subtree.
+- [x] Timeline scale: map `[traceStart, traceEnd]` → N columns; **min-width floor** ≥1 cell/bar; adaptive to total duration. *(`src/core/trace-layout.ts`.)*
+- [x] Row render: indent by depth + tree glyphs, status icon, bar, duration, tokens.
+- [x] Expand/collapse state + visible-rows computation.
+- [x] Unit tests: tiny spans get the floor, nesting indent, collapse hides subtree. *(`trace-layout.test.ts`.)*
 
 ### Phase 3 — Interactive inspector (Ink)
-- [ ] `TraceInspector` component; owns the keyboard via the existing `cardKeyRef` pattern while open.
-- [ ] Keys: `↑↓` move · `→/←` expand/collapse · `⏎` open detail · `q`/esc close.
-- [ ] Selected-span summary line pinned at the bottom.
-- [ ] Detail view per kind: **llm** (assembled prompt from `input.json`, response, tokens, finish reason) · **tool** (args/result/error) · **run** (outcome, rolled-up cost, `notes`, **coaching ledger: policies/KB/skills retrieved·applied·skipped**).
-- [ ] Layer-1 `ink-testing-library` tests: render, nav, drill-in, error span.
+- [x] `TraceInspector` component; owns the keyboard via the existing `cardKeyRef` pattern while open.
+- [x] Keys: `↑↓` move · `→/←` expand/collapse · `⏎` open detail · `q`/esc close.
+- [x] Selected-span summary line pinned at the bottom.
+- [x] Detail view per kind: **llm** (response, tokens, finish reason) · **tool** (args/result/error) · **run** (outcome, rolled-up cost, `notes`, **coaching ledger: policies/KB/skills retrieved·applied·skipped**, verification). *(run `input.json` messages captured on the run detail.)*
+- [x] Layer-1 `ink-testing-library` tests: render, nav, drill-in, error span. *(`App.test.tsx`.)*
 
 ### Phase 4 — Command surface & integration
-- [ ] Upgrade `/trace`: no-arg → latest run; `<id>` → that run. (Replaces today's shallow one-liner.)
-- [ ] Post-run inline hint: *"/trace to inspect."*
-- [ ] `/runs` stays the picker; add duration to its rows.
-- [ ] Update `COMMANDS` + `/help`.
+- [x] Upgrade `/trace`: no-arg → latest run; `<id>` → that run. (Replaces today's shallow one-liner.)
+- [x] Post-run inline hint: *"/trace to inspect."* *(appended to the existing `trace: <id>` lines.)*
+- [x] `/runs` stays the picker; add duration to its rows.
+- [x] Update `COMMANDS` + `/help`.
 
 ### Phase 5 — Tests & docs
 - [ ] Real-binary e2e (tui-test): run a delegation, open `/trace`, assert the tree renders + a drill-in works.
@@ -142,18 +142,26 @@ thin failure diagnosis, "is it done?", "why did it do that?"). **Residual → Pl
 
 ---
 
-## Plan 03 — Structured logging & headless surface *(placeholder)*
+## Plan 03 — Structured logging & headless surface
+
+**Detail:** [`../docs/events.md`](../docs/events.md) — event schema + headless/tail reference.
 
 Residual observability gaps the waterfall does **not** cover, plus the headless half it enables:
-- [ ] **Structured file logging** that doesn't fight Ink — replace scattered `console.error/warn`
-      (which corrupt/​vanish under the full-screen TUI) with a leveled, file-captured `taicho.log`;
-      a general `--verbose`/debug mode (today only codex-specific `TAICHO_DEBUG`).
-- [ ] **Documented event schema + live tail** for headless/external observers (the e2e harness polls
-      files by hand today).
-- [ ] **Headless run mode** — a `taicho run "<goal>"` (or programmatic) entry that drives `executeRun`
-      without Ink. `RunDeps` is already the seam (model, approval, onStep are all injectable); the only
-      real design point is the approval channel (auto-reject / policy-driven / prompt-on-stdin). Also
-      makes real-binary e2e far cheaper, and is a prerequisite for Plan 04's scheduled triggers (v2).
+- [x] **Structured file logging** that doesn't fight Ink — replaced the scattered `console.error/warn`
+      (which corrupt/​vanish under the full-screen TUI) with a leveled, file-captured `taicho.log`
+      (`src/core/logger.ts`, redaction-central); a general `--verbose`/`-v` debug mode
+      (`TAICHO_VERBOSE`/`TAICHO_LOG_LEVEL`, historical codex-only `TAICHO_DEBUG` now raises the
+      general level).
+- [x] **Documented event schema + tail** for headless/external observers — `docs/events.md` documents
+      the `transcript.jsonl`/ledger/`RunTrace` schema; `taicho tail [runId] [--follow]` streams a run's
+      events (`src/core/events.ts`). *(Live per-event streaming within one in-flight run waits on Plan
+      04 Phase 5's incremental transcript flush — the reader already handles it; see docs/events.md §1a.)*
+- [x] **Headless run mode** — `taicho run "<goal>"` drives `executeRun` without Ink (`src/core/headless.ts`;
+      `index.tsx` dispatches on argv before the Ink render). Approval channel decision: **auto-reject by
+      default** (a headless run is unattended — auto-approving would let a model spawn agents / run shell
+      unsupervised), with `--approve auto` and `--approve prompt` opt-ins. Also makes real-binary e2e far
+      cheaper (`scripts/e2e-headless.ts`, no VHS tape), and is a prerequisite for Plan 04's scheduled
+      triggers (v2).
 
 ---
 
@@ -342,20 +350,20 @@ background tasks stay visible.
 - [x] **Bar position:** top vs bottom. *Decided (2026-07-04): bottom, directly above the input — glanceable where the eyes already are.*
 
 ### Phase 1 — Typed live event stream (engine; shared with Plan 02 Phase 0)
-- [ ] Extend `onStep` to a typed event: `{ agent, runId, phase: model_start|delta|tool_start|tool_end|approval_start|approval_end|final, tool?, argsPreview?, text? }`.
-- [ ] `tool_start`/`tool_end` from the tool `execute()` wrapper (same hook as Plan 02 span timing).
-- [ ] `approval_start`/`approval_end` wrapping `ctx.requestApproval` (same hook as Plan 02 approval spans).
-- [ ] `argsPreview`: one-line, redacted, length-capped arg render — transparency without payload dumping; never log auth material.
+- [x] Extend `onStep` to a typed event: `{ agent, runId, phase: model_start|delta|tool_start|tool_end|approval_start|approval_end|final, tool?, argsPreview?, text? }`. *(`src/core/events.ts`; loop emits model_start/delta/final, tools/approval emit the rest.)*
+- [x] `tool_start`/`tool_end` from the tool `execute()` wrapper (same hook as Plan 02 span timing).
+- [x] `approval_start`/`approval_end` wrapping `ctx.requestApproval` (same hook as Plan 02 approval spans).
+- [x] `argsPreview`: one-line, redacted, length-capped arg render — transparency without payload dumping; never log auth material. *(`src/core/instrument.ts`, unit-tested incl. an auth-leak guard.)*
 
 ### Phase 2 — Status model (pure, testable)
-- [ ] `AgentStatus` reducer: event stream → per-run status (idle/thinking/writing/working/waiting/delegating) + current tool + elapsed-in-state.
-- [ ] Unit tests: event sequences → expected status transitions (incl. nested delegation and approval waits).
+- [x] `AgentStatus` reducer: event stream → per-run status (idle/thinking/writing/working/waiting/delegating) + current tool + elapsed-in-state. *(`src/core/agent-status.ts`.)*
+- [x] Unit tests: event sequences → expected status transitions (incl. nested delegation and approval waits). *(`agent-status.test.ts`.)*
 
 ### Phase 3 — Status bar (Ink)
-- [ ] `StatusBar` component: one compact segment per live agent (glyph · agent · state · tool+argsPreview · elapsed); `waiting` rendered loud.
-- [ ] Graceful collapse: hidden when nothing runs; "+N more" past terminal width.
-- [ ] Absorb the live role of the `↳` breadcrumbs (breadcrumbs remain as scrollback record).
-- [ ] Layer-1 `App.test.tsx`: bar appears on run start, shows tool during execution, shows waiting during an approval card, clears on completion.
+- [x] `StatusBar` component: one compact segment per live agent (glyph · agent · state · tool+argsPreview · elapsed); `waiting` rendered loud. *(`src/ui/StatusBar.tsx`, pinned above the input.)*
+- [x] Graceful collapse: hidden when nothing runs; "+N more" past terminal width.
+- [x] Absorb the live role of the `↳` breadcrumbs (breadcrumbs remain as scrollback record). *(the ↳ line now fires at real `tool_start` time; the bar is the live channel.)*
+- [x] Layer-1 `App.test.tsx`: bar appears on run start, shows tool during execution, shows waiting during an approval card, clears on completion.
 
 ### Phase 4 — Split panes
 - [ ] `SquadPanes` layout: terminal splits into one pane per **live** agent (status line + its live stream: tool lines with argsPreview, streamed/final text), REPL pane keeps focus and full width when the squad is idle.
@@ -415,8 +423,8 @@ the tracking view; the runbook is the build view.
 - [x] Delete `e2e/record-agent-flow.expect` + the rendered-MP4 flow once the tape passes. *Deleted the expect recorder; CLI_TESTING.md rewritten to drop the rendered-MP4 flow. `e2e/agent-flow.tui.ts` (Layer 2) kept.*
 
 ### Phase 3 — Scenario roster
-- [ ] `conversation-audit` tape (port the interrupted-turn scenario from `e2e/conversation-audit.tui.ts`).
-- [ ] Convention: every headline capability (Plans 01, 04, 06, 10) adds its proof scenario (e2e-model mode + tape + assertions) in its own test phase.
+- [x] `conversation-audit` tape (port the interrupted-turn scenario from `e2e/conversation-audit.tui.ts`). *`conversation-audit` e2e-model mode (model call hangs until the run's abort fires, so Esc mid-run deterministically marks the turn `interrupted`) + `e2e/scenarios/conversation-audit.ts` (tape: chat turn → Esc mid-run; 7 assertions on the preserved audit trail — interrupted trace, input.json, ledger, context `interrupted_run_not_safe_as_context`, transcript, failure.md, task). Run ids discovered dynamically.*
+- [x] Convention: every headline capability (Plans 01, 04, 06, 10) adds its proof scenario (e2e-model mode + tape + assertions) in its own test phase. *Established by the two shipped scenarios (`agent-flow`, `conversation-audit`): each is a self-contained `Scenario` (mode + tape + assertions) under `e2e/scenarios/`; future headline plans follow the same shape in their own phase.*
 
 ### Phase 4 — Docs & CI
 - [x] Rewrite `CLI_TESTING.md` around the new harness; add Layer 4 to `TESTING.md`'s table; update `CLAUDE.md`. *CLI_TESTING.md rewritten (assertion contract kept, manifest = deliverable, gotchas documented); TESTING.md now four layers + a Layer 4 section; CLAUDE.md testing line updated.*

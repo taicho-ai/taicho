@@ -4,6 +4,7 @@ import { openai } from "@ai-sdk/openai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import type { generateText } from "ai";
 import type { Provider, ResolvedConfig, TaichoConfig } from "../store/config";
+import { log } from "./logger";
 
 // Reuse the exact model param type generateText expects (robust across SDK versions).
 export type Model = Parameters<typeof generateText>[0]["model"];
@@ -58,7 +59,7 @@ export function createModelResolver(opts: { config: TaichoConfig; fallback: Reso
       (provider === "openai" && model.startsWith("claude-"));
     if (looksMismatched && !warnedMismatch.has(key)) {
       warnedMismatch.add(key);
-      console.warn(`taicho: model "${model}" looks mismatched with provider "${provider}" for agent "${agentId}" — check taicho.yaml (set both provider and model)`);
+      log.warn(`model "${model}" looks mismatched with provider "${provider}" for agent "${agentId}" — check taicho.yaml (set both provider and model)`);
     }
     let inst = cache.get(key);
     if (!inst) { inst = instantiate(provider, model); cache.set(key, inst); }

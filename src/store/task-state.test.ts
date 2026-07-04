@@ -93,6 +93,18 @@ test("cancelTaskState marks a task cancelled but never clobbers an already-termi
   expect(cancelTaskState(w, db, doneId)?.status).toBe("completed"); // terminal wins
 });
 
+test("cancelTaskState leaves EVERY terminal outcome intact (guard aligned with TERMINAL_TASK_STATUS)", () => {
+  // Regression: the cancel guard used to be narrower than the await guard ({completed,failed,cancelled}),
+  // so /tasks cancel on an already-blocked/interrupted/partial task overwrote its recorded outcome.
+  const { w, db } = boot();
+  for (const status of ["blocked", "interrupted", "partial", "failed"] as const) {
+    const id = mkTaskId();
+    createBackgroundTask(w, db, { taskId: id, agent: "w", goal: "g" });
+    setTaskFields(w, db, id, { status });
+    expect(cancelTaskState(w, db, id)?.status).toBe(status); // outcome preserved, not clobbered to "cancelled"
+  }
+});
+
 test("reconcileTasks marks running/queued as interrupted on boot and returns them (report-and-ask)", () => {
   const { w, db } = boot();
   const running = mkTaskId(), queued = mkTaskId(), done = mkTaskId();

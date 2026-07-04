@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { paths } from "./files";
+import { log } from "../core/logger";
 
 const SOURCE_EXT = /\.(md|txt)$/i;
 
@@ -24,7 +25,7 @@ export function listSourceFiles(ws: string): DiscoveredSource[] {
     try {
       const content = readFileSync(join(dir, name), "utf8");
       out.push({ path: `sources/${name}`, content, hash: hashContent(content) });
-    } catch (e) { console.error(`skipping source ${name}: ${String(e)}`); }
+    } catch (e) { log.warn(`skipping source ${name}`, e); }
   }
   return out;
 }

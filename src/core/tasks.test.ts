@@ -69,6 +69,38 @@ test("cancel aborts a running task and drops a queued one (firing onCancelQueued
   expect(s.cancel("nope")).toBe(false);           // unknown id
 });
 
+test("the global ceiling bounds total in-flight (running + queued) across ALL agents", async () => {
+  const s = new TaskScheduler({ globalCap: 2 });
+  const a = deferredTask("t1", "alpha"); // no per-agent cap ⇒ runs
+  const b = deferredTask("t2", "beta");
+  s.submit(a.task); s.submit(b.task);
+  expect(s.inFlight()).toBe(2);          // 2 running across two different agents
+  expect(s.atCapacity()).toBe(true);     // at the ceiling — the dispatch pre-check refuses a 3rd
+  a.settle();
+  await tick();                          // free the slot
+  expect(s.inFlight()).toBe(1);
+  expect(s.atCapacity()).toBe(false);    // back under the ceiling → dispatch allowed again
+});
+
+test("queued (not yet running) tasks still count toward the global ceiling", () => {
+  const s = new TaskScheduler({ globalCap: 5 });
+  const a = deferredTask("t1", "w", 1);  // runs (per-agent cap 1)
+  const b = deferredTask("t2", "w", 1);  // queued behind the per-agent cap
+  s.submit(a.task); s.submit(b.task);
+  expect(a.started).toBe(true);
+  expect(b.started).toBe(false);
+  expect(s.inFlight()).toBe(2);          // 1 running + 1 queued — both accountable, so both count
+  expect(s.ceiling).toBe(5);
+});
+
+test("no globalCap ⇒ unbounded: atCapacity is never true", () => {
+  const s = new TaskScheduler();
+  for (let i = 0; i < 64; i++) s.submit(deferredTask(`t${i}`, "w").task);
+  expect(s.ceiling).toBe(Infinity);
+  expect(s.atCapacity()).toBe(false);
+  expect(s.inFlight()).toBe(64);
+});
+
 test("awaitRunning resolves with the running task's promise; undefined once settled", async () => {
   const s = new TaskScheduler();
   const a = deferredTask("t", "w");

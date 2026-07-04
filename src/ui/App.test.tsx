@@ -30,6 +30,12 @@ import type { McpManager, McpServerStatus } from "../core/mcp/manager";
 const ENTER = "\r";
 const DOWN = "[B";
 
+// Arrow keys + Esc as the ANSI escapes ink parses (DOWN above is "[B").
+const UP = "[A";
+const RIGHT = "[C";
+const LEFT = "[D";
+const ESC = "";
+
 const usage = { inputTokens: { total: 3 }, outputTokens: { total: 2 } } as const;
 const finalText = (text: string) =>
   ({ content: [{ type: "text", text }], finishReason: { unified: "stop", raw: "stop" }, usage }) as unknown as LanguageModelV3GenerateResult;
@@ -641,4 +647,223 @@ test("delegation with acceptance criteria: a twice-failed verdict is surfaced to
   expect(root.verification.every((v) => v.verdict.pass === false)).toBe(true);
   const task = readTaskState(ws, taskIdForRun(root.id));
   expect(task?.verifications.length).toBe(2);
+});
+
+// ── Plan 02: the /trace waterfall inspector (Layer-1, through the real App) ──
+
+test("/trace opens the waterfall inspector over the latest run's span tree", async () => {
+  const { props } = await setup({ model: mockModel("waterfall reply") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "say hi", ENTER);
+  await waitFor(lastFrame, "waterfall reply");
+  await send(stdin, "/trace", ENTER);
+  await waitFor(lastFrame, "TRACE");                 // the inspector header
+  expect(lastFrame()).toContain("root · chat");      // the root run span row
+  expect(lastFrame()).toContain("llm #1");           // an llm span derived from the transcript
+  expect(lastFrame()).toContain("expand");           // the key hint footer
+});
+
+test("waterfall: ↓ then ⏎ drills into a span's per-kind detail; q closes it", async () => {
+  const { props } = await setup({ model: mockModel("hello detail") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "hello detail");
+  await send(stdin, "/trace", ENTER);
+  await waitFor(lastFrame, "TRACE");
+  await send(stdin, DOWN);                            // move selection off the root run onto llm #1
+  await send(stdin, ENTER);                           // open the detail panel
+  await waitFor(lastFrame, "iteration: 1");           // llm detail (only shown in the drill-in)
+  expect(lastFrame()).toContain("response:");
+  await send(stdin, "q");                             // first q closes the detail panel…
+  await waitForGone(lastFrame, "iteration: 1");
+  await send(stdin, "q");                             // …second q closes the inspector
+  await waitForGone(lastFrame, "TRACE");
+});
+
+test("waterfall renders an error span (✗) for a failed run and shows the error on drill-in", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const failing = new MockLanguageModelV3({ doGenerate: (() => { throw new Error("kaboom-trace"); }) as any });
+  const { props } = await setup({ model: failing });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "do the impossible", ENTER);
+  await waitFor(lastFrame, "failed");
+  await send(stdin, "/trace", ENTER);
+  await waitFor(lastFrame, "TRACE");
+  expect(lastFrame()).toContain("✗");                 // the failed run/llm span marker
+  await send(stdin, DOWN);                            // onto the errored llm span
+  await send(stdin, ENTER);
+  await waitFor(lastFrame, "kaboom-trace");           // the error detail
+});
+
+// ── Plan 10: the live status bar (Layer-1, through the real App) ──
+
+test("status bar shows the agent's live state during a run and clears on completion", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(300); return finalText("done"); }) as any });
+  const { props } = await setup({ model: slow });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "root thinking");          // the StatusBar segment (distinct from RunStatus's "root · thinking…")
+  await waitFor(lastFrame, "done");                   // run finishes
+  await waitForGone(lastFrame, "root thinking");      // …and the bar clears
+});
+
+test("status bar shows the current tool while an agent delegates (parent delegating + child live)", async () => {
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "write the thing" }),
+    finalText("root done"),
+  ) as any });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slowWriter = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(350); return finalText("writer done"); }) as any });
+  const { ws, db, props } = await setup({ model: rootModel });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  // route root → rootModel, writer → the slow model so the delegation is observable mid-flight
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (props as any).resolveModel = (id: string) => id === "writer" ? { model: slowWriter, modelId: "m" } : { model: rootModel, modelId: "m" };
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "have writer do it", ENTER);
+  await waitFor(lastFrame, "root delegating");        // parent shows the delegate_task in flight
+  expect(lastFrame()).toContain("writer");            // the child agent is live in the bar at the same time
+  await waitFor(lastFrame, "root done");
+  await waitForGone(lastFrame, "root delegating");    // bar clears when the cascade completes
+});
+
+test("status bar shows 'waiting' while an approval card is up, then clears on approval", async () => {
+  const createCall = {
+    content: [{ type: "tool-call", toolCallId: "c1", toolName: "create_agent", input: JSON.stringify({ id: "scout", role: "Scouts", identity: "A scout" }) }],
+    finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+  } as unknown as LanguageModelV3GenerateResult;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(createCall, finalText("Created scout")) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "make a scout", ENTER);
+  await waitFor(lastFrame, "New agent");              // the approval card is up…
+  expect(lastFrame()).toContain("waiting");           // …and the bar loudly shows the squad is blocked on the captain
+  await send(stdin, "y");                              // approve
+  await waitFor(lastFrame, "Created scout");
+  await waitForGone(lastFrame, "waiting");             // bar clears after the run completes
+});
+
+test("waterfall: ↓↑ navigate, ← collapses a run's subtree, → re-expands, Esc closes", async () => {
+  const { props } = await setup({ model: mockModel("collapse me") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "collapse me");
+  await send(stdin, "/trace", ENTER);
+  await waitFor(lastFrame, "llm #1");                 // the run's subtree is visible
+  await send(stdin, DOWN);                            // move down…
+  await send(stdin, UP);                              // …and back to the root run (selection index 0)
+  await send(stdin, LEFT);                            // collapse the root run
+  await waitForGone(lastFrame, "llm #1");             // its subtree is hidden
+  await send(stdin, RIGHT);                           // expand again
+  await waitFor(lastFrame, "llm #1");
+  await send(stdin, ESC);                             // Esc closes the inspector
+  await waitForGone(lastFrame, "TRACE");
+});
+
+// ── Plan 04: routeSteer routing (Layer-1, through the real App) ──
+
+test("routeSteer: an @agent steer with no live run for that agent tells the captain (no silent misroute)", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(400); return finalText("root done"); }) as any });
+  const { props } = await setup({ model: slow });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "think a while", ENTER);
+  await waitFor(lastFrame, "thinking");                 // root run is live (REPL busy)
+  await send(stdin, "@ghost hurry up", ENTER);          // steer targeting an agent with no live run
+  await waitFor(lastFrame, "no active run for @ghost");
+});
+
+test("routeSteer: a plain steer while a run is live routes to the foreground root and reaches the model", async () => {
+  // The run iterates via a delayed tool call; the plain steer, queued mid-run, is injected before a
+  // later model call and the model echoes it — proving it reached THE foreground run (foregroundRootRef).
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("STEER-ECHO-TOKEN")) return finalText("acknowledged STEER-ECHO-TOKEN");
+      await sleep(80);
+      return toolCall("list_artifacts", {}); // keep the loop iterating so a later poll picks up the steer
+    }) as any,
+  });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "start a long task", ENTER);
+  await waitFor(lastFrame, "list_artifacts");                        // the run is live and mid-loop
+  await send(stdin, "STEER-ECHO-TOKEN please", ENTER);
+  await waitFor(lastFrame, "(steer)");                              // routeSteer accepted the plain steer
+  await waitFor(lastFrame, "acknowledged STEER-ECHO-TOKEN", 8000);  // it reached the foreground run
+});
+
+test("routeSteer: an @agent steer prefers the FOREGROUND run when the same agent is also live in a background run", async () => {
+  // "w" ends up live in TWO runs at once: a background dispatch (started first → first in the
+  // activeRuns Map) and a foreground @w turn. A naive first-match-by-Map-order would steer the
+  // BACKGROUND run; the fix prefers the foreground cascade, so the correction the captain types reaches
+  // the run they are watching. The foreground w run's reply renders to the main output; the background
+  // one's does not — so an echoed STEER-TOKEN in the frame proves the steer landed on the foreground run.
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("STEER-TOKEN")) return finalText("acknowledged STEER-TOKEN");        // whichever w run got the steer echoes it
+      if (s.includes("W-WORKER-IDENTITY")) { await sleep(60); return toolCall("list_artifacts", {}); } // both w runs loop, awaiting a steer
+      if (s.includes("task_bg_")) return finalText("root kicked it off");                  // root, after dispatch returned a taskId
+      return toolCall("dispatch_task", { to: "w", goal: "background loop" });              // root, first turn
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "w", role: "worker", identity: "W-WORKER-IDENTITY", tools: ["list_artifacts"] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "kick off bg", ENTER);
+  await waitFor(lastFrame, "⇢ dispatched");            // background w run started (first into the activeRuns Map)
+  await waitFor(lastFrame, "root kicked it off");       // root's turn finished — the REPL is free again
+  await send(stdin, "@w foreground task", ENTER);       // foreground w run (second into the activeRuns Map)
+  await waitFor(lastFrame, "esc to cancel");            // the foreground @w run is live (REPL busy)
+  await sleep(150);                                      // let the foreground run iterate at least once
+  await send(stdin, "@w STEER-TOKEN", ENTER);           // steer @w while BOTH w runs are live
+  await waitFor(lastFrame, "(steer @w)");               // routeSteer accepted it
+  await waitFor(lastFrame, "acknowledged STEER-TOKEN", 8000); // the FOREGROUND run echoed → correct routing
+});
+
+// ── Plan 04: concurrent approval requests QUEUE (never clobber) ──
+
+test("concurrent approval requests queue instead of clobbering: both are answered and both runs resolve", async () => {
+  // A background dispatched run and the foreground run both block on the captain at once. Before the
+  // fix, the second setPending overwrote the first — the first request's resolver was lost forever and
+  // its run hung. Now they queue: answer the head, the next surfaces, and BOTH promises resolve.
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      // Discriminate root by MESSAGE content ("kick off" — its own user turn; agent identities leak via
+      // the roster block, so those aren't reliable). Each ask_human has ≥2 options (schema minimum) and
+      // BLOCKS on the card; the run only reaches its "done" branch once the card is actually answered
+      // (the question text then sits in history, proving the approval resolved — not auto-progressed).
+      if (s.includes("kick off")) {
+        if (s.includes("FG question?")) return finalText("root done");           // FG card was answered → finish
+        if (s.includes("task_bg_")) return toolCall("ask_human", { question: "FG question?", options: ["ok", "no"] });
+        return toolCall("dispatch_task", { to: "bgworker", goal: "detached work" });
+      }
+      // the background worker's detached run:
+      if (s.includes("BG question?")) return finalText("bg worker done");         // BG card was answered → finish
+      await sleep(150);                                                            // land after the FG ask, so BOTH queue together
+      return toolCall("ask_human", { question: "BG question?", options: ["ok", "no"] });
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "bgworker", role: "bg", identity: "BG-WORKER-IDENTITY", tools: ["ask_human"] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "kick off", ENTER);
+  await waitFor(lastFrame, "FG question?");             // root dispatched, then asked → the foreground card shows first
+  await sleep(300);                                      // the background worker's ask_human lands and QUEUES behind it
+  await send(stdin, "1");                               // answer the head (foreground) → picks fg-answer
+  await waitFor(lastFrame, "BG question?");             // the SECOND (background) approval was NOT clobbered — it surfaces
+  await send(stdin, "1");                               // answer it → picks bg-answer
+  await waitFor(lastFrame, "root done");                // the foreground run's promise resolved (not lost)
+  await waitFor(lastFrame, "background task", 6000);    // the background run settled → its promise resolved too
+  const bg = listTaskIndex(db, { activeOrBackground: true }).find((r) => r.agent === "bgworker");
+  expect(bg?.status).toBe("completed");                // both runs finished cleanly
 });

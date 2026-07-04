@@ -4,15 +4,19 @@ import { TextInput, Spinner } from "@inkjs/ui";
 import type { Database } from "bun:sqlite";
 import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCard";
 import { QuestionCard } from "./QuestionCard";
+import { StatusBar } from "./StatusBar";
+import { TraceInspector } from "./TraceInspector";
 import { parseInput } from "./input";
 import { BANNER } from "./banner";
+import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
+import { deriveTrace, type Span } from "../core/trace-tree";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy } from "../store/policy";
 import { appendTurn, shouldPersistTurn } from "../store/thread";
 import { appendLedgerTurn, newTurnId, recordContextDecision, statusFromOutcome } from "../store/conversation";
-import { createTaskState, taskIdForRun, updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId } from "../store/task-state";
+import { createTaskState, taskIdForRun, updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
 import { TaskScheduler } from "../core/tasks";
 import type { RunResult, TaskAwaitResult, RunDeps } from "../core/run";
 import type { ModelMessage } from "ai";
@@ -31,7 +35,17 @@ import { syncKnowledgeSources } from "../knowledge/sync";
 import { listNodeRows, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { listSkills, readSkill, deleteSkill, reindexSkills } from "../store/skills";
 
-type Pending = { req: ApprovalRequest; resolve: (d: ApprovalDecision) => void } | null;
+/** One pending approval request in the queue: a stable id (the card's React key — stays fixed while
+ *  this request is the head, so queuing a sibling behind it never remounts the visible card), the
+ *  request, and the resolver of the tool's blocked promise. Plan 04 makes concurrent approvals
+ *  possible (a background run and the foreground run can both block on the captain at once), so
+ *  approvals are QUEUED — never a single clobberable slot. */
+type PendingApproval = { id: number; req: ApprovalRequest; resolve: (d: ApprovalDecision) => void };
+
+/** Default global background-run ceiling (total in-flight + queued dispatched tasks) when taicho.yaml
+ *  doesn't set `tasks.maxBackgroundRuns`. Bounds a model-initiated dispatch chain that resets
+ *  per-request budgets on each hop; over-ceiling dispatch is refused, not silently unbounded. */
+const DEFAULT_BACKGROUND_RUN_CEILING = 32;
 
 type ResolveModelFn = (agentId: string) => { model: Model; modelId: string; subscription?: boolean; captureCost?: boolean };
 type PriceFn = (u: { inputTokens: number; outputTokens: number }) => number;
@@ -92,6 +106,7 @@ export function App(props: {
   priceUsd?: PriceFn;
   resolveModel?: ResolveModelFn;
   configDefaults?: TaichoConfig["defaults"];
+  backgroundRunCeiling?: number; // Plan 04: global in-flight+queued dispatch ceiling (default 32)
   authSource: AuthSource;
   buildFromAuth: (s: AuthSource) => BuiltAuth;
   onLogin: () => Promise<AuthSource>;
@@ -121,7 +136,13 @@ export function App(props: {
   const [selected, setSelected] = useState(0);
   const [activity, setActivity] = useState("working…"); // live status shown by the run spinner
   const [busy, setBusy] = useState(false);
-  const [pending, setPending] = useState<Pending>(null);
+  // A QUEUE of pending approval requests (not a single slot): with Plan 04, a background dispatched
+  // run and the foreground run can both block on the captain at the same time. Each request appends
+  // here; the card renders the HEAD; answering resolves THAT request's promise and pops to the next.
+  // A single `pending` slot would let the second setPending clobber the first's resolver (lost forever).
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
+  const approvalSeq = useRef(0); // monotonic id source so each queued approval has a stable card key
+  const pending = pendingApprovals[0] ?? null; // the head request currently shown on the card
   const [roster, setRoster] = useState(props.roster);
   // Live auth: model/resolver/pricer are STATE (seeded from props) so /login can re-arm the REPL
   // without a restart. deps() reads these, so the next submit picks up the new credentials.
@@ -137,7 +158,7 @@ export function App(props: {
   const foregroundRootRef = useRef<string | null>(null);
   // Plan 04 Phase 2/3: the background task scheduler (persistent queue + per-agent concurrency cap).
   const schedulerRef = useRef<TaskScheduler | null>(null);
-  if (!schedulerRef.current) schedulerRef.current = new TaskScheduler();
+  if (!schedulerRef.current) schedulerRef.current = new TaskScheduler({ globalCap: props.backgroundRunCeiling ?? DEFAULT_BACKGROUND_RUN_CEILING });
   const scheduler = schedulerRef.current;
   const thread = useRef<ModelMessage[]>(props.rootThread ?? []);
   const aborter = useRef<AbortController | null>(null);
@@ -155,6 +176,13 @@ export function App(props: {
   const streamedRef = useRef(false);
   const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
   const pendingAuditRef = useRef<{ agent: string; text: string; userTurnId?: string; runId?: string; taskId?: string } | null>(null);
+  // Plan 10 live status: statusRef is the authoritative per-run status map (dodges stale closures in
+  // the rapid onStep stream); `statuses` is the rendered snapshot. Plan 02: `inspect` holds the
+  // derived span tree while the waterfall inspector is open (it owns the keyboard via cardKeyRef).
+  const statusRef = useRef<StatusMap>(new Map());
+  const [statuses, setStatuses] = useState<AgentStatus[]>([]);
+  const [inspect, setInspect] = useState<{ rootId: string; spans: Span[] } | null>(null);
+  const clearStatuses = () => { statusRef.current = new Map(); setStatuses([]); };
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
@@ -164,7 +192,7 @@ export function App(props: {
     // when the captain's first keystroke arrives, so we forward it to the active card. (A card-owned
     // useInput registers a beat after its render commits and would drop that first key — the hang
     // we're fixing.) The card publishes its handler to cardKeyRef during render.
-    if (pending) { cardKeyRef.current?.(input, key); return; }
+    if (pending || inspect) { cardKeyRef.current?.(input, key); return; } // a card OR the trace inspector owns the keyboard
     if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else { void (async () => { await props.mcp?.closeAll(); exit(); })(); } return; }
     if (sugg.length > 0) {
       if (key.upArrow)   { setSelected((s) => cycleIndex(s, sugg.length, -1)); return; }
@@ -207,11 +235,35 @@ export function App(props: {
     if (/session expired/i.test(text)) say({ kind: "system", text: `  ${authExpiredMessage()}` });
   };
 
+  // Enqueue an approval request and hand back a promise that resolves ONLY when the captain answers
+  // THIS request. Concurrent requests queue behind the head; each keeps its own resolver, so none is
+  // clobbered. `answerHead` (below) resolves the head's promise and pops it off.
   const requestApproval = (req: ApprovalRequest) =>
-    new Promise<ApprovalDecision>((resolve) => setPending({ req, resolve }));
+    new Promise<ApprovalDecision>((resolve) => {
+      const id = ++approvalSeq.current;
+      setPendingApprovals((q) => [...q, { id, req, resolve }]);
+    });
+
+  // Answer the head approval: resolve its promise, drop it, and let the next queued request surface.
+  // cardKeyRef is cleared so the next card re-registers its own key handler on mount.
+  const answerHead = (d: ApprovalDecision) => {
+    cardKeyRef.current = null;
+    setPendingApprovals((q) => {
+      const [head, ...rest] = q;
+      head?.resolve(d);
+      return rest;
+    });
+  };
 
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-  const TERMINAL_TASK = new Set(["completed", "failed", "interrupted", "cancelled", "partial", "blocked"]);
+  // Race a promise against a timeout that ALWAYS clears its timer — a bare Promise.race([p, sleep(ms)])
+  // leaves the losing setTimeout ref'd, keeping the event loop alive (and delaying Esc-quit) for up to
+  // `ms`. Returns true if `p` settled first, false on timeout.
+  const raceWithTimeout = (p: Promise<unknown>, ms: number): Promise<boolean> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>((r) => { timer = setTimeout(() => r(false), ms); });
+    return Promise.race([p.then(() => true), timeout]).finally(() => { if (timer) clearTimeout(timer); });
+  };
   const taskSummary = (id: string): TaskAwaitResult => {
     const t = readTaskState(props.ws, id);
     if (!t) return { status: "unknown", error: `no task "${id}"` };
@@ -240,6 +292,14 @@ export function App(props: {
   const dispatch: NonNullable<RunDeps["dispatch"]> = (o) => {
     const activeModel = model;
     if (!activeModel) return { error: "no model configured" };
+    // Global ceiling (fix): each detached dispatch is an independent request for BUDGETS (depth +
+    // runCounter reset), so per-request caps can't bound a dispatch CHAIN. Refuse over-ceiling BEFORE
+    // creating the task record so a runaway fan-out is bounded and no orphan record is left behind.
+    if (scheduler.atCapacity()) {
+      const msg = `background run ceiling reached (${scheduler.inFlight()}/${scheduler.ceiling} in flight + queued) — await or cancel a task before dispatching more`;
+      say({ kind: "system", text: `  ⊘ dispatch refused: ${msg}` });
+      return { error: msg };
+    }
     const taskId = mkTaskId();
     createBackgroundTask(props.ws, props.db, { taskId, agent: o.agent.id, goal: o.goal });
     say({ kind: "system", text: `  ⇢ dispatched ${taskId} → ${o.agent.id} (background)` });
@@ -249,7 +309,10 @@ export function App(props: {
       const childDeps = deps(activeModel, { signal: controller.signal });
       const messages: ModelMessage[] = [{ role: "user", content: o.context ? `${o.goal}\n\nContext: ${o.context}` : o.goal }];
       const brief = { from: o.parentAgentId, goal: o.goal, context: o.context, criteria: o.criteria, fromRun: o.parentRunId };
-      const promise = executeRun(childDeps, { agent: o.agent, messages, brief, inputArtifacts: o.inputArtifacts, triggeredBy: taskId })
+      // ancestry threads the dispatching run's chain + the dispatching agent so the detached run's
+      // delegationGuard cycle check (ancestry.includes(to)) spans dispatch hops — an A→B→A ping-pong
+      // is refused. Budgets (depth/runCounter) stay reset: a dispatch is still an independent request.
+      const promise = executeRun(childDeps, { agent: o.agent, messages, brief, inputArtifacts: o.inputArtifacts, triggeredBy: taskId, ancestry: [...o.parentAncestry, o.parentAgentId] })
         .then((res) => { settleTask(taskId, o.agent.id, res); return res; }, (e) => { failTask(taskId, o.agent.id, e); });
       return { controller, promise };
     };
@@ -258,18 +321,26 @@ export function App(props: {
   };
 
   // Block until a background task settles (bounded). Awaits the scheduler promise when it's running,
-  // else polls the persisted record (covers already-settled and still-queued tasks).
-  const awaitTask = async (taskId: string, timeoutMs = 120_000): Promise<TaskAwaitResult> => {
+  // else polls the persisted record (covers already-settled and still-queued tasks). awaiterAgentId
+  // (stamped by run.ts) is the agent whose run is calling await_task — used to detect a self-block.
+  const awaitTask = async (taskId: string, timeoutMs = 120_000, awaiterAgentId?: string): Promise<TaskAwaitResult> => {
     const existing = readTaskState(props.ws, taskId);
     if (!existing) return { status: "unknown", error: `no task "${taskId}"` };
-    if (TERMINAL_TASK.has(existing.status)) return taskSummary(taskId);
+    if (TERMINAL_TASK_STATUS.has(existing.status)) return taskSummary(taskId);
     const running = scheduler.awaitRunning(taskId);
-    if (running) await Promise.race([running, sleep(timeoutMs)]);
-    else {
+    if (running) {
+      await raceWithTimeout(running, timeoutMs); // clears its timer on either outcome (no leaked timeout)
+    } else {
+      // Not running — it's QUEUED (a task only sits queued because its agent is at its concurrency
+      // cap). If the awaiting run is itself a run of that SAME agent, it holds one of those slots and
+      // can never free it while parked here: awaiting would deadlock until the timeout. Fail fast.
+      if (existing.status === "queued" && awaiterAgentId && existing.agent === awaiterAgentId) {
+        return { status: "unavailable", error: `await_task would deadlock: ${taskId} is queued behind ${awaiterAgentId}'s own concurrency slot (this run holds it). Raise maxConcurrentRuns, or await it after this run frees its slot.` };
+      }
       const start = Date.now();
       while (Date.now() - start < timeoutMs) {
         const t = readTaskState(props.ws, taskId);
-        if (t && TERMINAL_TASK.has(t.status)) break;
+        if (t && TERMINAL_TASK_STATUS.has(t.status)) break;
         await sleep(50);
       }
     }
@@ -279,7 +350,13 @@ export function App(props: {
   const deps = (model: Model, over?: { signal?: AbortSignal }) => makeDeps({
     ws: props.ws, db: props.db, model,
     requestApproval,
-    onStep: ({ tool, agent, delta, note }) => {
+    onStep: (ev) => {
+      const { phase, tool, agent, delta, note, argsPreview } = ev;
+      // Plan 10: fold every phase-tagged event into the live status map (drives the StatusBar).
+      if (phase && ev.runId) {
+        statusRef.current = statusReducer(statusRef.current, ev, Date.now());
+        setStatuses(statusList(statusRef.current));
+      }
       if (delta) {
         streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
         const { blocks } = splitCompletedBlocks(streamRef.current);
@@ -291,7 +368,13 @@ export function App(props: {
       }
       // A run-level breadcrumb (e.g. a delegation verification verdict) — surface it to the captain.
       if (note) { flushStream(); say({ kind: "system", text: `  ${note}` }); return; }
-      if (tool) { flushStream(); setActivity(`${agent} → ${tool}()`); say({ kind: "system", text: `  ↳ ${agent} → ${tool}()` }); }
+      // The scrollback breadcrumb now fires at real tool_start time (the status bar carries the live
+      // role; the ↳ line stays as the record). argsPreview is redacted + capped upstream.
+      if (phase === "tool_start" && tool) {
+        flushStream();
+        setActivity(`${agent} → ${tool}()`);
+        say({ kind: "system", text: `  ↳ ${agent} → ${tool}()${argsPreview ? " " + argsPreview : ""}` });
+      }
     },
     // Per-run steer routing (Phase 4): a run polls only ITS own queued steers.
     pollSteerFor: ({ runId }) => steerRoutes.current.get(runId)?.shift() ?? null,
@@ -330,6 +413,25 @@ export function App(props: {
     },
   });
 
+  // Is a run part of the FOREGROUND cascade (the watched turn), vs a background dispatched run? Walk
+  // its triggeredBy chain: a foreground root is triggeredBy "user" (and is foregroundRootRef); a
+  // background root is triggeredBy a `task_*` id. A descendant inherits its root's nature via the
+  // chain of parent runIds still in activeRuns.
+  const isForegroundRun = (runId: string): boolean => {
+    let cur: string | undefined = runId;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      if (cur === foregroundRootRef.current) return true;
+      const entry = activeRuns.current.get(cur);
+      if (!entry) return false;                      // parent already settled — can't confirm foreground
+      if (entry.triggeredBy === "user") return true; // reached a foreground root
+      if (entry.triggeredBy.startsWith("task_")) return false; // reached a background dispatch root
+      cur = entry.triggeredBy;                        // walk up via the parent runId
+    }
+    return false;
+  };
+
   // Route a steer while a run is in flight: `@agent …` → that agent's active run; plain text → the
   // watched (foreground) root run, falling back to any single active run.
   const routeSteer = (value: string) => {
@@ -340,8 +442,12 @@ export function App(props: {
     };
     const parsed = parseInput(value);
     if (parsed.kind === "address") {
-      const hit = [...activeRuns.current.entries()].find(([, v]) => v.agent === parsed.to);
-      if (!hit) { say({ kind: "system", text: `  no active run for @${parsed.to} to steer` }); return; }
+      // The same agent can be live in TWO runs (a foreground cascade AND a background dispatch). Prefer
+      // the foreground-cascade run so an @agent correction lands on the turn the captain is watching,
+      // not a random background run picked by Map insertion order. Fall back to the first match.
+      const matches = [...activeRuns.current.entries()].filter(([, v]) => v.agent === parsed.to);
+      if (!matches.length) { say({ kind: "system", text: `  no active run for @${parsed.to} to steer` }); return; }
+      const hit = matches.find(([id]) => isForegroundRun(id)) ?? matches[0];
       push(hit[0], parsed.text);
       say({ kind: "user", text: `(steer @${parsed.to}) ${parsed.text}` });
       return;
@@ -375,6 +481,7 @@ export function App(props: {
     foregroundRootRef.current = null; // the next user-triggered onRunStart claims this turn's root
     aborter.current = new AbortController();
     streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
+    clearStatuses();
     try {
       if (parsed.kind === "chat") {
         pendingAuditRef.current = { agent: "root", text: parsed.text };
@@ -419,7 +526,7 @@ export function App(props: {
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
           maybeSayAuthExpired(res.text);
-          say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)})` });
+          say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}) · /trace to inspect` });
         }
         setRoster(loadIndex(props.db)); // create_agent may have grown the squad
       } else {
@@ -457,13 +564,13 @@ export function App(props: {
           updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)), props.db);
         }
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
-        say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
+        say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s)) · /trace to inspect` });
       }
     } catch (e) {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
       // explicit-model guard for a misconfigured OpenRouter agent. Surface it instead of crashing Ink.
       say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
-    } finally { pendingAuditRef.current = null; setBusy(false); }
+    } finally { pendingAuditRef.current = null; setBusy(false); clearStatuses(); }
   };
 
   const runSlash = async (cmd: string, arg: string) => {
@@ -639,6 +746,17 @@ export function App(props: {
       rows.forEach((r) => say({ kind: "system", text: `  [${r.id}] ${r.status} · ${r.agent ?? "?"} · ${r.goal ?? ""}${r.result_ref ? ` → ${r.result_ref}` : ""}` }));
       return;
     }
+    if (cmd === "trace") {
+      // No arg → the latest user-triggered run (the "what just happened" case); <id> → that run.
+      const id = arg.trim() || latestUserRunId(props.ws);
+      if (!id) { say({ kind: "system", text: "  (no runs yet)" }); return; }
+      let spans: Span[];
+      try { spans = deriveTrace(props.ws, id); }
+      catch (e) { say({ kind: "system", text: `  no such trace: ${id} (${e instanceof Error ? e.message : String(e)})` }); return; }
+      if (!spans.length) { say({ kind: "system", text: `  no such trace: ${id}` }); return; }
+      setInspect({ rootId: id, spans });
+      return;
+    }
     runSlashPure(cmd, arg, {
       roster,
       listTraces: (a?: string) => listTraces(props.ws, a),
@@ -646,6 +764,12 @@ export function App(props: {
       listPolicies: (a: string) => listPolicies(props.ws, a),
       deletePolicy: (a: string, p: string) => deletePolicy(props.ws, a, p),
     }).forEach(say);
+  };
+
+  /** The most recent user-triggered run id (listTraces is sorted by start time ascending). */
+  const latestUserRunId = (ws: string): string | undefined => {
+    const userRuns = listTraces(ws).filter((t) => t.triggeredBy === "user");
+    return userRuns.length ? userRuns[userRuns.length - 1].id : undefined;
   };
 
   return (
@@ -674,30 +798,45 @@ export function App(props: {
           </Text>
         );
       })}
-      {pending && (() => {
+      {inspect && (
+        <TraceInspector
+          rootId={inspect.rootId}
+          spans={inspect.spans}
+          width={mdWidth + 2}
+          keyHandlerRef={cardKeyRef}
+          onClose={() => { cardKeyRef.current = null; setInspect(null); }}
+        />
+      )}
+      {!inspect && pending && (() => {
+        // key = the head request's stable id: a fresh card (with its own reset useState) mounts per
+        // request, but the visible head never remounts just because another request queued behind it.
         if (pending.req.kind === "ask_human") {
           return (
             <QuestionCard
+              key={pending.id}
               question={pending.req.question}
               options={pending.req.options}
               keyHandlerRef={cardKeyRef}
-              onDecision={(d) => { const r = pending.resolve; cardKeyRef.current = null; setPending(null); r(d); }}
+              onDecision={answerHead}
             />
           );
         }
         const view = proposalView(pending.req);
         return (
           <ProposalCard
+            key={pending.id}
             title={view.title}
             fields={view.fields}
             keyHandlerRef={cardKeyRef}
-            onDecision={(d) => { const r = pending.resolve; cardKeyRef.current = null; setPending(null); r(d); }}
+            onDecision={answerHead}
           />
         );
       })()}
-      {!pending && (
+      {!inspect && !pending && busy && <RunStatus activity={activity} />}
+      {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
+      {!inspect && statuses.length > 0 && <StatusBar statuses={statuses} width={mdWidth + 2} />}
+      {!inspect && !pending && (
         <>
-          {busy && <RunStatus activity={activity} />}
           <Box>
             <Text color={busy ? "gray" : "cyan"}>{busy ? "❯ " : "> "}</Text>
             <TextInput
@@ -708,7 +847,7 @@ export function App(props: {
               onSubmit={submit}
             />
           </Box>
-          {!pending && sugg.length > 0 && (
+          {sugg.length > 0 && (
             <Box flexDirection="column">
               {sugg.map((c, i) => {
                 const on = i === Math.min(selected, sugg.length - 1);

@@ -28,13 +28,13 @@ test("/runs lists all; /runs <agent> filters", () => {
   expect(runSlash("runs", "", deps).length).toBe(2);
   expect(runSlash("runs", "w", deps).length).toBe(1);
 });
+test("/runs rows include a duration (the waterfall picker)", () => {
+  expect(runSlash("runs", "", deps)[0].text).toMatch(/\d+\.\d+s/);
+});
 test("/runs with no runs -> message", () => {
   expect(runSlash("runs", "", { ...deps, listTraces: () => [] })[0].text).toContain("no runs");
 });
-test("/trace shows details; missing -> friendly", () => {
-  expect(runSlash("trace", "root/2026-06-11-run1", deps)[0].text).toContain("outcome=");
-  expect(runSlash("trace", "missing", deps)[0].text).toContain("no such trace");
-});
+// `/trace` is now interactive (App.tsx opens the TraceInspector) — no longer a pure one-liner here.
 test("unknown command -> message", () => { expect(runSlash("frob", "", deps)[0].text).toContain("unknown command"); });
 
 test("/policies lists an agent's notes; empty -> message", () => {

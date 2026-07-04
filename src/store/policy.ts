@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync
 import { join } from "node:path";
 import { PolicyNote } from "../schemas/policy";
 import { paths } from "./files";
+import { log } from "../core/logger";
 
 const FRONTMATTER = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/;
 
@@ -33,7 +34,7 @@ export function listPolicies(ws: string, agentId: string): PolicyNote[] {
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".md")) continue;
     try { out.push(parsePolicy(readFileSync(join(dir, f), "utf8"))); }
-    catch (e) { console.error(`skipping policy ${f}: ${String(e)}`); }
+    catch (e) { log.warn(`skipping policy ${f}`, e); }
   }
   return out;
 }

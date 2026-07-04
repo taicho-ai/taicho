@@ -812,6 +812,51 @@ test("dispatch_task cleanly reports when no scheduler is wired (headless/unit co
   expect(res.trace.outcome).toBe("completed"); // the run still finishes; the tool just reported unavailability
 });
 
+test("A→B→A dispatch cycle is REFUSED: the detached run's cycle guard spans the dispatch hop (ancestry is threaded)", async () => {
+  // Before the fix, a detached dispatch started with a fresh depth/ancestry/runCounter, so delegationGuard's
+  // cycle check never saw the parent chain across dispatch hops — two agents with dispatch_task + mutual
+  // canDelegateTo could ping-pong A→B→A unboundedly. Threading the dispatching run's ancestry into the
+  // detached executeRun makes the cross-agent cycle guard span the hop.
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "a", role: "a", identity: "You are A.", tools: ["dispatch_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "b", role: "b", identity: "You are B.", tools: ["dispatch_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  // Branch on the GOAL text (unambiguous: it appears only in the run that received it): A dispatches to
+  // B (goal GOAL-TO-B); B receives GOAL-TO-B and tries to dispatch back to A; after any dispatch RESULT
+  // ("task_bg_") or a refusal ("cycle") the run wraps up.
+  const model = new MockLanguageModelV3({ doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+    const s = JSON.stringify(prompt);
+    if (s.includes("task_bg_") || s.includes("cycle")) return text("wrapped up");
+    if (s.includes("GOAL-TO-B")) return call("dispatch_task", { to: "a", goal: "GOAL-TO-A" }); // this is B → back to A
+    return call("dispatch_task", { to: "b", goal: "GOAL-TO-B" });                              // this is A → to B
+  }) as any });
+
+  const detached: ReturnType<typeof executeRun>[] = [];
+  let dispatches = 0;
+  let deps: ReturnType<typeof makeDeps>;
+  // Mimic App.tsx's real dispatch closure: start a detached executeRun, THREADING the parent ancestry so
+  // the cycle guard spans the hop, but keeping budgets (depth/runCounter) reset — a dispatch stays an
+  // independent request. A hard cap bounds a would-be-runaway if the fix regresses.
+  const dispatch: NonNullable<Parameters<typeof makeDeps>[0]["dispatch"]> = (o) => {
+    if (dispatches >= 5) return { error: "test safety cap" };
+    dispatches++;
+    const taskId = `task_bg_${dispatches}`;
+    detached.push(executeRun(deps, {
+      agent: o.agent, messages: [{ role: "user", content: o.goal }],
+      brief: { from: o.parentAgentId, goal: o.goal, fromRun: o.parentRunId },
+      triggeredBy: taskId, ancestry: [...o.parentAncestry, o.parentAgentId],
+    }));
+    return { taskId };
+  };
+  deps = makeDeps({ ws, db, model, dispatch });
+  const a = await loadAgent(ws, "a");
+  const res = await executeRun(deps, { agent: a, messages: [{ role: "user", content: "kickoff" }], triggeredBy: "user" });
+  expect(res.trace.notes.some((n) => /dispatched/i.test(n))).toBe(true); // A dispatched to B
+  const runs = await Promise.all(detached);
+  expect(dispatches).toBe(1);                                            // ONLY A→B fired; B→A was refused BEFORE dispatch
+  const bRun = runs.find((r) => r.trace.agent === "b")!;
+  expect(bRun.trace.notes.some((n) => /cycle/i.test(n))).toBe(true);     // B→A refused by the cycle guard
+});
+
 test("run.ts routes steering per-run: pollSteerFor is called with THIS run's id/agent and its steer reaches the model", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");

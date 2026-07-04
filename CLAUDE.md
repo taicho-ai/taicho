@@ -112,6 +112,15 @@ resolution).
   and must stay unchanged). The checker is an INDEPENDENT call, not the parent's self-check; the
   retry consumes a `maxWorkItemsPerRequest` like any delegation. Verdicts surface to the captain via
   the `onStep` `note` breadcrumb and are recorded on `trace.verification` + task-state `verifications[]`.
-- Never log auth tokens; use `redactAuthHeader` for any debug output. `TAICHO_DEBUG=1` prints
-  `taicho codex <status> <url> :: <body>` on non-2xx (token never logged).
+- **Logging (Plan 03):** never `console.error/warn` from engine/store code — a stray write corrupts
+  the Ink TUI. Use the leveled `log` from `src/core/logger.ts`; it writes to `taicho.log` in the
+  workspace and redacts auth material centrally (so no call site can leak a token). Raise to debug
+  with `--verbose`/`-v`, `TAICHO_VERBOSE`, `TAICHO_LOG_LEVEL=debug`, or the historical `TAICHO_DEBUG`
+  (now a general level, not codex-only). The only intentional `console.error`s left are the boot/auth
+  UX prints in `index.tsx` (authorize URLs, subscription notice, boot-failure `taicho: …` + exit).
+- **Headless (Plan 03):** `taicho run "<goal>"` drives `executeRun` without Ink; `taicho tail
+  [runId] [--follow]` streams a run's events. `index.tsx` dispatches on `process.argv` before the
+  Ink render. Approvals default to auto-reject (unattended-safe); `--approve auto|prompt` opt in. The
+  on-disk event schema + observation guide is `docs/events.md`.
+- Never log auth tokens; use `redactAuthHeader` (or the redaction built into `core/logger.ts`).
 - Design docs live in `docs/superpowers/specs/`; plans in `docs/superpowers/plans/`.
