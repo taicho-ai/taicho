@@ -188,6 +188,14 @@ resolution).
   records its real returned cost; other env-key runs use the static `pricing.ts` table (tokens are
   the hard budget — unknown models price to 0, never throw).
 - Tokens are always metered (budgets/caps still enforced) regardless of provider.
+- **Model-call timeout is a TRANSPORT deadline, not a loop watchdog** (Plan 12). There is NO idle
+  timer in `loop.ts`. A per-request deadline lives on the provider `fetch`
+  (`core/providers/request-timeout.ts` `withRequestTimeout`), applied to EVERY provider path (codex +
+  env-key anthropic/openai/openrouter). It can only ever see one model turn's HTTP exchange — never
+  tool execution (which runs inside `consumeStream`, after the HTTP stream closes; timing that was the
+  old watchdog's bug). A genuine hang aborts the real connection and surfaces a retryable `ETIMEDOUT`
+  routed through the AI SDK's own `maxRetries` (no hand-rolled retry); on exhaustion the run fails with
+  the REAL error. Config-disposed via `defaults.modelRequestTimeoutMs` (default 120s).
 
 ## Conventions
 

@@ -135,13 +135,16 @@ function buildFromAuth(src: AuthSource): BuiltAuth {
       priceUsd: () => 0,
     };
   }
+  // Plan 12: the per-request transport deadline (ms) for a model fetch — config-disposed, applied to
+  // EVERY provider fetch path (env keys + codex). Undefined ⇒ the provider layer's 120s default.
+  const modelRequestTimeoutMs = config.defaults?.modelRequestTimeoutMs;
   if (src.kind === "env") {
     // A config-supplied default model is honored for the top-level fallback model too — needed for
     // OpenRouter, whose env-resolved src.model may be empty (it carries no default slug).
     const cfg = { provider: src.provider, model: config.defaults?.model ?? src.model };
     return {
-      model: buildModel(cfg),
-      resolveModel: createModelResolver({ config, fallback: cfg }).resolveModel,
+      model: buildModel(cfg, modelRequestTimeoutMs),
+      resolveModel: createModelResolver({ config, fallback: cfg, timeoutMs: modelRequestTimeoutMs }).resolveModel,
       priceUsd: pricerFor(cfg.model),
     };
   }
@@ -149,6 +152,7 @@ function buildFromAuth(src: AuthSource): BuiltAuth {
     const codex = createCodexProvider({
       load: () => readProfile(),
       refresh: createRefresher({ load: () => readProfile(), save: writeProfile }),
+      timeoutMs: modelRequestTimeoutMs,
     });
     // Subscription calls are not metered in USD; mark subscription:true so the run trace reports
     // "subscription" instead of a (meaningless) dollar cost.

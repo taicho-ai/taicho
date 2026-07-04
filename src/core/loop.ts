@@ -12,49 +12,13 @@ import { compactMessages, estimateContextTokens, type CompactionSummary } from "
  *  the original brief are kept separately). The oldest round-trips beyond this window are folded. */
 const DEFAULT_COMPACT_KEEP_RECENT = 3;
 
-const DEFAULT_MODEL_IDLE_TIMEOUT_MS = 120_000;
-/** After abort, how long a call may keep running to settle cleanly before we abandon it. Lets a call
- *  that HONORS the abort wind down (e.g. a parent mid tool-execution recording a cascaded child run)
- *  while bounding how long a WEDGED one (ignores abort, never settles) keeps the captain waiting. */
-const ABORT_GRACE_MS = 1_000;
-
-/** Thrown by guardModelCall when a model call produces no output for the idle window. */
-class ModelStalledError extends Error {
-  constructor(ms: number) {
-    super(`model produced no output for ${ms}ms (backend stalled or connection dropped)`);
-    this.name = "ModelStalledError";
-  }
-}
-
-/** Await a model call but NEVER hang on it. Settles when the call finishes, or after a window of no
- *  progress() pings — `idleMs` normally, shrunk to ABORT_GRACE_MS once the abort signal fires. The
- *  AI-SDK/bun fetch stream can wedge on a dropped connection (never erroring, never closing, not
- *  honoring abort), so we can rely on neither the call settling NOR the abort reaching it; this
- *  guarantees control returns to the loop. We do NOT reject the instant abort fires — an in-flight
- *  call may be mid tool-execution whose side effects (child runs, delegatedOut) must finish — so a
- *  cleanly-aborting call settles via `ok`/`fail` and the loop's top-of-iteration check stops it next.
- *  The wedged underlying promise is abandoned; any later rejection is swallowed. */
-function guardModelCall<T>(
-  work: (progress: () => void) => Promise<T>,
-  signal: AbortSignal | undefined,
-  idleMs: number,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let done = false;
-    let timer: ReturnType<typeof setTimeout>;
-    let window = idleMs;
-    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
-    const ok = (v: T) => { if (done) return; done = true; cleanup(); resolve(v); };
-    const fail = (e: unknown) => { if (done) return; done = true; cleanup(); reject(e); };
-    const arm = () => { clearTimeout(timer); timer = setTimeout(() => fail(new ModelStalledError(window)), window); };
-    const onAbort = () => { window = Math.min(window, ABORT_GRACE_MS); arm(); };
-    const bump = () => arm(); // progress (a stream chunk) resets the idle window
-    if (signal?.aborted) window = Math.min(window, ABORT_GRACE_MS);
-    signal?.addEventListener("abort", onAbort, { once: true });
-    arm();
-    work(bump).then(ok, fail);
-  });
-}
+// Plan 12: there is NO model-call watchdog here anymore. The old `guardModelCall` idle timer wrapped
+// `consumeStream`, but the AI SDK runs tools INSIDE `consumeStream` — so it timed our own tool
+// execution (the shot-planner bug) and only abandoned the wedged promise (leak). A hung request is
+// now bounded at the TRANSPORT layer instead: a per-request deadline on the provider fetch
+// (providers/request-timeout.ts) that can only ever see one model turn's HTTP exchange, never tool
+// execution. On a genuine hang it surfaces a retryable error routed through the AI SDK's own
+// maxRetries; the loop just consumes the stream directly and lets errors/cancellation flow normally.
 
 export interface LoopResult {
   text: string;
@@ -94,10 +58,6 @@ export async function runLoop(opts: {
   /** OpenRouter (usage:{include:true}) returns the authoritative per-call cost in
    *  providerMetadata.openrouter.usage.cost — prefer it over the static token pricer when set. */
   captureProviderCost?: boolean;
-  /** Idle deadline (ms) for a single model call: if no output arrives for this long, the call is
-   *  abandoned and the run fails. Guards against a backend/stream that wedges without erroring,
-   *  closing, or honoring abort — which would otherwise hang the loop forever. Default 120s. */
-  modelCallTimeoutMs?: number;
   /** Plan 05: the estimated-token threshold at which the loop folds the oldest tool round-trips into
    *  one compact summary (config-disposed — computed from the per-model window table + defaults.compactAt
    *  by run.ts). Undefined ⇒ compaction is off (the context size is still measured + recorded). */
@@ -202,51 +162,47 @@ export async function runLoop(opts: {
       // drives the live "thinking" status. Keep both.
       emit({ ts: new Date().toISOString(), kind: "model_request", iteration: iterations + 1, data: { messageCount: messages.length, contextTokens: ctxTokens, compacted: compactedThisIter != null } });
       opts.onStep?.({ phase: "model_start" }); // → "thinking" until a delta or the response arrives
-      // guardModelCall wraps the call so a wedged stream (no bytes/close/error, abort ignored) can't
-      // hang the loop: it returns on completion, on abort, OR after an idle timeout. onChunk pings the
-      // idle watchdog so a long-but-progressing response is never falsely killed.
-      out = await guardModelCall<ModelOut>(async (progress) => {
-        // Plan 07: ONE streaming path for EVERY provider. streamText streams deltas so the live
-        // markdown UI lights up for all providers (previously only the Codex subscription path
-        // streamed; Anthropic/OpenAI/OpenRouter went through generateText and rendered nothing live).
-        // We drain the stream to completion and read the same aggregated fields generateText returned
-        // (text, usage, toolCalls, response messages, providerMetadata), so the rest of the loop is
-        // unchanged. The idle watchdog now gets onChunk pings on every provider, not just codex.
-        let streamErr: unknown;
-        const s = streamText({
-          model: opts.model,
-          messages,
-          tools: opts.tools,
-          abortSignal: opts.signal,
-          // Codex backend (subscription) requires the system prompt in the top-level `instructions`
-          // field with store:false ("Instructions are required") — NOT a system message. Every other
-          // provider takes a normal `system` prompt. (SSE streaming — "Stream must be set to true" —
-          // is now the shared path, so there is no codex-specific streaming toggle anymore.)
-          ...(opts.codexBackend
-            ? { providerOptions: { openai: { instructions: opts.system, store: false } } }
-            : { system: opts.system }),
-          onError: ({ error }) => { streamErr = error; },
-          // Each chunk both pings the idle watchdog AND surfaces the text delta so the UI can render
-          // the response live as it streams (instead of all at once when the run returns).
-          onChunk: ({ chunk }) => { progress(); if (chunk.type === "text-delta") opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text }); },
-        });
-        await s.consumeStream();
-        if (streamErr) throw streamErr;
-        return {
-          text: await s.text,
-          usage: await s.usage,
-          toolCalls: await s.toolCalls,
-          responseMessages: (await s.response).messages,
-          // OpenRouter (usage:{include:true}) reports the authoritative per-call cost here on the
-          // streamed path too (aggregated from the finish part); captureProviderCost reads it below.
-          providerMetadata: await s.providerMetadata,
-        };
-      }, opts.signal, opts.modelCallTimeoutMs ?? DEFAULT_MODEL_IDLE_TIMEOUT_MS);
+      // Plan 07: ONE streaming path for EVERY provider. streamText streams deltas so the live markdown
+      // UI lights up for all providers (previously only the Codex subscription path streamed;
+      // Anthropic/OpenAI/OpenRouter went through generateText and rendered nothing live). We drain the
+      // stream to completion and read the same aggregated fields generateText returned (text, usage,
+      // toolCalls, response messages, providerMetadata), so the rest of the loop is unchanged.
+      // Plan 12: no watchdog wraps this. A hung request is bounded by the provider fetch's transport
+      // deadline (providers/request-timeout.ts) and retried via the AI SDK's own maxRetries; a wedged
+      // stream and a user abort both tear the real connection down. Errors flow to the catch below.
+      let streamErr: unknown;
+      const s = streamText({
+        model: opts.model,
+        messages,
+        tools: opts.tools,
+        abortSignal: opts.signal,
+        // Codex backend (subscription) requires the system prompt in the top-level `instructions`
+        // field with store:false ("Instructions are required") — NOT a system message. Every other
+        // provider takes a normal `system` prompt. (SSE streaming — "Stream must be set to true" —
+        // is now the shared path, so there is no codex-specific streaming toggle anymore.)
+        ...(opts.codexBackend
+          ? { providerOptions: { openai: { instructions: opts.system, store: false } } }
+          : { system: opts.system }),
+        onError: ({ error }) => { streamErr = error; },
+        // Surface each text delta so the UI can render the response live as it streams (instead of all
+        // at once when the run returns).
+        onChunk: ({ chunk }) => { if (chunk.type === "text-delta") opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text }); },
+      });
+      await s.consumeStream();
+      if (streamErr) throw streamErr;
+      out = {
+        text: await s.text,
+        usage: await s.usage,
+        toolCalls: await s.toolCalls,
+        responseMessages: (await s.response).messages,
+        // OpenRouter (usage:{include:true}) reports the authoritative per-call cost here on the
+        // streamed path too (aggregated from the finish part); captureProviderCost reads it below.
+        providerMetadata: await s.providerMetadata,
+      };
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       emit({ ts: new Date().toISOString(), kind: "model_error", iteration: iterations + 1, data: { error } });
       if (opts.signal?.aborted) return done({ text: "[cancelled]", aborted: true });
-      if (e instanceof ModelStalledError) return done({ text: "[timed out]", error: e.message });
       return done({ text: "[error]", error });
     }
     const { text, usage, toolCalls, responseMessages, providerMetadata } = out;

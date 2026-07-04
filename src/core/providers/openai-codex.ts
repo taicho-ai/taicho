@@ -6,6 +6,7 @@ import type { AuthProfile } from "../auth/profile";
 import { AuthExpiredError } from "../auth/refresh";
 import { OPENAI_CODEX_AUTH, codexHeaders } from "../auth/constants";
 import { log } from "../logger";
+import { withRequestTimeout, DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from "./request-timeout";
 
 export function redactAuthHeader(value: string | null): string {
   if (!value) return "";
@@ -16,6 +17,10 @@ interface AuthFetchDeps {
   load: () => AuthProfile | null;
   refresh: () => Promise<AuthProfile>;
   baseFetch?: typeof fetch;
+  /** Plan 12: per-request transport deadline (ms) for the model fetch. A genuinely hung request
+   *  (open socket, zero tokens) becomes a retryable error routed through the AI SDK's maxRetries,
+   *  instead of the deleted loop-level idle watchdog. Config-disposed; defaults to 120s. */
+  timeoutMs?: number;
 }
 
 /** Wrap fetch to inject Codex auth headers; on 401, refresh once (single-flight upstream) + retry. */
@@ -55,6 +60,8 @@ export function createCodexProvider(deps: AuthFetchDeps) {
     // (NO /v1 — that's the api.openai.com convention). The provider appends "/responses".
     baseURL: OPENAI_CODEX_AUTH.codexBaseUrl,
     apiKey: "codex-oauth",
-    fetch: makeAuthFetch(deps),
+    // Plan 12: wrap the auth-injecting fetch with the transport deadline (outside makeAuthFetch, so it
+    // bounds the whole request including a 401 refresh+retry). A hang aborts the real connection.
+    fetch: withRequestTimeout(makeAuthFetch(deps), deps.timeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS),
   });
 }

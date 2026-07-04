@@ -277,34 +277,28 @@ test("returns a structured error (does not throw) when the model call fails", as
   expect(res.exhausted).toBe(false);
 });
 
-// A model whose call never settles: simulates the bun fetch stream that wedges on a dropped
-// connection (never errors, never closes, never honors abort), which used to hang the loop forever.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const wedgedStream = () => new MockLanguageModelV3({ doStream: (() => new Promise(() => {})) as any });
+// Plan 12: a wedged stream is now torn down at the TRANSPORT layer (a real provider fetch honors the
+// abort signal), not by a loop-level watchdog. This mock simulates a real provider whose in-flight
+// request rejects the instant its abortSignal fires (exactly what fetch does) — the loop can only
+// cancel a stuck call if the underlying transport honors abort, and every real provider does.
+const abortHonoringStream = () =>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  new MockLanguageModelV3({ doStream: (async ({ abortSignal }: any) => {
+    return await new Promise((_resolve, reject) => {
+      if (abortSignal?.aborted) return reject(abortSignal.reason ?? new Error("aborted"));
+      abortSignal?.addEventListener("abort", () => reject(abortSignal.reason ?? new Error("aborted")), { once: true });
+    });
+  }) as any });
 
-test("cancels a wedged streaming model call when the signal aborts (does not hang)", async () => {
+test("cancels a stuck streaming model call when the signal aborts (real transport honors abort)", async () => {
+  // The old guardModelCall watchdog is gone: cancellation now rides the abortSignal streamText passes
+  // to the provider. A real fetch honors it; this mock does too. No loop-level timer involved.
   const controller = new AbortController();
-  const p = runLoop({ model: wedgedStream(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true, signal: controller.signal });
+  const p = runLoop({ model: abortHonoringStream(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true, signal: controller.signal });
   setTimeout(() => controller.abort(), 50);
   const res = await p;
   expect(res.aborted).toBe(true);
   expect(res.text).toBe("[cancelled]");
-}, 3000);
-
-test("times out a wedged streaming model call instead of hanging (codex path)", async () => {
-  const res = await runLoop({ model: wedgedStream(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, codexBackend: true, modelCallTimeoutMs: 150 });
-  expect(res.error).toBeDefined();
-  expect(res.text).toBe("[timed out]");
-  expect(res.aborted).toBe(false);
-}, 3000);
-
-test("times out a wedged streaming model call on the env path too (idle watchdog everywhere, not just codex)", async () => {
-  // Plan 07: the idle watchdog must guard the env (non-codex) path as well — the unified streaming
-  // path means a wedged Anthropic/OpenAI/OpenRouter stream can no longer hang the loop.
-  const res = await runLoop({ model: wedgedStream(), agent, system: "S", messages: [{ role: "user", content: "go" }], tools, modelCallTimeoutMs: 150 });
-  expect(res.text).toBe("[timed out]");
-  expect(res.error).toBeDefined();
-  expect(res.aborted).toBe(false);
 }, 3000);
 
 test("forwards streamed text deltas via onStep (so the UI can render live)", async () => {
@@ -400,31 +394,31 @@ test("folds oldest round-trips into a compaction summary once the estimate cross
   expect(laterPrompt).toContain("ORIGINAL_BRIEF");
 });
 
-test("does NOT time out a streaming call that keeps making progress (idle timer resets per chunk)", async () => {
-  // What this asserts: each chunk resets the idle window, so a steadily-progressing response is never
-  // falsely killed. For that to be a *real* test, the WHOLE stream must outlast the idle window — a
-  // watchdog that did NOT reset would fire at the window and truncate this healthy stream, failing the
-  // assertion below. So we keep total-time > window while making each gap tiny relative to the window:
-  //   20 chunks × 50ms ≈ 950ms total  >  500ms idle window   (a non-resetting watchdog fires at ~500ms)
-  //   per-chunk gap 50ms  ≪  500ms window                      (~450ms cushion per gap)
-  // That ~450ms absolute cushion (vs the old 20ms-gap / 100ms-window's ~80ms) means ordinary GC/CPU
-  // jitter under load can't make a single scheduled gap slip past the window and falsely fire.
-  const text = "abcdefghijklmnop"; // 16 progress deltas
-  const model = new MockLanguageModelV3({
-    doStream: (async () => ({
-      stream: simulateReadableStream({
-        initialDelayInMs: 0, chunkDelayInMs: 50,
-        chunks: [
-          { type: "stream-start", warnings: [] },
-          { type: "text-start", id: "1" },
-          ...[...text].map((delta) => ({ type: "text-delta", id: "1", delta })),
-          { type: "text-end", id: "1" },
-          { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
-        ],
-      }),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    })) as any,
-  });
-  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, modelCallTimeoutMs: 500 });
-  expect(res.text).toBe(text);
+// ── Plan 12: no loop-level model-call watchdog ────────────────────────────────────────────────────
+test("a slow tool round-trip completes — tool execution is never subject to a loop deadline (shot-planner regression)", async () => {
+  // The bug: the old idle watchdog wrapped consumeStream, and the AI SDK executes tools INSIDE
+  // consumeStream. A long delegation (156s of tool execution, zero stream chunks) tripped the timer at
+  // tool_start + 120000ms, failing a run whose child had actually succeeded. Now there is NO loop
+  // timer, so tool execution of ANY duration completes and the parent surfaces the result. We stand in
+  // for the 156s delegation with a tool whose execute() takes a beat while the stream is silent — the
+  // load-bearing property is that this silence trips nothing. Pre-fix, a watchdog armed anywhere below
+  // the tool's duration would fire mid-execution and fail this assertion.
+  let toolRan = false;
+  const slowTools: ToolSet = {
+    slow: tool({
+      description: "a tool whose execution takes a while (stands in for a long delegation)",
+      inputSchema: z.object({}),
+      execute: async () => { await new Promise((r) => setTimeout(r, 300)); toolRan = true; return { done: true }; },
+    }),
+  };
+  const slowCallChunks = [
+    { type: "stream-start", warnings: [] },
+    { type: "tool-call", toolCallId: "s1", toolName: "slow", input: "{}" },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_use" }, usage },
+  ];
+  const model = new MockLanguageModelV3({ doStream: streamSeq(slowCallChunks, finalChunks) });
+  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools: slowTools });
+  expect(toolRan).toBe(true);            // the slow tool actually ran to completion
+  expect(res.toolCalls.slow).toBe(1);
+  expect(res.text).toBe("all done");     // and the parent surfaced the post-tool final result
 }, 5000);

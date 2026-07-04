@@ -100,6 +100,10 @@ export const TaichoConfig = z.object({
     // Plan 05 Ph3: how many recent conversation turns boot-replay keeps VERBATIM; older turns fold
     // into a rolling summary. Default 6 (conversation-replay.ts DEFAULT_REPLAY_KEEP_TURNS).
     replayKeepTurns: z.number().int().nonnegative().optional(),
+    // Plan 12: per-request transport deadline (ms) for a model fetch. A genuinely hung request (open
+    // socket, zero tokens) aborts the connection and errors, routed through the AI SDK's maxRetries —
+    // replaces the deleted loop-level idle watchdog. Default 120s (request-timeout.ts).
+    modelRequestTimeoutMs: z.number().int().positive().optional(),
   }).optional(),
   // Deck-level ceilings (Plan 09) — top-level because they bound the whole deck, not one agent.
   budgets: DeckBudgets,

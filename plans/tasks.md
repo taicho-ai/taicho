@@ -484,3 +484,29 @@ the tracking view; the runbook is the build view.
 ### Phase 4 — Docs & CI
 - [x] Rewrite `CLI_TESTING.md` around the new harness; add Layer 4 to `TESTING.md`'s table; update `CLAUDE.md`. *CLI_TESTING.md rewritten (assertion contract kept, manifest = deliverable, gotchas documented); TESTING.md now four layers + a Layer 4 section; CLAUDE.md testing line updated.*
 - [ ] (later) `charmbracelet/vhs-action` in CI, evidence folder as build artifact — only once tapes prove stable locally.
+
+---
+
+## Plan 12 — Kill the model-call watchdog
+
+**One line:** Delete the bespoke idle-timeout watchdog. A model call either returns tokens or
+errors; a hung request becomes an error via a transport deadline. No watchdog, no "stall" concept,
+no babysitting.
+
+**Why now:** a real user run (`root/2026-07-04-run6`) was marked `failed` even though every
+sub-agent succeeded. Root cause: `guardModelCall` wraps `streamText` + `consumeStream`, and the AI
+SDK executes tools *inside* `consumeStream`. A 156s `shot-planner` delegation produced no stream
+chunks for 120s, so the idle timer fired `ModelStalledError` at exactly `tool_start + 120000ms` —
+timing our own tool, not the model. The error text ("backend stalled or connection dropped") is a
+hardcoded guess; `streamText`'s `onError` never fired because nothing actually dropped. The timer
+only *abandons* the promise (never aborts), so the wedged stream + its whole closure (messages,
+tools, ctx) leaks — the likely cause of the session slowdown ~30min after a failure.
+
+- [x] Delete `guardModelCall` + `ModelStalledError` from `loop.ts` (the watchdog is the bug — remove, don't replace). *Removed the timer, the `ModelStalledError` class, the `ABORT_GRACE_MS`/`DEFAULT_MODEL_IDLE_TIMEOUT_MS` constants, the `modelCallTimeoutMs` option, and the `ModelStalledError` catch branch; the loop now consumes the stream directly.*
+- [x] Put an `AbortSignal.timeout(ms)` on the model fetch (transport layer, e.g. `makeAuthFetch`) so a genuinely hung request (open socket, zero tokens) becomes a normal error — and cannot see tool execution, which happens after the model's HTTP stream closes. *`core/providers/request-timeout.ts` `withRequestTimeout` wraps the fetch for EVERY provider path (codex via `createCodexProvider`; env-key anthropic/openai/openrouter via `model.ts` `createAnthropic`/`createOpenAI`/`createOpenRouter` with a custom `fetch`). Config-disposed via `defaults.modelRequestTimeoutMs` (default 120s).*
+- [x] Route that error through the AI SDK's existing `maxRetries` (don't hand-roll retry); on exhaustion the run fails / provider is dropped like any other error. *The deadline surfaces a retryable `ETIMEDOUT`-coded error (isBunNetworkError → isRetryable) so the SDK's own retry machinery handles it; verified end-to-end (real provider → fetch called maxRetries+1 times → fails cleanly).*
+- [ ] Confirm real abort tears the stream/connection/closure down (fixes the abandon-don't-cancel leak); reproduce the pre-fix leak with a heap snapshot as evidence. *DONE: real abort teardown is implemented (the deadline aborts the underlying fetch's signal — real connection teardown) and proven by a test asserting `signal.aborted === true` on timeout + user-abort propagation. LEFT OPEN: the heap-snapshot reproduction of the pre-fix leak is descoped as a post-merge fast-follow (see PR).*
+- [x] Fix the failure surface: report the real transport error, never a fabricated "backend stalled" string. *The fabricated `ModelStalledError`/"[timed out]" text is gone; the loop returns `[error]` carrying the REAL transport error message.*
+- [x] Tests: a long (>old-timeout) delegation completes and the parent surfaces the child result (the `shot-planner` case); a truly hung fetch errors + retries + fails cleanly with no leaked stream. Update `CLAUDE.md` (remove the watchdog notes) + the `loop-model-call-hang-and-cancel` memory. *`loop.test.ts`: a slow tool round-trip completes (no loop deadline on tool execution). `request-timeout.test.ts`: hung fetch → ETIMEDOUT → SDK retries → clean fail (no leaked stream) + real teardown + user-abort passthrough. `CLAUDE.md`/`TESTING.md`/stale comments updated. The `loop-model-call-hang-and-cancel` memory lives outside the repo (`~/.claude`) — flagged in the PR as a post-merge update.*
+
+---

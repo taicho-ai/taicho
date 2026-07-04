@@ -220,7 +220,8 @@ complete summary.
   blocker was timing: the `agent-flow` delegation returns sub-second, so a child's pane "flashes
   faster than a recorded frame." The scenario therefore uses a **slow-mode e2e model**
   (`src/core/e2e-model.ts` `squad-panes` mode) that **holds the child's model call in-flight ~4s**
-  (fixed delay, overridable via `TAICHO_E2E_SLOW_MS`; the loop's 120s idle watchdog dwarfs it). The
+  (fixed delay, overridable via `TAICHO_E2E_SLOW_MS`; well under the provider fetch's 120s transport
+  deadline — Plan 12 removed the loop-level idle watchdog). The
   hold is in the **model, never the tape** — during the window root is `delegating` (its delegate_task
   tool blocks on the child) and proof-agent is `thinking` (its held call runs), so both strings appear
   only on the live surfaces (bar + panes), never in the scrollback breadcrumb. The tape's two gates —
