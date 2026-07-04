@@ -164,6 +164,13 @@ export async function runHeadless(
     goal: string;
     agent?: string;
     approve?: ApprovalMode;
+    // Defaults to "user": an EXPLICIT `taicho run "<goal>"` is a real user turn and is audited into the
+    // agent's conversation ledger + boot-replay cache identically to the REPL. Scheduler fires (cron /
+    // interval / watch, and `taicho schedule run`) pass a distinct `schedule:<id>` marker so the run
+    // still gets full run evidence (trace/transcript) but is EXCLUDED from the conversation audit —
+    // mirroring how a background dispatch cascade (triggeredBy = taskId) is excluded. Without this every
+    // autonomous fire polluted the ledger and replayed as prior "conversation" on the next launch.
+    triggeredBy?: string;
     out?: (line: string) => void;
     signal?: AbortSignal;
     input?: NodeJS.ReadableStream;
@@ -214,7 +221,7 @@ export async function runHeadless(
   const res = await executeRun(deps, {
     agent,
     messages: [{ role: "user", content: opts.goal }],
-    triggeredBy: "user",
+    triggeredBy: opts.triggeredBy ?? "user",
   });
 
   const { outcome, tokens, costUsd } = res.trace;

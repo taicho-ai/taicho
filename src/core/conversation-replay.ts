@@ -33,7 +33,9 @@ export const DEFAULT_REPLAY_KEEP_TURNS = 6;
 const SUMMARY_MARKER = "[CONVERSATION COMPACTION]";
 const MAX_SUMMARY_CHARS = 2000;
 const TURN_GIST_CHARS = 220;
-const MAX_FOLD_LINES = 40;
+// Headroom reserved (chars) for the header + a possible one-line elision note, so the character budget
+// below never truncates either of them mid-string.
+const SUMMARY_RESERVE_CHARS = 140;
 
 export interface ReplayCompaction {
   messages: ModelMessage[];   // [summary message?] + recent-K turns VERBATIM
@@ -52,23 +54,44 @@ function gist(content: unknown): string {
 
 /** Build the visible, deterministic rolling-summary body from the folded (older) messages. No model
  *  call — pure extraction, mirroring core/compaction.ts's marker-led shape. Pairs each folded user
- *  message with the assistant reply that follows it. */
+ *  message with the assistant reply that follows it.
+ *
+ *  Bounded by CHARACTERS (not a fixed line count), filling from the MOST RECENT folded turns — the ones
+ *  closest to the kept verbatim tail, so most relevant for continuity. Any older overflow is NOTED with
+ *  an explicit elision line, never silently dropped. (Plan 05 Ph3 follow-up: the old code capped at the
+ *  OLDEST ~39 gists and lost every folded turn after them — the more-recent, more-relevant folded turns
+ *  vanished without a trace. Now every folded turn is either gisted or accounted for in the count.) */
 function buildReplaySummary(folded: ModelMessage[], foldedTurns: number): string {
-  const lines: string[] = [
+  const header =
     `${SUMMARY_MARKER} Folded ${foldedTurns} earlier turn${foldedTurns === 1 ? "" : "s"} of this ` +
-      `conversation. The recent turns replay verbatim below; the ledger keeps the full record. ` +
-      `Any artifacts are referenced by handle (read_artifact for the body).`,
-  ];
-  for (let i = 0; i < folded.length && lines.length < MAX_FOLD_LINES; i++) {
+    `conversation. The recent turns replay verbatim below; the ledger keeps the full record. ` +
+    `Any artifacts are referenced by handle (read_artifact for the body).`;
+  // One gist line per folded USER turn (paired with the assistant reply that followed it), oldest→newest.
+  const gists: string[] = [];
+  for (let i = 0; i < folded.length; i++) {
     const m = folded[i];
-    if (m.role === "user") {
-      const you = gist(m.content);
-      const next = folded[i + 1];
-      const reply = next && next.role === "assistant" ? gist(next.content) : "";
-      lines.push(reply ? `· you: ${you}  →  ${reply}` : `· you: ${you}`);
-    }
+    if (m.role !== "user") continue;
+    const you = gist(m.content);
+    const next = folded[i + 1];
+    const reply = next && next.role === "assistant" ? gist(next.content) : "";
+    gists.push(reply ? `· you: ${you}  →  ${reply}` : `· you: ${you}`);
   }
-  return lines.join("\n").slice(0, MAX_SUMMARY_CHARS);
+  // Fill from the newest folded gist backwards while the character budget (minus header/elision reserve)
+  // holds; whatever doesn't fit is the OLDEST overflow and is reported, not lost.
+  const kept: string[] = [];
+  let used = header.length + SUMMARY_RESERVE_CHARS;
+  for (let i = gists.length - 1; i >= 0; i--) {
+    if (used + gists[i]!.length + 1 > MAX_SUMMARY_CHARS) break;
+    kept.unshift(gists[i]!);
+    used += gists[i]!.length + 1;
+  }
+  const elided = gists.length - kept.length;
+  const lines = [header];
+  if (elided > 0) {
+    lines.push(`· (… ${elided} older folded turn${elided === 1 ? "" : "s"} elided — full record in the ledger …)`);
+  }
+  lines.push(...kept);
+  return lines.join("\n");
 }
 
 /** Deterministically fold the OLDEST turns into ONE rolling-summary message; keep the recent

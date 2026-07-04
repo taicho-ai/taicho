@@ -200,7 +200,9 @@ if (cli.command?.kind === "run") {
 if (cli.command?.kind === "schedule") {
   const hd = { ws, db, model: initial.model, resolveModel: initial.resolveModel, priceUsd: initial.priceUsd, configDefaults: config.defaults, mcp, embed: embedder?.embed, deckLedger };
   const r = await runScheduleCli(
-    { ws, out: (l) => process.stdout.write(l + "\n"), fire: (s) => runHeadless(hd, { goal: s.goal, agent: s.agent, approve: s.approve }) },
+    // `schedule run` is the same UNATTENDED path a live scheduled fire uses — mark it schedule:<id> so it
+    // is EXCLUDED from the target agent's conversation ledger + boot-replay cache (still gets run evidence).
+    { ws, out: (l) => process.stdout.write(l + "\n"), fire: (s) => runHeadless(hd, { goal: s.goal, agent: s.agent, approve: s.approve, triggeredBy: `schedule:${s.id}` }) },
     cli.command.args,
   );
   if (mcp) await mcp.closeAll().catch((e) => log.warn("mcp closeAll failed", e));

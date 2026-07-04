@@ -277,7 +277,10 @@ export function App(props: {
     try {
       const res = await runHeadless(
         { ws: props.ws, db: props.db, model: activeModel, resolveModel, priceUsd, configDefaults: props.configDefaults, mcp: props.mcp, embed: props.embed, deckLedger: props.deckLedger },
-        { goal: s.goal, agent: s.agent, approve: s.approve, out: (l) => say({ kind: "system", text: `  ${l}` }) },
+        // triggeredBy: schedule:<id> keeps this UNATTENDED fire OUT of the target agent's conversation
+        // ledger + boot-replay cache (it still gets full run evidence). Otherwise every cron/interval/watch
+        // fire appended a user+assistant pair and replayed as prior "conversation" on the next launch.
+        { goal: s.goal, agent: s.agent, approve: s.approve, triggeredBy: `schedule:${s.id}`, out: (l) => say({ kind: "system", text: `  ${l}` }) },
       );
       // Record the outcome of this fire (lastRunId/lastStatus). The runner already advanced cadence.
       updateSchedule(props.ws, s.id, { lastRunId: res.runId, lastStatus: res.outcome ?? (res.ok ? "completed" : "failed") });

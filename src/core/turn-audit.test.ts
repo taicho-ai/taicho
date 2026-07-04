@@ -54,6 +54,29 @@ test("the seam fires once per USER turn — ledger + task, guarded off for child
   expect(loadLedger(ws, "root").length).toBe(2); // still unchanged — ingest is guarded off
 });
 
+test("a PRE-RUN throw (resolveModel) settles the OPEN turn — no dangling submitted turn or running task", async () => {
+  const { ws, db } = await boot();
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text("never reached")) as any });
+  const root = await loadAgent(ws, "root");
+  // recordUserTurn opens a `submitted` ledger turn + a `running` task BEFORE the model is resolved; a
+  // throwing resolveModel (the real OpenRouter/explicit-model guard shape) used to strand both — a
+  // `submitted` turn with no reply and a `running` task that never closes. The seam must settle it.
+  const deps = makeDeps({ ws, db, model, resolveModel: () => { throw new Error("model misconfigured"); } });
+  await expect(
+    executeRun(deps, { agent: root, messages: [{ role: "user", content: "do it" }], triggeredBy: "user" }),
+  ).rejects.toThrow("model misconfigured");
+
+  const led = loadLedger(ws, "root");
+  expect(led.length).toBe(2);                                              // submitted user + terminal assistant
+  expect(led[0]).toMatchObject({ role: "user", content: "do it", status: "submitted" });
+  expect(led[1]).toMatchObject({ role: "assistant", status: "failed" });   // closed, not left dangling
+  expect(String(led[1].content)).toContain("model misconfigured");         // the error is recorded
+  // the task the seam opened is settled to `failed`, NOT left `running` for boot reconciliation to sweep
+  expect(readTaskState(ws, taskIdForRun(led[0].runId))?.status).toBe("failed");
+  // a failed turn is EXCLUDED from replay, so the boot-replay cache stays empty
+  expect(loadThread(ws, "root")).toEqual([]);
+});
+
 test("a failed user turn is recorded in the ledger but EXCLUDED from replay (append-only truth)", async () => {
   const { ws, db } = await boot();
   const failing = new MockLanguageModelV3({ doGenerate: (() => { throw new Error("boom"); }) as any });
