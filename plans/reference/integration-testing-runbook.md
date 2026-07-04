@@ -33,6 +33,12 @@ vhs --version           # verify — any 0.7+ has Wait+Screen
 bun run build           # produces dist/taicho (the binary under test)
 ```
 
+**Installed & smoke-tested on this machine 2026-07-04** (vhs 0.11.0, ttyd 1.7.7): a minimal
+`echo` tape records to mp4 successfully. **Landmine found in that smoke test:** vhs spawns a
+local ttyd web server — a sandboxed shell that blocks localhost listening fails with
+`could not open ttyd: navigation failed: net::ERR_CONNECTION_REFUSED`. If you hit that error,
+run the command outside the sandbox (it needs no elevated permissions, just a local port).
+
 If `brew install vhs` fails, STOP and report — do not improvise an asciinema fallback without
 the captain's go-ahead (it's a recorded fallback in `e2e-evidence.md` §4, but it changes the
 harness shape).
@@ -241,6 +247,7 @@ wrapper exits 1 and the manifest records `pass:false` with expected/actual — t
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `vhs: command not found` / ttyd errors | tooling not installed | §1; STOP and report if brew fails |
+| `could not open ttyd: … ERR_CONNECTION_REFUSED` | sandboxed shell blocks vhs's local ttyd server port | run outside the sandbox (§1 note) |
 | Wait+Screen times out at boot | binary crashed in the temp ws — boot failures print `taicho: …` and exit | run `TAICHO_E2E_MODEL=agent-flow <binary>` manually in a scratch dir; read the line |
 | Wait+Screen times out mid-flow | regex doesn't match rendered text (markdown styling can split lines) | check the screenshot/video of the failed run; loosen the regex to a stable substring |
 | Binary uses real provider instead of e2e model | `TAICHO_E2E_MODEL` didn't reach the process | it's set in BOTH the wrapper env and the typed command line — check the tape actually typed it |
