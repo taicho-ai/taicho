@@ -69,9 +69,14 @@ issues tsc won't).
 - **`src/store/`** — persistence: `config.ts` (provider/model/auth resolution + `taicho.yaml`),
   `db.ts` (SQLite), `roster.ts`, `thread.ts`, `trace.ts`, `policy.ts`, `files.ts`, `vectors.ts`,
   `task-state.ts` (persistent task queue: `tasks/*.json` canon + a rebuildable `tasks` DB index;
-  chat turns + background dispatches, `reconcileTasks`/`reindexTasks` on boot).
+  chat turns + background dispatches, `reconcileTasks`/`reindexTasks` on boot),
+  `artifacts.ts` (addressable, versioned, immutable-per-version hand-off store over `artifacts/`;
+  `gcArtifacts` archives unreferenced old versions, keep-latest-N + lineage/trace-safe),
+  `annotations.ts` (Plan 01 Ph4 **feedback & revision**: append-only `artifacts/<id>/annotations.jsonl` —
+  feedback pinned to a version; an OPEN annotation rides an input artifact into a revision run; a Plan 06
+  verification verdict is an annotation like any other).
 - **`src/coaching/`** — corrections → durable, conditional, approval-gated policy notes.
-- **`src/schemas/`** — zod schemas (`agent`, `brief`, `policy`, `trace`).
+- **`src/schemas/`** — zod schemas (`agent`, `brief`, `policy`, `trace`, `artifact`, `annotation`).
 
 ## Observability — the `/trace` waterfall (Plan 02)
 

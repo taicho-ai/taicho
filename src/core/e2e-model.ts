@@ -105,8 +105,56 @@ function conversationAuditModel(): Model {
   }) as unknown as Model;
 }
 
+/** artifact-handoff (Plan 01): prove the hand-off store end-to-end through the real binary.
+ *  root creates a researcher (agent A) and a writer (agent B), then wires A→B BY REFERENCE:
+ *    - A (researcher) save_artifacts a dossier whose body carries a distinctive payload marker.
+ *    - root delegates to B (writer) with inputArtifacts:[dossier@v1] — a HANDLE, not the body.
+ *    - B read_artifacts the dossier (the consumer legitimately pulls it) and save_artifacts a brief
+ *      linked back via parents:[dossier@v1].
+ *    - root's own context only ever sees handles + thin summaries — the dossier BODY payload never
+ *      enters root's transcript. The scenario asserts exactly that (parent context stays thin).
+ *  One shared counter drives the interleaved root/child turns in execution order (delegate BLOCKS, so
+ *  the child's turns run inline between the two root delegations — a deterministic linear script). */
+export const DOSSIER_PAYLOAD = "DOSSIER_PAYLOAD_XYZZY_do_not_inline_into_the_parent_context";
+function artifactHandoffModel(): Model {
+  let n = 0;
+  return new MockLanguageModelV3({
+    provider: "taicho-e2e",
+    modelId: "artifact-handoff",
+    doStream: async () => {
+      n += 1;
+      // root run 1 — create agent A (researcher)
+      if (n === 1) return call("create_agent", {
+        id: "researcher", role: "Researches topics and writes dossiers",
+        identity: "You are researcher. Produce a dossier artifact and hand it off by reference.",
+      });
+      if (n === 2) return text("Created researcher.");
+      // root run 2 — create agent B (writer)
+      if (n === 3) return call("create_agent", {
+        id: "writer", role: "Turns dossiers into briefs",
+        identity: "You are writer. Read the input dossier by reference and produce a brief.",
+      });
+      if (n === 4) return text("Created writer.");
+      // root run 3 — A produces, root wires A→B by reference, B consumes + derives
+      if (n === 5) return call("delegate_task", { to: "researcher", goal: "Produce a research dossier on foo." });
+      if (n === 6) return call("save_artifact", {
+        id: "dossier", title: "Foo dossier", type: "dossier",
+        summary: "a short summary of foo (safe to carry in context)",
+        body: `# Foo dossier\n\n${DOSSIER_PAYLOAD}\n\n(...the heavy body that must NOT pollute the parent...)`,
+      });
+      if (n === 7) return text("Saved dossier@v1.");
+      if (n === 8) return call("delegate_task", { to: "writer", goal: "Turn the dossier into a one-paragraph brief.", inputArtifacts: ["dossier@v1"] });
+      if (n === 9) return call("read_artifact", { id: "dossier@v1", includeBody: true });
+      if (n === 10) return call("save_artifact", { id: "brief", title: "Foo brief", type: "brief", summary: "the brief derived from the dossier", body: "Foo, briefly: it is what the dossier says.", parents: ["dossier@v1"] });
+      if (n === 11) return text("Wrote brief@v1 from dossier@v1.");
+      return text("Root wired researcher to writer by reference: brief@v1 from dossier@v1.");
+    },
+  }) as unknown as Model;
+}
+
 export function createE2eModel(mode: string | undefined): Model | null {
   if (mode === "agent-flow") return agentFlowModel();
   if (mode === "conversation-audit") return conversationAuditModel();
+  if (mode === "artifact-handoff") return artifactHandoffModel();
   return null;
 }
