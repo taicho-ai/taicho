@@ -52,6 +52,7 @@ function guardModelCall<T>(
 export interface LoopResult {
   text: string;
   toolCalls: Record<string, number>;
+  transcript: { ts: string; kind: string; iteration?: number; data?: unknown }[];
   tokens: number;
   inputTokens: number;
   outputTokens: number;
@@ -85,12 +86,13 @@ export async function runLoop(opts: {
   modelCallTimeoutMs?: number;
 }): Promise<LoopResult> {
   const counts: Record<string, number> = {};
+  const transcript: LoopResult["transcript"] = [];
   let tokens = 0, inputTokens = 0, outputTokens = 0, costUsd = 0, iterations = 0;
   const messages = [...opts.messages];
   const cap = opts.agent.budgets;
 
   const done = (over: Partial<LoopResult> & { text: string }): LoopResult => ({
-    toolCalls: counts, tokens, inputTokens, outputTokens, costUsd, iterations,
+    toolCalls: counts, transcript, tokens, inputTokens, outputTokens, costUsd, iterations,
     exhausted: false, aborted: false, ...over,
   });
 
@@ -112,6 +114,7 @@ export async function runLoop(opts: {
     };
     let out: ModelOut;
     try {
+      transcript.push({ ts: new Date().toISOString(), kind: "model_request", iteration: iterations + 1, data: { messageCount: messages.length } });
       // guardModelCall wraps the call so a wedged stream (no bytes/close/error, abort ignored) can't
       // hang the loop: it returns on completion, on abort, OR after an idle timeout. onChunk pings the
       // idle watchdog so a long-but-progressing response is never falsely killed.
@@ -138,11 +141,19 @@ export async function runLoop(opts: {
         return { text: r.text, usage: r.usage, toolCalls: r.toolCalls, responseMessages: r.response.messages, providerMetadata: r.providerMetadata };
       }, opts.signal, opts.modelCallTimeoutMs ?? DEFAULT_MODEL_IDLE_TIMEOUT_MS);
     } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      transcript.push({ ts: new Date().toISOString(), kind: "model_error", iteration: iterations + 1, data: { error } });
       if (opts.signal?.aborted) return done({ text: "[cancelled]", aborted: true });
       if (e instanceof ModelStalledError) return done({ text: "[timed out]", error: e.message });
-      return done({ text: "[error]", error: e instanceof Error ? e.message : String(e) });
+      return done({ text: "[error]", error });
     }
     const { text, usage, toolCalls, responseMessages, providerMetadata } = out;
+    transcript.push({
+      ts: new Date().toISOString(),
+      kind: "model_response",
+      iteration: iterations + 1,
+      data: { text, usage, toolCalls, responseMessages },
+    });
 
     const inTok = usage?.inputTokens ?? 0, outTok = usage?.outputTokens ?? 0;
     inputTokens += inTok;
@@ -158,6 +169,7 @@ export async function runLoop(opts: {
     }
     for (const tc of toolCalls) {
       counts[tc.toolName] = (counts[tc.toolName] ?? 0) + 1;
+      transcript.push({ ts: new Date().toISOString(), kind: "tool_call", iteration: iterations + 1, data: tc });
       opts.onStep?.({ tool: tc.toolName });
     }
     messages.push(...responseMessages);

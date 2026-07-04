@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, existsSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockLanguageModelV3, mockValues, simulateReadableStream } from "ai/test";
@@ -195,6 +195,10 @@ test("a thrown model error yields a failed-outcome trace", async () => {
   const res = await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "x" }], triggeredBy: "user" });
   expect(res.trace.outcome).toBe("failed");
   expect(res.text).toContain("boom");
+  const dir = paths.runRecordDir(ws, res.runId);
+  expect(existsSync(join(dir, "input.json"))).toBe(true);
+  expect(readFileSync(join(dir, "failure.md"), "utf8")).toContain("boom");
+  expect(readFileSync(join(dir, "transcript.jsonl"), "utf8")).toContain("model_error");
 });
 
 test("delegate_task is denied when the caller's ACL forbids the target", async () => {

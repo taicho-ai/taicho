@@ -21,6 +21,7 @@ import { createMcpManager, type McpManager } from "./core/mcp/manager";
 import { readMcpStore } from "./store/mcp-store";
 import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
+import { createE2eModel } from "./core/e2e-model";
 
 const ws = process.cwd();
 const config = await loadConfig(ws);
@@ -68,7 +69,10 @@ const mcp: McpManager | undefined = config.mcp?.enabled === false
 // foreground process group. Async cleanup can't run in a process "exit" handler, so we don't use one.)
 if (mcp) process.on("SIGTERM", () => { void mcp.closeAll().finally(() => process.exit(0)); });
 
-const authSource = resolveAuth({ config, loadProfile: () => readProfile() });
+const e2eModel = createE2eModel(process.env.TAICHO_E2E_MODEL);
+const authSource = e2eModel
+  ? { kind: "env" as const, provider: "openai" as const, model: `e2e:${process.env.TAICHO_E2E_MODEL}` }
+  : resolveAuth({ config, loadProfile: () => readProfile() });
 
 // Transparency: a signed-in subscription is preferred over env keys; say so when both are present.
 if (authSource.kind === "oauth-openai-codex" && (process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY)) {
@@ -84,6 +88,13 @@ export interface BuiltAuth {
 /** Map an AuthSource -> the model/resolver/pricer the REPL should use. Pure aside from provider
  *  construction; called both at boot and after a live /login so the REPL re-arms without restart. */
 function buildFromAuth(src: AuthSource): BuiltAuth {
+  if (e2eModel) {
+    return {
+      model: e2eModel,
+      resolveModel: () => ({ model: e2eModel, modelId: `e2e:${process.env.TAICHO_E2E_MODEL}` }),
+      priceUsd: () => 0,
+    };
+  }
   if (src.kind === "env") {
     // A config-supplied default model is honored for the top-level fallback model too — needed for
     // OpenRouter, whose env-resolved src.model may be empty (it carries no default slug).

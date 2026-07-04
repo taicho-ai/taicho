@@ -10,7 +10,7 @@ import { render } from "ink-testing-library";
 import { MockLanguageModelV3, mockValues } from "ai/test";
 import { simulateReadableStream } from "ai";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { App } from "./App";
@@ -18,6 +18,8 @@ import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadIndex, seedLibrarian } from "../store/roster";
 import { listTraces } from "../store/trace";
+import { loadContext, loadLedger } from "../store/conversation";
+import { readTaskState, taskIdForRun } from "../store/task-state";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { KbNode } from "../schemas/knowledge";
@@ -221,6 +223,32 @@ test("a chat message runs end-to-end: renders the reply and persists a completed
   const done = listTraces(ws, "root").filter((t) => t.outcome === "completed");
   expect(done.length).toBeGreaterThan(0);                            // the run actually executed…
   expect(done.at(-1)!.tokens).toBeGreaterThan(0);                    // …and metered tokens
+});
+
+test("failed chat turn is audited but excluded from future context", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const failing = new MockLanguageModelV3({ doGenerate: (() => { throw new Error("forced failure"); }) as any });
+  const { ws, props } = await setup({ model: failing });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "please do the impossible", ENTER);
+  await waitFor(lastFrame, "failed");
+
+  const failed = listTraces(ws, "root").find((t) => t.outcome === "failed");
+  expect(failed).toBeTruthy();
+  expect(loadLedger(ws, "root").map((t) => t.content)).toContain("please do the impossible");
+  expect(loadLedger(ws, "root").some((t) => t.status === "failed" && String(t.content).includes("forced failure"))).toBe(true);
+
+  const context = loadContext(ws, "root");
+  expect(context.includedTurns).toEqual([]);
+  expect(context.excludedTurns.length).toBe(2);
+
+  const runDir = paths.runRecordDir(ws, failed!.id);
+  expect(existsSync(join(runDir, "input.json"))).toBe(true);
+  expect(readFileSync(join(runDir, "failure.md"), "utf8")).toContain("forced failure");
+  expect(readFileSync(join(runDir, "transcript.jsonl"), "utf8")).toContain("model_error");
+
+  const task = readTaskState(ws, taskIdForRun(failed!.id));
+  expect(task?.status).toBe("failed");
 });
 
 test("shows the animated run status (spinner + activity + elapsed + hint) while a run is in flight", async () => {

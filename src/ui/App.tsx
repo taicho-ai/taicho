@@ -11,6 +11,8 @@ import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/r
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy } from "../store/policy";
 import { appendTurn, shouldPersistTurn } from "../store/thread";
+import { appendLedgerTurn, newTurnId, recordContextDecision, statusFromOutcome } from "../store/conversation";
+import { createTaskState, taskIdForRun, updateTaskFromTrace } from "../store/task-state";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { isStdioServer } from "../store/config";
@@ -141,6 +143,7 @@ export function App(props: {
   const streamFromRef = useRef("");
   const streamedRef = useRef(false);
   const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
+  const pendingAuditRef = useRef<{ agent: string; text: string; userTurnId?: string; runId?: string; taskId?: string } | null>(null);
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
@@ -218,6 +221,24 @@ export function App(props: {
     configDefaults: props.configDefaults,
     mcp: props.mcp,
     embed: props.embed,
+    onRunStart: ({ runId, agent, triggeredBy }) => {
+      const pendingAudit = pendingAuditRef.current;
+      if (!pendingAudit || triggeredBy !== "user" || agent !== pendingAudit.agent) return;
+      const userTurnId = newTurnId(agent, runId, "user");
+      pendingAudit.userTurnId = userTurnId;
+      pendingAudit.runId = runId;
+      pendingAudit.taskId = taskIdForRun(runId);
+      appendLedgerTurn(props.ws, agent, {
+        turnId: userTurnId,
+        runId,
+        timestamp: new Date().toISOString(),
+        agent,
+        role: "user",
+        content: pendingAudit.text,
+        status: "submitted",
+      });
+      createTaskState(props.ws, { runId, title: pendingAudit.text, userTurnId });
+    },
   });
 
   const submit = async (value: string) => {
@@ -245,11 +266,39 @@ export function App(props: {
     streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
     try {
       if (parsed.kind === "chat") {
+        pendingAuditRef.current = { agent: "root", text: parsed.text };
         thread.current.push({ role: "user", content: parsed.text });
         const root = await loadAgent(props.ws, "root");
         const res = await executeRun(deps(activeModel), { agent: root, messages: [...thread.current], triggeredBy: "user" });
         flushStream(); // commit the final streamed turn; only fall back to res.text if nothing streamed
         if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text, rendered: true });
+        const audit = pendingAuditRef.current;
+        const assistantTurnId = newTurnId("root", res.runId, "assistant");
+        appendLedgerTurn(props.ws, "root", {
+          turnId: assistantTurnId,
+          runId: res.runId,
+          timestamp: new Date().toISOString(),
+          agent: "root",
+          role: "assistant",
+          content: res.text,
+          status: statusFromOutcome(res.trace.outcome),
+        });
+        if (audit?.userTurnId) {
+          const include = res.trace.outcome === "completed";
+          recordContextDecision(props.ws, "root", {
+            include,
+            turnId: audit.userTurnId,
+            runId: res.runId,
+            reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
+          });
+          recordContextDecision(props.ws, "root", {
+            include,
+            turnId: assistantTurnId,
+            runId: res.runId,
+            reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
+          });
+          updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)));
+        }
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
           if (shouldPersistTurn(res.trace.outcome)) {
@@ -263,11 +312,39 @@ export function App(props: {
         }
         setRoster(loadIndex(props.db)); // create_agent may have grown the squad
       } else {
+        pendingAuditRef.current = { agent: parsed.to, text: parsed.text };
         const target = await loadAgent(props.ws, parsed.to).catch(() => null);
         if (!target) { say({ kind: "system", text: `No agent "${parsed.to}". Try /agents, or describe one to root.` }); return; }
         const res = await executeRun(deps(activeModel), { agent: target, messages: [{ role: "user", content: parsed.text }], triggeredBy: "user" });
         flushStream();
         if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text, rendered: true });
+        const audit = pendingAuditRef.current;
+        const assistantTurnId = newTurnId(target.id, res.runId, "assistant");
+        appendLedgerTurn(props.ws, target.id, {
+          turnId: assistantTurnId,
+          runId: res.runId,
+          timestamp: new Date().toISOString(),
+          agent: target.id,
+          role: "assistant",
+          content: res.text,
+          status: statusFromOutcome(res.trace.outcome),
+        });
+        if (audit?.userTurnId) {
+          const include = res.trace.outcome === "completed";
+          recordContextDecision(props.ws, target.id, {
+            include,
+            turnId: audit.userTurnId,
+            runId: res.runId,
+            reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
+          });
+          recordContextDecision(props.ws, target.id, {
+            include,
+            turnId: assistantTurnId,
+            runId: res.runId,
+            reason: include ? "completed_turn" : `${res.trace.outcome}_run_not_safe_as_context`,
+          });
+          updateTaskFromTrace(props.ws, audit.taskId ?? taskIdForRun(res.runId), res.trace, res.trace.delegatedOut.map((id) => readTrace(props.ws, id)));
+        }
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
       }
@@ -275,7 +352,7 @@ export function App(props: {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
       // explicit-model guard for a misconfigured OpenRouter agent. Surface it instead of crashing Ink.
       say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
-    } finally { setBusy(false); }
+    } finally { pendingAuditRef.current = null; setBusy(false); }
   };
 
   const runSlash = async (cmd: string, arg: string) => {

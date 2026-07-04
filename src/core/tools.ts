@@ -78,6 +78,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         try {
           const child = await ctx.runChild({ to, goal, context });
           ctx.delegatedOut.push(child.runId);
+          ctx.childTraces.push(child.trace);
           const childAgg = child.trace.aggregate ?? { tokens: child.trace.tokens, costUsd: child.trace.costUsd };
           ctx.childSpend.tokens += childAgg.tokens;
           ctx.childSpend.costUsd += childAgg.costUsd ?? 0;

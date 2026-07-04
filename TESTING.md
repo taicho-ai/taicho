@@ -17,6 +17,8 @@ bun run test:e2e               # Layer 2 — builds, then runs tui-test
 ```
 There is no `npm test` script — use `bun test` (Bun's built-in runner discovers `src/**/*.test.ts`).
 
+For the focused real-binary agent workflow and recording evidence, see [CLI_TESTING.md](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/CLI_TESTING.md).
+
 ---
 
 ## Layer 1 — unit + in-process E2E (`bun test`)

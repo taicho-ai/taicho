@@ -14,6 +14,7 @@ import { getActiveSkills } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
 import { createAgent, loadAgent, loadIndex, type NewAgentDraft } from "../store/roster";
 import { reserveRunId, writeTrace } from "../store/trace";
+import { appendRunTranscript, writeChildRuns, writeRunFailure, writeRunFinal, writeRunInput } from "../store/run-transcript";
 import type { ProposalDraft } from "../coaching/proposal";
 import { pricerFor } from "./pricing";
 import type { TaichoConfig } from "../store/config";
@@ -77,6 +78,7 @@ export interface RunContext {
   notes: string[];
   workItems: { n: number };
   childSpend: { tokens: number; costUsd: number };
+  childTraces: RunTrace[];
   delegationGuard: (to: string) => { ok: true } | { ok: false; error: string };
 }
 
@@ -95,6 +97,7 @@ export interface RunDeps {
   globalPolicyCache?: { notes?: PolicyNote[] };
   mcp?: McpManager;
   embed?: (text: string) => Promise<Float32Array>; // semantic KB embedder; undefined ⇒ keyword+graph
+  onRunStart?: (info: { runId: string; agent: string; triggeredBy: string; messages: ModelMessage[] }) => void;
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -111,6 +114,7 @@ export function makeDeps(opts: {
   globalPolicyCache?: { notes?: PolicyNote[] };
   mcp?: McpManager;
   embed?: (text: string) => Promise<Float32Array>;
+  onRunStart?: RunDeps["onRunStart"];
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
@@ -121,6 +125,7 @@ export function makeDeps(opts: {
     resolveModel: opts.resolveModel, configDefaults: opts.configDefaults,
     globalPolicyCache: opts.globalPolicyCache ?? {},
     mcp: opts.mcp, embed: opts.embed,
+    onRunStart: opts.onRunStart,
   };
 }
 
@@ -139,6 +144,15 @@ export async function executeRun(
   const runId = reserveRunId(deps.ws, opts.agent.id);
   const started = new Date().toISOString();
   const t0 = performance.now();
+  deps.onRunStart?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, messages: opts.messages });
+  writeRunInput(deps.ws, runId, {
+    runId,
+    triggeredBy: opts.triggeredBy,
+    agent: opts.agent.id,
+    task: opts.brief?.goal ?? "(chat)",
+    messagesPassedToModel: opts.messages,
+    parentRunId: opts.brief?.fromRun,
+  });
 
   const ctx: RunContext = {
     ws: deps.ws, db: deps.db, runId, agentId: opts.agent.id, embed: deps.embed,
@@ -171,6 +185,7 @@ export async function executeRun(
     notes: [],
     workItems: { n: 0 },
     childSpend: { tokens: 0, costUsd: 0 },
+    childTraces: [],
     delegationGuard: (to) => {
       if (!canDelegate(opts.agent, to)) return { ok: false, error: `not permitted to delegate to "${to}"` };
       if (!loadIndex(deps.db).some((r) => r.id === to)) return { ok: false, error: `no agent "${to}"` };
@@ -281,6 +296,10 @@ export async function executeRun(
     notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };
+  for (const event of result.transcript) appendRunTranscript(deps.ws, runId, event);
+  writeChildRuns(deps.ws, runId, ctx.childTraces);
+  writeRunFinal(deps.ws, runId, result.error ? `error: ${result.error}` : result.text);
+  writeRunFailure(deps.ws, runId, trace, result.error ? `error: ${result.error}` : result.text);
   writeTrace(deps.ws, trace);
   return { runId, text: result.error ? `error: ${result.error}` : result.text, trace };
 }

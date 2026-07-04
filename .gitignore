@@ -4,9 +4,15 @@ dist/
 *.db-shm
 *.db-wal
 .env
+.envt
+.DS_Store
 agents/
 runs/
 artifacts/
 kb/
 skills/
+conversations/
+tasks/
+evidence/
+tui-traces/
 .tui-test/
