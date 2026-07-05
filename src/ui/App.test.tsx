@@ -1233,3 +1233,42 @@ test("/artifacts gc never archives a version handed off across a delegation edge
   expect(readArtifact(ws, "doc@v1")!.title).toBe("v1");
   expect(readArtifact(ws, "doc@v2")!.title).toBe("v2");
 });
+
+// ── Plan 15: completion action bar + artifact viewer ──
+
+test("Plan 15: a turn that produces artifacts shows the completion action bar; ⏎ opens the viewer", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("save_artifact", { id: "test-doc", title: "Test Document", body: "# Hello\n\nThis is the content." }),
+    finalText("Done. See artifact test-doc@v1."),
+  ) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "create a document", ENTER);
+  await waitFor(lastFrame, "View artifacts (1)");
+  expect(lastFrame()).toContain("Continue chatting");
+  expect(lastFrame()).toContain("←/→ move");
+
+  // ⏎ on "View artifacts" opens the viewer
+  await send(stdin, ENTER);
+  await waitFor(lastFrame, "Test Document");
+  expect(lastFrame()).toContain("test-doc@v1");
+  expect(lastFrame()).toContain("root");
+  expect(lastFrame()).toContain("↑/↓ scroll");
+
+  // esc closes the viewer
+  await send(stdin, ESC);
+  await waitFor(lastFrame, "> ");
+});
+
+test("Plan 15: a turn with no artifacts shows no completion bar", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(finalText("just text, no artifacts")) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "say hi", ENTER);
+  await waitFor(lastFrame, "just text, no artifacts");
+  // No completion bar should appear
+  expect(lastFrame()).not.toContain("View artifacts");
+  expect(lastFrame()).not.toContain("Continue chatting");
+});
