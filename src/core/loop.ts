@@ -173,10 +173,42 @@ export async function runLoop(opts: {
       // Anthropic/OpenAI/OpenRouter went through generateText and rendered nothing live). We drain the
       // stream to completion and read the same aggregated fields generateText returned (text, usage,
       // toolCalls, response messages, providerMetadata), so the rest of the loop is unchanged.
-      // Plan 12: no watchdog wraps this. A hung request is bounded by the provider fetch's transport
-      // deadline (providers/request-timeout.ts) and retried via the AI SDK's own maxRetries; a wedged
-      // stream and a user abort both tear the real connection down. Errors flow to the catch below.
+      // Plan 12 (reopened): an idle timer that resets per stream chunk AND is disarmed during tool
+      // execution. Tools execute INSIDE consumeStream(), so a simple Promise.race would kill any tool
+      // longer than the deadline (the original watchdog bug). Instead:
+      // - The timer resets on each chunk (text-delta, tool-start, tool-end, etc.)
+      // - The timer is DISARMED when a tool-start chunk arrives (tool execution begins)
+      // - The timer is RE-ARMED when a tool-end chunk arrives (tool execution completes)
+      // - If no chunks arrive for `timeoutMs` while the timer is armed, the stream is hung
+      // This catches a genuinely hung stream (no chunks, no tool execution) without killing long tools.
       let streamErr: unknown;
+      let toolExecuting = false;
+      const timeoutMs = opts.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS;
+      // Create a promise that rejects when the idle timer fires
+      const idleTimeoutPromise = new Promise<never>((_, reject) => {
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const resetTimer = () => {
+          if (timer) clearTimeout(timer);
+          if (toolExecuting) return; // disarmed during tool execution
+          timer = setTimeout(() => {
+            const err = new Error(`model stream idle for ${timeoutMs}ms (no chunks, no tool execution)`);
+            (err as Error & { code?: string }).code = "ETIMEDOUT";
+            reject(err);
+          }, timeoutMs);
+        };
+        // Expose the reset function via a global (hacky but works for this scope)
+        (globalThis as any).__resetIdleTimer = resetTimer;
+        (globalThis as any).__setToolExecuting = (executing: boolean) => {
+          toolExecuting = executing;
+          if (executing && timer) {
+            clearTimeout(timer);
+            timer = null;
+          } else if (!executing) {
+            resetTimer();
+          }
+        };
+        resetTimer();
+      });
       const s = streamText({
         model: opts.model,
         messages,
@@ -190,26 +222,26 @@ export async function runLoop(opts: {
           ? { providerOptions: { openai: { instructions: opts.system, store: false } } }
           : { system: opts.system }),
         onError: ({ error }) => { streamErr = error; },
-        // Surface each text delta so the UI can render the response live as it streams (instead of all
-        // at once when the run returns).
-        onChunk: ({ chunk }) => { if (chunk.type === "text-delta") opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text }); },
+        // Surface each chunk so the UI can render the response live as it streams (instead of all
+        // at once when the run returns). Also reset the idle timer on each chunk.
+        onChunk: ({ chunk }) => {
+          (globalThis as any).__resetIdleTimer?.();
+          if (chunk.type === "text-delta") {
+            opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text });
+          } else if (chunk.type === "tool-call") {
+            // Tool execution is about to start — disarm the idle timer
+            (globalThis as any).__setToolExecuting?.(true);
+          } else if (chunk.type === "tool-result") {
+            // Tool execution completed — re-arm the idle timer
+            (globalThis as any).__setToolExecuting?.(false);
+          }
+        },
       });
-      // Plan 12 (reopened): the transport timeout on the fetch catches genuine hangs, but if the
-      // underlying stream ignores the abort signal, consumeStream() can still hang forever. Race
-      // consumeStream() against a deadline so the loop rejects/returns even when the stream never
-      // settles. The deadline matches the transport timeout so it only fires if the transport timeout
-      // failed to tear the stream down. This is scoped to the model-stream phase: tool execution
-      // happens AFTER the model finishes streaming, so a hung stream during the model phase is caught
-      // here; tool execution is not affected (it completes in seconds/minutes, not 120s+).
-      const timeoutMs = opts.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS;
-      const streamTimeout = new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          const err = new Error(`model stream consumption exceeded the ${timeoutMs}ms deadline (stream never settled)`);
-          (err as Error & { code?: string }).code = "ETIMEDOUT";
-          reject(err);
-        }, timeoutMs);
-      });
-      await Promise.race([s.consumeStream(), streamTimeout]);
+      // Race consumeStream() against the idle timeout
+      await Promise.race([s.consumeStream(), idleTimeoutPromise]);
+      // Clean up the global functions
+      delete (globalThis as any).__resetIdleTimer;
+      delete (globalThis as any).__setToolExecuting;
       if (streamErr) throw streamErr;
       out = {
         text: await s.text,
