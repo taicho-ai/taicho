@@ -169,6 +169,10 @@ const SQUAD_PANES_SLOW_MS = Number(process.env.TAICHO_E2E_SLOW_MS ?? 4000);
  *  segment are on screen long enough for VHS to `Wait+Screen` + screenshot. Same rationale as above. */
 const CONSISTENT_BLOCKS_SLOW_MS = Number(process.env.TAICHO_E2E_SLOW_MS ?? 4000);
 
+/** How long (ms) the artifact-viewer child holds its model call in-flight so the completion bar +
+ *  viewer are on screen long enough for VHS to `Wait+Screen` + screenshot. Same rationale as above. */
+const ARTIFACT_VIEWER_SLOW_MS = Number(process.env.TAICHO_E2E_SLOW_MS ?? 4000);
+
 /** squad-panes (Plan 10 Phase 5): the SLOW-MODE delegation that makes the split-pane view provable.
  *  Same shape as agent-flow (create proof-agent → approve → delegate → roll the proof up), but the
  *  child's single model call is HELD in-flight for SQUAD_PANES_SLOW_MS. During that window two agents
@@ -234,11 +238,50 @@ function consistentBlocksModel(): Model {
   }) as unknown as Model;
 }
 
+/** artifact-viewer (Plan 15): the SLOW-MODE delegation that makes the completion action bar + artifact
+ *  viewer provable. Same shape as squad-panes, but the child saves an artifact (so the completion bar
+ *  appears), and root names the handle (not the body). The tape opens the viewer to prove the markdown
+ *  body renders on screen. */
+function artifactViewerModel(): Model {
+  let n = 0;
+  return new MockLanguageModelV3({
+    provider: "taicho-e2e",
+    modelId: "artifact-viewer",
+    doStream: async () => {
+      n += 1;
+      // root run 1 — create proof-agent
+      if (n === 1) return call("create_agent", {
+        id: "proof-agent",
+        role: "Proof worker",
+        identity: "You are proof-agent. Save the deliverable as an artifact.",
+      });
+      if (n === 2) return text("Created proof-agent.");
+      // root run 2 — delegate (root stays `delegating`, blocked on the child below)
+      if (n === 3) return call("delegate_task", {
+        to: "proof-agent",
+        goal: "Save a proof document as an artifact.",
+      });
+      // the child saves an artifact — SLOW so the completion bar is visible
+      if (n === 4) return call("save_artifact", {
+        id: "proof-doc",
+        title: "Proof Document",
+        type: "document",
+        summary: "A proof that the artifact viewer works.",
+        body: "# Proof Document\n\nThis document proves the artifact viewer renders markdown bodies correctly.\n\n## Section 1\n\nThe completion action bar appeared after the run finished.\n\n## Section 2\n\nThe viewer opened on the newest artifact and rendered the full body.",
+      });
+      if (n === 5) return text("Saved proof-doc@v1.", ARTIFACT_VIEWER_SLOW_MS);
+      // root names the handle (not the body) — the completion bar makes it one keystroke away
+      return text("Done. See artifact proof-doc@v1.");
+    },
+  }) as unknown as Model;
+}
+
 export function createE2eModel(mode: string | undefined): Model | null {
   if (mode === "agent-flow") return agentFlowModel();
   if (mode === "conversation-audit") return conversationAuditModel();
   if (mode === "artifact-handoff") return artifactHandoffModel();
   if (mode === "squad-panes") return squadPanesModel();
   if (mode === "consistent-blocks") return consistentBlocksModel();
+  if (mode === "artifact-viewer") return artifactViewerModel();
   return null;
 }
