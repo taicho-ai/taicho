@@ -26,15 +26,7 @@ test("isViewMode guards the known modes", () => {
   expect(isViewMode("panes")).toBe(true);
   expect(isViewMode("bar")).toBe(true);
   expect(isViewMode("waterfall")).toBe(true);
-  expect(isViewMode("stream")).toBe(true); // Plan 13
   expect(isViewMode("nope")).toBe(false);
-});
-
-test("the Plan 13 `stream` view mode round-trips through disk", () => {
-  const ws = tmpWs();
-  setViewMode(ws, "stream");
-  expect(getViewMode(ws)).toBe("stream");
-  expect(readPrefs(ws).viewMode).toBe("stream");
 });
 
 test("a malformed prefs file falls back to the default instead of throwing", () => {

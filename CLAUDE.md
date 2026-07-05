@@ -39,14 +39,14 @@ issues tsc won't).
   `bun scripts/e2e-evidence.ts squad-panes` shows both panes + bar live during a delegation, driven by
   a **slow-mode e2e model** (`e2e-model.ts` `squad-panes` mode) that holds the child's model call
   in-flight ~4s so the pane doesn't flash faster than a recorded frame — see TESTING.md's Squad UI section.
-  `RollingStream.tsx` (Plan 13) is the **`/view stream`** surface: a fixed-height per-agent tail of the
-  live reply/work stream — only the last N lines (default 4, cap 5), older lines scroll off, never
-  growing. It is the reply/work channel the panes deliberately OMIT (echoing streamed reply text inside
-  a pane raced the scrollback reply channel — see TESTING.md's Squad UI note), so it lives behind its
-  own opt-in `/view stream` mode leaving the default `both` untouched. It folds the SAME `onStep` delta
-  events the bar/panes/live-trace consume into a bounded per-run buffer (no new engine plumbing) and is
-  **display-only**: it never feeds back into transcript/ledger/boot-replay (Plan 05 owns compaction —
-  this is a view, not a rewrite of the record; the reply still commits to scrollback via `streamRef`).
+  `AgentBlock.tsx` + `OperationView.tsx` (Plan 13 corrected) are the **consistent agent blocks**: the
+  default squad view for delegated work. Every sub-agent is rendered as a single block (header + fixed
+  2-line body) that NEVER changes shape across its lifecycle — live/done/failed variants change only
+  the state label, rail colour, and body content. The block IS the record: the block you watched live
+  is the exact block that settles into scrollback. Root's own direct reply still uses the scrollback
+  (the conversational reply channel); blocks are for the squad. `shift+tab` enters focus mode (↑↓
+  navigate, ⏎ opens the operation view drill-in, esc returns). The `/view stream` mode has been
+  **deleted** — consistent blocks are the default, not an opt-in.
 - **`src/core/`** — the engine:
   - `loop.ts` — the single metered agent loop. Model proposes, config disposes: budgets/caps and
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.
