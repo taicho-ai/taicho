@@ -6,7 +6,8 @@ import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCar
 import { QuestionCard } from "./QuestionCard";
 import { StatusBar } from "./StatusBar";
 import { SquadPanes, resolveLayout, type PaneEntry, type PaneFeedMap } from "./SquadPanes";
-import { RollingStream, MAX_ROLL_LINES, type StreamFeedMap } from "./RollingStream";
+import { AgentBlock, useBlockSettle, useBlockTicker, tailLines, type AgentBlockData } from "./AgentBlock";
+import { OperationView } from "./OperationView";
 import { TraceInspector } from "./TraceInspector";
 import { LiveWaterfall } from "./LiveWaterfall";
 import { parseInput } from "./input";
@@ -224,6 +225,7 @@ export function App(props: {
   const streamFromRef = useRef("");
   const streamedRef = useRef(false);
   const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
+  const streamRunIdRef = useRef<string | undefined>(undefined); // Plan 13: track which run is streaming (so flushStream can gate on root)
   // Plan 10 live status: statusRef is the authoritative per-run status map (dodges stale closures in
   // the rapid onStep stream); `statuses` is the rendered snapshot. Plan 02: `inspect` holds the
   // derived span tree while the waterfall inspector is open (it owns the keyboard via cardKeyRef).
@@ -257,28 +259,56 @@ export function App(props: {
     paneFeedRef.current = next;
     setPaneFeed(next);
   };
-  // Plan 13: per-run streamed-text tail for the rolling stream view (`/view stream`). Built off the
-  // SAME `delta` events the status map reads — no new engine plumbing. streamFeedRef is the
-  // authoritative accumulator (bounded to the last few lines; dodges the rapid onStep stream's stale
-  // closures like statusRef); the snapshot state is pushed only when `stream` is the active surface, so
-  // every other mode pays nothing extra per delta. Display-only: it never touches transcript/ledger/
-  // replay (the reply still commits to scrollback via streamRef — this is a VIEW of the tail).
-  const STREAM_KEEP_LINES = MAX_ROLL_LINES + 1; // keep one over the cap so the shown window always fills
-  const streamFeedRef = useRef<Map<string, string>>(new Map());
-  const [streamFeed, setStreamFeed] = useState<StreamFeedMap>(new Map());
-  const clearStreamFeed = () => { streamFeedRef.current = new Map(); setStreamFeed(new Map()); };
-  const bumpStreamFeed = (runId: string, delta: string) => {
-    const cur = streamFeedRef.current.get(runId) ?? "";
-    const merged = cur + delta;
-    // Trim to the last STREAM_KEEP_LINES lines so the accumulator stays bounded (a long reply never
-    // grows the ref) — the rolling window is fixed-height regardless of how much streamed.
+  // Plan 13 (corrected): per-run block data for the consistent agent blocks. Each agent (root and
+  // sub-agents) is rendered as a single block: header + fixed 2-line body. The block IS the record —
+  // the block you watched live is the exact block that settles into scrollback. Built off the SAME
+  // `delta` events the status map reads — no new engine plumbing. Display-only: it never touches
+  // transcript/ledger/replay (the full text is still recorded on disk — this bounds the SCREEN).
+  const BLOCK_KEEP_LINES = 5; // keep a few lines for the rolling tail inside the block body
+  const blockFeedRef = useRef<Map<string, { lines: string; agent: string; parentRunId?: string; depth: number }>>(new Map());
+  const [blockFeed, setBlockFeed] = useState<Map<string, { lines: string; agent: string; parentRunId?: string; depth: number }>>(new Map());
+  const clearBlockFeed = () => { blockFeedRef.current = new Map(); setBlockFeed(new Map()); };
+  const bumpBlockFeed = (runId: string, delta: string, agent: string, parentRunId?: string, depth = 0) => {
+    const cur = blockFeedRef.current.get(runId);
+    const merged = (cur?.lines ?? "") + delta;
+    // Trim to the last BLOCK_KEEP_LINES lines so the accumulator stays bounded
     const segs = merged.split("\n");
-    const trimmed = segs.length > STREAM_KEEP_LINES ? segs.slice(-STREAM_KEEP_LINES).join("\n") : merged;
-    const next = new Map(streamFeedRef.current);
-    next.set(runId, trimmed);
-    streamFeedRef.current = next;
-    if (viewModeRef.current === "stream") setStreamFeed(next);
+    const trimmed = segs.length > BLOCK_KEEP_LINES ? segs.slice(-BLOCK_KEEP_LINES).join("\n") : merged;
+    const next = new Map(blockFeedRef.current);
+    next.set(runId, { lines: trimmed, agent, parentRunId, depth });
+    blockFeedRef.current = next;
+    setBlockFeed(next);
   };
+
+  // Plan 13: focus state for block navigation. shift+tab enters focus mode, ↑↓ move, ⏎ opens, esc leaves.
+  const [focusMode, setFocusMode] = useState(false);
+  const [focusIndex, setFocusIndex] = useState(0);
+  const [operationRunId, setOperationRunId] = useState<string | null>(null);
+
+  // Plan 13 (corrected): compute block data from the block feed at the top level (hooks must not be
+  // called inside conditionals or IIFEs). The consistent block view shows every AGENT (sub-agents,
+  // delegated work) as a fixed-height block. Root's direct reply still uses the scrollback (the
+  // conversational reply channel); blocks are for the squad, not the root's own answer.
+  const now = Date.now();
+  const liveBlocks: AgentBlockData[] = [];
+  for (const [runId, data] of blockFeed) {
+    // Skip root's direct reply — it goes to scrollback, not blocks
+    if (runId === foregroundRootRef.current) continue;
+    const status = statuses.find((s) => s.runId === runId);
+    const variant = status ? "live" : "done";
+    liveBlocks.push({
+      runId,
+      agent: data.agent,
+      state: status?.state ?? "idle",
+      since: status?.since ?? now,
+      waiting: status?.waiting ?? false,
+      lines: tailLines(data.lines, 3),
+      variant,
+      depth: data.depth,
+    });
+  }
+  const { allBlocks } = useBlockSettle(liveBlocks);
+  useBlockTicker(allBlocks.length > 0);
 
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
@@ -288,7 +318,21 @@ export function App(props: {
     // when the captain's first keystroke arrives, so we forward it to the active card. (A card-owned
     // useInput registers a beat after its render commits and would drop that first key — the hang
     // we're fixing.) The card publishes its handler to cardKeyRef during render.
-    if (pending || inspect) { cardKeyRef.current?.(input, key); return; } // a card OR the trace inspector owns the keyboard
+    if (pending || inspect || operationRunId) { cardKeyRef.current?.(input, key); return; } // a card OR the trace inspector OR operation view owns the keyboard
+    // Plan 13: focus mode navigation. shift+tab enters, esc leaves, ↑↓ move, ⏎ opens operation view.
+    if (focusMode) {
+      if (key.escape) { setFocusMode(false); setFocusIndex(0); return; }
+      if (key.upArrow) { setFocusIndex((i) => Math.max(0, i - 1)); return; }
+      if (key.downArrow) { setFocusIndex((i) => Math.min((blockFeed.size || 1) - 1, i + 1)); return; }
+      if (key.return) {
+        const runIds = [...blockFeed.keys()];
+        const targetRunId = runIds[focusIndex];
+        if (targetRunId) setOperationRunId(targetRunId);
+        return;
+      }
+      return; // consume other keys while in focus mode
+    }
+    if (key.shift && key.tab) { setFocusMode(true); return; } // enter focus mode
     if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else { void (async () => { await props.mcp?.closeAll(); exit(); })(); } return; }
     if (sugg.length > 0) {
       if (key.upArrow)   { setSelected((s) => cycleIndex(s, sugg.length, -1)); return; }
@@ -342,13 +386,20 @@ export function App(props: {
 
   // Commit the in-progress streamed text (if any) as a finalized agent line — called when a tool
   // interrupts the stream and at run end. No-op when nothing has streamed.
+  // Plan 13 (corrected): only commit root's direct reply AND foreground @agent turns to scrollback;
+  // background dispatched runs stay in blocks.
   const flushStream = () => {
     if (streamRef.current) {
-      const { blocks, tail } = splitCompletedBlocks(streamRef.current);
-      if (blocks.length > streamBlocksRef.current) for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: streamFromRef.current, text: b, rendered: true });
-      if (tail.trim()) say({ kind: "agent", from: streamFromRef.current, text: tail, rendered: true });
+      const runEntry = streamRunIdRef.current ? activeRuns.current.get(streamRunIdRef.current) : undefined;
+      const isForegroundRun = !runEntry || runEntry.triggeredBy === "user";
+      const isRootReply = streamFromRef.current === "root" || isForegroundRun;
+      if (isRootReply) {
+        const { blocks, tail } = splitCompletedBlocks(streamRef.current);
+        if (blocks.length > streamBlocksRef.current) for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: streamFromRef.current, text: b, rendered: true });
+        if (tail.trim()) say({ kind: "agent", from: streamFromRef.current, text: tail, rendered: true });
+      }
     }
-    streamRef.current = ""; streamBlocksRef.current = 0;
+    streamRef.current = ""; streamBlocksRef.current = 0; streamRunIdRef.current = undefined;
   };
 
   // Run the highlighted command now (no arg) or fill `/<cmd> ` so the captain can type its argument.
@@ -497,17 +548,35 @@ export function App(props: {
         // reply channel — duplicating it in the pane raced that channel; see SquadPanes PaneEntry).
         if (phase === "tool_start" && tool)
           bumpPaneFeed(ev.runId, (e) => ({ lines: [...e.lines, `→ ${tool}${argsPreview ? ` ${argsPreview}` : ""}`].slice(-PANE_FEED_LINES) }));
-        // Plan 13: the rolling stream feed carries the tail of the streamed reply/work text — the very
-        // channel the panes omit. Accumulated here (bounded) and shown only in `/view stream`; the reply
-        // still commits to scrollback below, so this is a VIEW of the tail, never a second record.
-        if (phase === "delta") { const d = ev.text ?? delta ?? ""; if (d) bumpStreamFeed(ev.runId, d); }
+        // Plan 13 (corrected): accumulate block data for ALL runs. The consistent block view shows
+        // every agent (root and sub-agents) as a fixed-height block. The full text is still recorded
+        // on disk — this bounds the SCREEN, not the record.
+        if (phase === "delta") {
+          const d = ev.text ?? delta ?? "";
+          if (d) {
+            // Determine depth and parent for nesting (root = 0, children = 1+)
+            const isRoot = ev.runId === foregroundRootRef.current;
+            const depth = isRoot ? 0 : 1; // simplified: root at 0, all children at 1
+            bumpBlockFeed(ev.runId, d, agent, undefined, depth);
+          }
+        }
       }
       if (delta) {
-        streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
-        const { blocks } = splitCompletedBlocks(streamRef.current);
-        if (blocks.length > streamBlocksRef.current) {
-          for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: agent, text: b, rendered: true });
-          streamBlocksRef.current = blocks.length;
+        // Plan 13 (corrected): ONLY accumulate root's direct reply AND foreground @agent turns in
+        // streamRef (for scrollback). Background dispatched runs only go to the block feed — the
+        // block is their only on-screen presence. Check by: (1) agent is root, OR (2) run is
+        // foreground (triggeredBy === "user"), OR (3) no runId (legacy path).
+        const runEntry = ev.runId ? activeRuns.current.get(ev.runId) : undefined;
+        const isForegroundRun = !runEntry || runEntry.triggeredBy === "user";
+        const isRootReply = agent === "root" || isForegroundRun;
+        if (isRootReply) {
+          streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
+          streamRunIdRef.current = ev.runId;
+          const { blocks } = splitCompletedBlocks(streamRef.current);
+          if (blocks.length > streamBlocksRef.current) {
+            for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: agent, text: b, rendered: true });
+            streamBlocksRef.current = blocks.length;
+          }
         }
         return;
       }
@@ -515,7 +584,9 @@ export function App(props: {
       if (note) { flushStream(); say({ kind: "system", text: `  ${note}` }); return; }
       // The scrollback breadcrumb now fires at real tool_start time (the status bar carries the live
       // role; the ↳ line stays as the record). argsPreview is redacted + capped upstream.
-      if (phase === "tool_start" && tool) {
+      // Plan 13 (corrected): suppress the breadcrumb for delegate_task — the consistent block
+      // replaces it (the block is the delegation's only on-screen presence, not both).
+      if (phase === "tool_start" && tool && tool !== "delegate_task") {
         flushStream();
         setActivity(`${agent} → ${tool}()`);
         say({ kind: "system", text: `  ↳ ${agent} → ${tool}()${argsPreview ? " " + argsPreview : ""}` });
@@ -619,10 +690,10 @@ export function App(props: {
     setActivity(parsed.kind === "address" ? `${parsed.to} · thinking…` : "root · thinking…");
     foregroundRootRef.current = null; // the next user-triggered onRunStart claims this turn's root
     aborter.current = new AbortController();
-    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
+    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0; streamRunIdRef.current = undefined;
     clearStatuses();
     clearPaneFeed();
-    clearStreamFeed();
+    clearBlockFeed();
     clearLiveTrace();
     try {
       if (parsed.kind === "chat") {
@@ -654,7 +725,7 @@ export function App(props: {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
       // explicit-model guard for a misconfigured OpenRouter agent. Surface it instead of crashing Ink.
       say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
-    } finally { setBusy(false); clearStatuses(); clearLiveTrace(); clearStreamFeed(); }
+    } finally { setBusy(false); clearStatuses(); clearLiveTrace(); clearBlockFeed(); }
   };
 
   const runSlash = async (cmd: string, arg: string) => {
@@ -1039,31 +1110,55 @@ export function App(props: {
       })()}
       {/* Plan 10 Phase 4: split panes (one per live agent) sit above the spinner + bar. The mode
           (bar/panes/both) and terminal size decide what shows; too small ⇒ degrade to bar-only. */}
-      {!inspect && layout.showPanes && (
+      {!inspect && !operationRunId && layout.showPanes && (
         <SquadPanes statuses={statuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
       )}
       {/* Plan 02 Phase 6: the live waterfall — a redrawing span tree of the in-flight run, in place of
           the panes when /view waterfall is active. The ↳ breadcrumbs still land in scrollback as the
           record; this is the live reader. */}
-      {!inspect && layout.showWaterfall && liveTraceSpans.length > 0 && (
+      {!inspect && !operationRunId && layout.showWaterfall && liveTraceSpans.length > 0 && (
         <LiveWaterfall spans={liveTraceSpans} width={termSize.columns} maxRows={Math.max(6, termSize.rows - 8)} />
       )}
-      {/* Plan 13: the rolling stream — a fixed-height per-agent tail of the live reply/work channel the
-          panes omit, in its own /view stream mode. Display-only; the reply still lands in scrollback. */}
-      {!inspect && layout.showStream && (
-        <RollingStream statuses={statuses} feed={streamFeed} columns={termSize.columns} rows={termSize.rows} />
+      {/* Plan 13 (corrected): consistent agent blocks — the default squad view. Every agent (root and
+          sub-agents) is rendered as a single block: header + fixed 2-line body. The block IS the record. */}
+      {!inspect && !operationRunId && allBlocks.length > 0 && (() => {
+        const blockWidth = Math.min(termSize.columns - 4, 96);
+        return (
+          <Box flexDirection="column">
+            {allBlocks.map((b, i) => (
+              <AgentBlock
+                key={b.runId}
+                block={b}
+                focused={focusMode && i === focusIndex}
+                width={blockWidth}
+                now={now}
+              />
+            ))}
+            {focusMode && <Text dimColor>  ↑↓ navigate · ⏎ open · esc to close</Text>}
+          </Box>
+        );
+      })()}
+      {/* Plan 13: operation view — drill-in to see the full output of a focused block. */}
+      {operationRunId && (
+        <OperationView
+          ws={props.ws}
+          runId={operationRunId}
+          width={termSize.columns}
+          keyHandlerRef={cardKeyRef}
+          onClose={() => { cardKeyRef.current = null; setOperationRunId(null); }}
+        />
       )}
       {!inspect && !pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
       {!inspect && layout.showBar && statuses.length > 0 && <StatusBar statuses={statuses} width={termSize.columns} />}
-      {!inspect && !pending && (
+      {!inspect && !pending && !operationRunId && (
         <>
           <Box>
-            <Text color={busy ? "gray" : "cyan"}>{busy ? "❯ " : "> "}</Text>
+            <Text color={busy ? "gray" : focusMode ? "gray" : "cyan"}>{busy ? "❯ " : focusMode ? "  " : "> "}</Text>
             <TextInput
               key={inputKey}
               defaultValue={inputSeed}
-              placeholder="message root, or / for commands"
+              placeholder={focusMode ? "(focus mode — esc to return)" : "message root, or / for commands"}
               onChange={onInputChange}
               onSubmit={submit}
             />

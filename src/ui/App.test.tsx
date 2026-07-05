@@ -28,7 +28,6 @@ import { listSchedules, createSchedule } from "../store/schedules";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { getViewMode } from "../store/prefs";
-import { MAX_ROLL_LINES } from "./RollingStream";
 import { KbNode } from "../schemas/knowledge";
 import type { AuthSource } from "../store/config";
 import type { McpManager, McpServerStatus } from "../core/mcp/manager";
@@ -995,45 +994,34 @@ test("Plan 10 Phase 4: below the minimum terminal size the panes degrade to bar-
   await waitFor(lastFrame, "done");
 });
 
-// ── Plan 13: the rolling compact live-stream view (Layer-1, through the real App) ──
+// ── Plan 13 (corrected): consistent agent blocks — sub-agent reply NOT in scrollback ──
 
-test("Plan 13: /view stream shows a rolling tail of the live stream — bounded, rolls as deltas arrive, clears on completion", async () => {
-  // A slow multi-line stream so the rolling window is observable while it fills + rolls. Each delta is
-  // its own line; more lines stream than the window holds, so the earliest MUST scroll off.
-  const chunks = [
-    { type: "stream-start", warnings: [] },
-    { type: "text-start", id: "1" },
-    ...["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8"].map((t) => ({ type: "text-delta", id: "1", delta: t + "\n" })),
-    { type: "text-end", id: "1" },
-    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage },
-  ];
+test("Plan 13 (corrected): a delegation renders blocks for the sub-agent, and the sub-agent's full reply is NOT in scrollback", async () => {
+  // Root delegates to a worker. The worker produces a long reply. The block shows a bounded tail,
+  // but the full reply text does NOT appear in scrollback (the block is the sub-agent's only on-screen
+  // presence; the full text stays in the on-disk transcript).
+  const SUB_AGENT_REPLY = "writer produced a very long reply that should NOT appear in scrollback because it would flood the screen";
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "write something" }),
+    finalText("root done"),
+  ) as any });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const model = new MockLanguageModelV3({ doStream: (async () => ({ stream: simulateReadableStream({ initialDelayInMs: 0, chunkDelayInMs: 45, chunks }) })) as any });
-  const { ws, props } = await setup({ model, subscription: true });
-  const { stdin, lastFrame } = render(<App {...props} terminalSize={{ columns: 120, rows: 40 }} />);
+  const writerModel = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(200); return finalText(SUB_AGENT_REPLY); }) as any });
+  const { ws, db, props } = await setup({ model: rootModel });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (props as any).resolveModel = (id: string) => id === "writer" ? { model: writerModel, modelId: "m" } : { model: rootModel, modelId: "m" };
+  const { stdin, lastFrame } = render(<App {...props} />);
 
-  await send(stdin, "/view stream", ENTER);
-  await waitFor(lastFrame, "live view → stream");
-  expect(getViewMode(ws)).toBe("stream");              // persisted to disk (the /view mechanism)
+  await send(stdin, "have writer do it", ENTER);
+  await waitFor(lastFrame, "root done", 8000); // the delegation completed
 
-  await send(stdin, "produce the report", ENTER);
-  // A rolling-window BODY row is `▎   <text>` (left-accent + 3 spaces); the header is `▎ <glyph>…`.
-  const bodyRows = (f: string) => f.split("\n").filter((l) => /^▎ {3}\S/.test(l));
-  // While streaming, the single-newline paragraph has NOT committed to scrollback yet, so any line we
-  // see is coming from the rolling window. Catch the mid-stream frame where a LATER line is visible
-  // but the EARLIEST has already scrolled off — and the window is bounded to at most MAX_ROLL_LINES.
-  await waitForPred(
-    lastFrame,
-    (f) => f.includes("l6") && !f.includes("l1") && bodyRows(f).length <= MAX_ROLL_LINES,
-    "the rolling window showing a recent line, the earliest scrolled off, height ≤ cap",
-  );
-  expect(lastFrame()).toContain("root writing");        // the window header carries the live state
-  expect(lastFrame()).toContain("▎");                   // the rolling-window accent actually rendered
-
-  // The run streams to the end and the reply flushes to scrollback; the rolling window then collapses
-  // (after the brief `done`-settle beat) — it is display-only and never lingers.
-  await waitFor(lastFrame, "l8");                        // the full reply landed in scrollback
-  await waitForGone(lastFrame, "▎", 4000);              // …and the rolling window (its accent) is gone
+  // The sub-agent's full reply text is NOT in scrollback (the block is its only on-screen presence).
+  expect(lastFrame()).not.toContain(SUB_AGENT_REPLY);
+  // But the block IS rendered (the sub-agent's name + state appear in the block header).
+  expect(lastFrame()).toContain("writer");
+  // And root's reply IS in scrollback (root's direct reply uses the scrollback channel).
+  expect(lastFrame()).toContain("root done");
 });
 
 // ── Plan 04: routeSteer routing (Layer-1, through the real App) ──

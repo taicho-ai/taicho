@@ -231,32 +231,36 @@ complete summary.
   1000` gives the panes vertical room (they degrade to bar-only below `MIN_PANE_ROWS`). Ran twice, no
   flake; `agent-flow` stays 7/7.
 
-### The rolling compact live-stream view (`/view stream`, Plan 13)
+### Consistent agent blocks (Plan 13, corrected)
 
-`ui/RollingStream.tsx` is a fixed-height per-agent tail of the live reply/work stream — only the last N
-lines (default 4, cap 5), older lines scroll off, the window never grows. It is the reply/work channel
-the Plan 10 panes deliberately OMIT (see the pane note above — echoing streamed reply text raced the
-scrollback reply channel), so it ships as its **own opt-in `/view stream` mode**: the default `both`
-surfaces (and every test that waits on the scrollback reply then asserts the trace) are untouched. It
-folds the SAME `onStep` `delta` events the bar/panes/live-trace consume into a bounded per-run buffer in
-`App.tsx` (no new engine plumbing) and is display-only — it never feeds back into transcript/ledger/
-boot-replay.
+`ui/AgentBlock.tsx` is the **default** squad view for delegated work. Every sub-agent (root's children)
+is rendered as a single consistent block: header + fixed 2-line body (3 max). The block NEVER changes
+shape across its lifecycle — only the state label, rail colour, and body content change:
 
-- **Pure units** — `ui/RollingStream.test.tsx` covers `tailLines(text, n)` (the fixed-height window:
-  last-N slice, older lines scroll off, short streams don't pad, a trailing newline's empty segment is
-  dropped, N clamped to `[1, MAX_ROLL_LINES]`). `ui/SquadPanes.test.tsx` adds the `stream` case to
-  `resolveLayout` (stream shows the rolling surface, hides bar+panes+waterfall; too-small degrades to
-  bar-only); `store/prefs.test.ts` adds the `stream` `/view` persistence round-trip.
-- **Layer 1 (Ink)** — the Plan 13 test in `App.test.tsx` renders the real `<App>` with a **slow
-  multi-line `doStream` mock** (each delta a line, more lines than the window holds). Two non-obvious
-  things the next author should keep: (1) the window is gated by `/view stream` (a mode `App.test.tsx`'s
-  other tests never enter, so the default surfaces stay unperturbed); (2) the rolling assertion is made
-  **mid-stream** — while a single-newline paragraph is still streaming it has NOT committed to
-  scrollback, so a `waitForPred` catches the frame where a *later* line (`l6`) is visible while the
-  *earliest* (`l1`) has already scrolled off and the body-row count is `≤ MAX_ROLL_LINES`. That
-  ordering matters: after completion the reply flushes to scrollback (which then contains `l1`), so the
-  bounded-window proof must be read before the flush. The test then asserts the window collapses after
-  the run (`▎` accent gone) — the rolling view is display-only and never lingers.
+| | State label | Rail colour | Two-line body |
+|---|---|---|---|
+| **live** | `thinking` / `writing` / `delegating` | amber/yellow | the **rolling tail** — newest delta line in at the bottom, oldest scrolls off *inside* the window |
+| **done** | `done` | green | the agent's **settled summary** |
+| **failed** | `failed` | red | the failure reason (first 2 lines) |
+
+**The block IS the record.** The block you watched live is the exact block that settles into scrollback.
+No collapse into a different element, no second UI. Root's own direct reply still uses the scrollback
+(the conversational reply channel); blocks are for the squad, not root's own answer.
+
+**Focus navigation:** `shift+tab` moves keyboard focus into the block region; `↑↓` move a focus ring
+across blocks (live AND done); `⏎` opens the focused block into the **operation view** (`ui/OperationView.tsx`,
+a drill-in showing the brief, full output, tools, and artifact); `esc` returns focus to the input.
+
+- **Pure units** — `ui/AgentBlock.tsx` exports `tailLines(text, n)` (the fixed-height window) and
+  `useBlockSettle`/`useBlockTicker` hooks (the settle-then-collapse lifecycle). The block component
+  is tested through the real `<App>` in Layer 1.
+- **Layer 1 (Ink)** — the existing delegation tests in `App.test.tsx` exercise the block view: a
+  delegation renders blocks for the child agent (not a scrollback flood); the block keeps its shape
+  from live→done. The `/view stream` mode has been **deleted** — `stream` is removed from `VIEW_MODES`
+  in `store/prefs.ts`, the `showStream` branch in `resolveLayout`, and the slash surface.
+- **Layer 4 (VHS evidence)** — TODO: a slow-mode `e2e-model.ts` mode + `e2e/scenarios/consistent-blocks.ts`
+  scenario will drive a real root→squad delegation, gate + screenshot the live two-line blocks, the
+  settled (done) state, and the `shift+tab`→`⏎` operation view. File assertions decide pass/fail.
 
 ## Adding a dependency (testing-adjacent gotcha)
 

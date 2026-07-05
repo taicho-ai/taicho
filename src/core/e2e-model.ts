@@ -165,6 +165,10 @@ function artifactHandoffModel(): Model {
  *  sits far under the provider fetch's 120s transport deadline (Plan 12; no loop-level watchdog). */
 const SQUAD_PANES_SLOW_MS = Number(process.env.TAICHO_E2E_SLOW_MS ?? 4000);
 
+/** How long (ms) the consistent-blocks child holds its model call in-flight so its live block + bar
+ *  segment are on screen long enough for VHS to `Wait+Screen` + screenshot. Same rationale as above. */
+const CONSISTENT_BLOCKS_SLOW_MS = Number(process.env.TAICHO_E2E_SLOW_MS ?? 4000);
+
 /** squad-panes (Plan 10 Phase 5): the SLOW-MODE delegation that makes the split-pane view provable.
  *  Same shape as agent-flow (create proof-agent → approve → delegate → roll the proof up), but the
  *  child's single model call is HELD in-flight for SQUAD_PANES_SLOW_MS. During that window two agents
@@ -199,10 +203,42 @@ function squadPanesModel(): Model {
   }) as unknown as Model;
 }
 
+/** consistent-blocks (Plan 13 corrected): the SLOW-MODE delegation that makes the consistent-blocks
+ *  view provable. Same shape as squad-panes, but proves the consistent-blocks view: during the
+ *  delegation, taicho renders a BLOCK (header + 2-line body) for each sub-agent, and the sub-agent's
+ *  full reply text does NOT appear in scrollback. */
+function consistentBlocksModel(): Model {
+  let n = 0;
+  return new MockLanguageModelV3({
+    provider: "taicho-e2e",
+    modelId: "consistent-blocks",
+    doStream: async () => {
+      n += 1;
+      // root run 1 — create proof-agent
+      if (n === 1) return call("create_agent", {
+        id: "proof-agent",
+        role: "Proof worker",
+        identity: "You are proof-agent. Complete delegated work with a concise proof message.",
+      });
+      if (n === 2) return text("Created proof-agent.");
+      // root run 2 — delegate (root stays `delegating`, blocked on the child below)
+      if (n === 3) return call("delegate_task", {
+        to: "proof-agent",
+        goal: "Produce proof that the created agent was used.",
+      });
+      // the child's only model call — SLOW: proof-agent stays visibly `thinking` while root delegates
+      if (n === 4) return text("proof-agent completed delegated work", CONSISTENT_BLOCKS_SLOW_MS);
+      // root rolls the child's proof back up
+      return text("Root used proof-agent: proof-agent completed delegated work");
+    },
+  }) as unknown as Model;
+}
+
 export function createE2eModel(mode: string | undefined): Model | null {
   if (mode === "agent-flow") return agentFlowModel();
   if (mode === "conversation-audit") return conversationAuditModel();
   if (mode === "artifact-handoff") return artifactHandoffModel();
   if (mode === "squad-panes") return squadPanesModel();
+  if (mode === "consistent-blocks") return consistentBlocksModel();
   return null;
 }

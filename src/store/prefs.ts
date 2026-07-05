@@ -7,10 +7,10 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { log } from "../core/logger";
 
-/** The live-view surfaces: the status bar (summary), the split panes (per-agent detail), both, the
- *  live waterfall (Plan 02 Phase 6 — the redrawing span tree of the in-flight run), or the rolling
- *  stream (Plan 13 — a fixed-height per-agent tail of the live reply/work stream). */
-export const VIEW_MODES = ["bar", "panes", "both", "waterfall", "stream"] as const;
+/** The live-view surfaces: the status bar (summary), the split panes (per-agent detail), both, or the
+ *  live waterfall (Plan 02 Phase 6 — the redrawing span tree of the in-flight run). Plan 13's
+ *  consistent-block view is the DEFAULT render (no mode toggle needed). */
+export const VIEW_MODES = ["bar", "panes", "both", "waterfall"] as const;
 export type ViewMode = (typeof VIEW_MODES)[number];
 export const DEFAULT_VIEW_MODE: ViewMode = "both";
 
