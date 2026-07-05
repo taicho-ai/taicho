@@ -47,6 +47,11 @@ issues tsc won't).
   (the conversational reply channel); blocks are for the squad. `shift+tab` enters focus mode (↑↓
   navigate, ⏎ opens the operation view drill-in, esc returns). The `/view stream` mode has been
   **deleted** — consistent blocks are the default, not an opt-in.
+  `ArtifactViewer.tsx` (Plan 15) is the **artifact browser**: a full-screen card that renders the
+  selected artifact's body as markdown, scrollable. The **completion action bar** appears when a user
+  turn produces artifacts, offering "View artifacts (N)" and "Continue chatting". `gatherConversationArtifacts`
+  in `trace-tree.ts` walks the delegation subtree, collects artifact handles from each run's trace,
+  de-dups by handle, and returns them ordered by created desc (latest first).
 - **`src/core/`** — the engine:
   - `loop.ts` — the single metered agent loop. Model proposes, config disposes: budgets/caps and
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.

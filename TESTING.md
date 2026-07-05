@@ -262,6 +262,33 @@ a drill-in showing the brief, full output, tools, and artifact); `esc` returns f
   scenario will drive a real root→squad delegation, gate + screenshot the live two-line blocks, the
   settled (done) state, and the `shift+tab`→`⏎` operation view. File assertions decide pass/fail.
 
+### Artifact viewer + completion action bar (Plan 15)
+
+`ui/ArtifactViewer.tsx` is a full-screen card that renders the selected artifact's body as markdown,
+scrollable. The completion action bar appears when a user turn produces artifacts, offering "View
+artifacts (N)" and "Continue chatting" options.
+
+**Completion action bar:** When a `triggeredBy:"user"` turn completes and its delegation subtree
+produced ≥1 artifact, the app shows a keyboard-navigable action row pinned above the input:
+`▸ View artifacts (N) · Continue chatting`. `←/→` move the focus; `⏎` selects; `esc`/type → chat.
+Turns that produced no artifacts show no bar.
+
+**Artifact viewer:** "View artifacts" opens a full-screen card (cardKeyRef-owned, same pattern as
+`OperationView`/`TraceInspector`). Renders the selected artifact's **body as markdown**, scrollable
+(`↑/↓`). Header shows handle · producer · age · position. Browse with `←/→` (prev/next artifact),
+`tab` opens the jump list, `esc` returns to chat.
+
+**Data source:** `gatherConversationArtifacts(ws, rootRunId)` walks the delegation subtree, collects
+artifact handles from each run's `trace.artifacts` and `trace.outputArtifacts`, de-dups by handle,
+and returns them ordered by `created` desc (latest first). Resolves via `readArtifact` (envelope only).
+
+- **Pure units** — `gatherConversationArtifacts` in `trace-tree.ts` is tested in `trace-tree.test.ts`:
+  collects artifacts from the run tree, de-dups by id, orders by created desc; returns [] for a run
+  with no artifacts.
+- **Layer 1 (Ink)** — `App.test.tsx` covers the completion action bar and artifact viewer: a turn
+  that produces artifacts shows the bar with correct count; `⏎` opens the viewer on the newest
+  artifact; `esc` returns to chat; a turn with no artifacts shows no bar.
+
 ## Adding a dependency (testing-adjacent gotcha)
 
 `bun add <pkg>` re-resolves the whole tree and hits a broken upstream publish (`@vercel/ai-tsconfig@0.0.0`, 404). **Instead: edit `package.json` and run `bun install`**, keeping the `overrides` block intact (it pins the transitive `@ai-sdk/*` packages; never override a *direct* dep — npm's `EOVERRIDE` would then break `npx`, which launches stdio MCP servers). See the note in `package.json`.

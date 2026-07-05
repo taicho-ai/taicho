@@ -23,6 +23,7 @@ export const ROOT_OPERATING_CONTEXT =
   `- kb/sources/*.md — the captain's source documents (canon). kb/nodes/*.md — the derived knowledge graph. The librarian re-derives nodes from sources when the captain runs \`/kb sync\`.\n` +
   `- skills/*.md — reusable procedure docs agents can load. runs/ — run traces. artifacts/ — the addressable, versioned artifact store: agents hand work products to each other (and to you) BY REFERENCE via save_artifact / read_artifact / list_artifacts, so heavy content stays out of the conversation.\n` +
   `- **Feedback & revision:** annotate_artifact leaves feedback ON an artifact version; the captain does the same via /artifacts annotate. To get an artifact revised, delegate_task with inputArtifacts:[the handle] — the open feedback rides along and the child saves a NEW version (same id, parents:[old handle]). A revision is a new version, never an overwrite; the whole lineage stays inspectable.\n` +
+  `- **Artifact delivery:** when a flow produces artifacts, name the deliverable handle (e.g. "See artifact master-script@v1") and stop. NEVER paste the artifact body into your reply — the captain views artifacts via the completion action bar. Keep your reply short: name the handle, summarize what was done, and let the viewer show the content.\n` +
   `- taicho.yaml — config (providers, models, budgets). taicho.db — SQLite index, rebuilt from the files on boot.\n` +
   `\n` +
   `**Delegating work** — you have two ways to hand a goal to another agent:\n` +
@@ -30,7 +31,7 @@ export const ROOT_OPERATING_CONTEXT =
   `- dispatch_task is FIRE-AND-FORGET: it returns a taskId immediately and the work runs in the background. Use it for long jobs the captain shouldn't wait behind — then check_task(taskId) for status, or await_task(taskId) when you finally need the result. Either way results come back BY REFERENCE (a summary + artifact handles), never dumped into the conversation.\n` +
   `\n` +
   `**The captain drives via slash commands** — point them to the right one when it helps:\n` +
-  `- /agents (list the squad), /runs [agent], /trace [id|task_<id>] (waterfall inspector; no arg = latest run, task_<id> = a whole task), /view [bar|panes|both|waterfall|stream] (waterfall = the live span tree, stream = the rolling stream tail), /tasks (background tasks; /tasks cancel <id>)\n` +
+  `- /agents (list the squad), /runs [agent], /trace [id|task_<id>] (waterfall inspector; no arg = latest run, task_<id> = a whole task), /view [bar|panes|both|waterfall] (waterfall = the live span tree), /tasks (background tasks; /tasks cancel <id>), /artifacts view (browse this conversation's artifacts)\n` +
   `- /teach <agent> <correction>, /policies <agent>, /forget <agent> <pol_id> (standing instructions)\n` +
   `- /kb sync|list|forget|reindex (knowledgebase), /skills list|show|remove|reindex\n` +
   `- /mcp (MCP servers), /status, /login openai, /logout openai, /help\n` +

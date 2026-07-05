@@ -8,6 +8,8 @@ import { paths } from "../store/files";
 import { readTrace, listTraces } from "../store/trace";
 import { readRunTranscript, type RunTranscriptEvent } from "../store/run-transcript";
 import { readTaskState, type TaskState } from "../store/task-state";
+import { readArtifact } from "../store/artifacts";
+import { artifactHandle, type Artifact } from "../schemas/artifact";
 import type { RunTrace } from "../schemas/trace";
 
 export type SpanKind = "run" | "llm" | "tool" | "approval";
@@ -312,4 +314,38 @@ export function traceSummary(spans: Span[]): { durationMs: number; tokens: numbe
   const start = Math.min(...spans.map((s) => s.startMs).filter(Number.isFinite));
   const end = Math.max(...spans.map((s) => s.endMs).filter(Number.isFinite));
   return { durationMs: Math.max(0, end - start), tokens: root.tokens ?? 0, costUsd: root.costUsd ?? null, status: root.status };
+}
+
+/** Plan 15 — gather all artifacts produced by a conversation's run tree (root + delegated children).
+ *  Walks the delegation subtree, collects artifact handles from each run's trace.artifacts and
+ *  trace.outputArtifacts, de-dups by handle, and returns them ordered by created desc (latest first).
+ *  Returns the artifact envelopes (resolved via readArtifact), not the bodies. */
+export function gatherConversationArtifacts(ws: string, rootRunId: string): Artifact[] {
+  const handles = new Set<string>();
+  const seen = new Set<string>();
+
+  function walk(runId: string) {
+    if (seen.has(runId)) return;
+    seen.add(runId);
+    const trace = readTrace(ws, runId);
+    if (!trace) return;
+    // Collect from both artifacts (produced) and outputArtifacts (handed up)
+    for (const h of trace.artifacts) handles.add(typeof h === "string" ? h : artifactHandle(h));
+    for (const h of trace.outputArtifacts) handles.add(typeof h === "string" ? h : artifactHandle(h));
+    // Recurse into delegated children
+    for (const childId of trace.delegatedOut) walk(childId);
+  }
+
+  walk(rootRunId);
+
+  // Resolve handles to envelopes, de-dup by id (keep latest version), order by created desc
+  const byId = new Map<string, Artifact>();
+  for (const h of handles) {
+    const a = readArtifact(ws, h);
+    if (!a) continue;
+    const existing = byId.get(a.id);
+    if (!existing || a.version > existing.version) byId.set(a.id, a);
+  }
+
+  return [...byId.values()].sort((x, y) => y.created.localeCompare(x.created));
 }

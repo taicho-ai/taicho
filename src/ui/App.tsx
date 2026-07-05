@@ -8,12 +8,13 @@ import { StatusBar } from "./StatusBar";
 import { SquadPanes, resolveLayout, type PaneEntry, type PaneFeedMap } from "./SquadPanes";
 import { AgentBlock, useBlockSettle, useBlockTicker, tailLines, type AgentBlockData } from "./AgentBlock";
 import { OperationView } from "./OperationView";
+import { ArtifactViewer } from "./ArtifactViewer";
 import { TraceInspector } from "./TraceInspector";
 import { LiveWaterfall } from "./LiveWaterfall";
 import { parseInput } from "./input";
 import { BANNER } from "./banner";
 import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
-import { deriveTrace, deriveTaskTrace, type Span } from "../core/trace-tree";
+import { deriveTrace, deriveTaskTrace, gatherConversationArtifacts, type Span } from "../core/trace-tree";
 import { emptyLiveTrace, liveRunStart, liveStep, liveRunEnd, liveSpans, type LiveTraceState } from "../core/live-trace";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
@@ -285,6 +286,12 @@ export function App(props: {
   const [focusIndex, setFocusIndex] = useState(0);
   const [operationRunId, setOperationRunId] = useState<string | null>(null);
 
+  // Plan 15: completion action bar + artifact viewer. When a user turn completes with artifacts, show
+  // the action bar; ⏎ on "View artifacts" opens the viewer. The viewer is cardKeyRef-owned.
+  const [completionArtifacts, setCompletionArtifacts] = useState<import("../schemas/artifact").Artifact[] | null>(null);
+  const [artifactViewerOpen, setArtifactViewerOpen] = useState(false);
+  const [actionBarFocus, setActionBarFocus] = useState(0); // 0 = View artifacts, 1 = Continue chatting
+
   // Plan 13 (corrected): compute block data from the block feed at the top level (hooks must not be
   // called inside conditionals or IIFEs). The consistent block view shows every AGENT (sub-agents,
   // delegated work) as a fixed-height block. Root's direct reply still uses the scrollback (the
@@ -318,7 +325,19 @@ export function App(props: {
     // when the captain's first keystroke arrives, so we forward it to the active card. (A card-owned
     // useInput registers a beat after its render commits and would drop that first key — the hang
     // we're fixing.) The card publishes its handler to cardKeyRef during render.
-    if (pending || inspect || operationRunId) { cardKeyRef.current?.(input, key); return; } // a card OR the trace inspector OR operation view owns the keyboard
+    if (pending || inspect || operationRunId || artifactViewerOpen) { cardKeyRef.current?.(input, key); return; } // a card OR the trace inspector OR operation view OR artifact viewer owns the keyboard
+    // Plan 15: completion action bar navigation. ←/→ move, ⏎ select, esc/type → dismiss.
+    if (completionArtifacts && completionArtifacts.length > 0) {
+      if (key.escape) { setCompletionArtifacts(null); setActionBarFocus(0); return; }
+      if (key.leftArrow || key.rightArrow) { setActionBarFocus((f) => f === 0 ? 1 : 0); return; }
+      if (key.return) {
+        if (actionBarFocus === 0) { setArtifactViewerOpen(true); }
+        else { setCompletionArtifacts(null); setActionBarFocus(0); }
+        return;
+      }
+      // Any other key dismisses the bar and returns to chat
+      setCompletionArtifacts(null); setActionBarFocus(0); return;
+    }
     // Plan 13: focus mode navigation. shift+tab enters, esc leaves, ↑↓ move, ⏎ opens operation view.
     if (focusMode) {
       if (key.escape) { setFocusMode(false); setFocusIndex(0); return; }
@@ -706,6 +725,9 @@ export function App(props: {
         if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text, rendered: true });
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
+          // Plan 15: gather artifacts from the conversation's run tree and show the completion action bar
+          const artifacts = gatherConversationArtifacts(props.ws, res.runId);
+          if (artifacts.length > 0) setCompletionArtifacts(artifacts);
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
           maybeSayAuthExpired(res.text);
@@ -720,6 +742,9 @@ export function App(props: {
         if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text, rendered: true });
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s)) · /trace to inspect` });
+        // Plan 15: gather artifacts from the conversation's run tree and show the completion action bar
+        const artifacts = gatherConversationArtifacts(props.ws, res.runId);
+        if (artifacts.length > 0) setCompletionArtifacts(artifacts);
       }
     } catch (e) {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
@@ -1146,6 +1171,31 @@ export function App(props: {
           width={termSize.columns}
           keyHandlerRef={cardKeyRef}
           onClose={() => { cardKeyRef.current = null; setOperationRunId(null); }}
+        />
+      )}
+      {/* Plan 15: completion action bar — shown when a user turn produces artifacts. */}
+      {!inspect && !pending && !operationRunId && !artifactViewerOpen && completionArtifacts && completionArtifacts.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Box>
+            <Text color={actionBarFocus === 0 ? "cyan" : "gray"} bold={actionBarFocus === 0}>
+              {actionBarFocus === 0 ? "▸ " : "  "}View artifacts ({completionArtifacts.length})
+            </Text>
+            <Text dimColor>     </Text>
+            <Text color={actionBarFocus === 1 ? "cyan" : "gray"} bold={actionBarFocus === 1}>
+              {actionBarFocus === 1 ? "▸ " : "  "}Continue chatting
+            </Text>
+          </Box>
+          <Text dimColor>←/→ move · ⏎ select · esc/type to chat</Text>
+        </Box>
+      )}
+      {/* Plan 15: artifact viewer — full-screen card for browsing artifacts. */}
+      {artifactViewerOpen && completionArtifacts && (
+        <ArtifactViewer
+          ws={props.ws}
+          artifacts={completionArtifacts}
+          width={termSize.columns}
+          keyHandlerRef={cardKeyRef}
+          onClose={() => { cardKeyRef.current = null; setArtifactViewerOpen(false); }}
         />
       )}
       {!inspect && !pending && busy && <RunStatus activity={activity} />}

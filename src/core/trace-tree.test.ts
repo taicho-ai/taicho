@@ -11,7 +11,7 @@ import { ensureWorkspace } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadAgent, createAgent } from "../store/roster";
 import { makeDeps, executeRun } from "./run";
-import { deriveTrace, deriveTaskTrace, traceSummary, type Span } from "./trace-tree";
+import { deriveTrace, deriveTaskTrace, traceSummary, gatherConversationArtifacts, type Span } from "./trace-tree";
 import { createTaskState, createBackgroundTask, setTaskFields, taskIdForRun } from "../store/task-state";
 import { reserveRunId } from "../store/trace";
 
@@ -233,4 +233,40 @@ test("deriveTaskTrace on an EMPTY task id returns [] and never sweeps placeholde
   reserveRunId(ws, "root");
   expect(deriveTaskTrace(ws, "")).toEqual([]);
   expect(deriveTaskTrace(ws, "   ")).toEqual([]);
+});
+
+// ── Plan 15: gatherConversationArtifacts ──
+
+test("gatherConversationArtifacts collects artifacts from the run tree, de-dups by id, orders by created desc", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  // Root delegates to writer, which produces an artifact
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "writer", goal: "write something" }),
+    text("root done"),
+  ) as any });
+  const writerModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("save_artifact", { id: "test-artifact", title: "Test Artifact", body: "# Test\n\nContent" }),
+    text("writer done"),
+  ) as any });
+  const writer = await loadAgent(ws, "writer");
+  const root = await loadAgent(ws, "root");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const deps = makeDeps({ ws, db, model, resolveModel: ((id: string) => id === "writer" ? { model: writerModel, modelId: "m" } : { model, modelId: "m" }) as any });
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+
+  const artifacts = gatherConversationArtifacts(ws, res.runId);
+  expect(artifacts.length).toBe(1);
+  expect(artifacts[0].id).toBe("test-artifact");
+  expect(artifacts[0].title).toBe("Test Artifact");
+});
+
+test("gatherConversationArtifacts returns [] for a run with no artifacts", async () => {
+  const { ws, db } = await boot();
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(text("just text")) as any });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: root, messages: [{ role: "user", content: "hi" }], triggeredBy: "user" });
+
+  const artifacts = gatherConversationArtifacts(ws, res.runId);
+  expect(artifacts).toEqual([]);
 });
