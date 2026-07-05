@@ -584,7 +584,9 @@ export function App(props: {
       if (note) { flushStream(); say({ kind: "system", text: `  ${note}` }); return; }
       // The scrollback breadcrumb now fires at real tool_start time (the status bar carries the live
       // role; the ↳ line stays as the record). argsPreview is redacted + capped upstream.
-      if (phase === "tool_start" && tool) {
+      // Plan 13 (corrected): suppress the breadcrumb for delegate_task — the consistent block
+      // replaces it (the block is the delegation's only on-screen presence, not both).
+      if (phase === "tool_start" && tool && tool !== "delegate_task") {
         flushStream();
         setActivity(`${agent} → ${tool}()`);
         say({ kind: "system", text: `  ↳ ${agent} → ${tool}()${argsPreview ? " " + argsPreview : ""}` });

@@ -163,7 +163,12 @@ export function useBlockSettle(liveBlocks: AgentBlockData[]): { allBlocks: Agent
   const settling = [...settle.values()].map((e) => e.block);
   const settled = settling.filter((b) => now - (settle.get(b.runId)?.at ?? 0) > SETTLE_MS / 2);
 
-  return { allBlocks: [...liveBlocks, ...settling], settled };
+  // Merge live and settling blocks, deduplicating by runId (live takes precedence)
+  const allById = new Map<string, AgentBlockData>();
+  for (const b of settling) allById.set(b.runId, b);
+  for (const b of liveBlocks) allById.set(b.runId, b); // live overrides settling
+
+  return { allBlocks: [...allById.values()], settled };
 }
 
 /** Ticker hook: re-renders at 500ms intervals while blocks are live (for elapsed time). */

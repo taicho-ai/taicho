@@ -197,7 +197,7 @@ Sleep 500ms
       "ledger records the second prompt",
       `ledger.jsonl contains "${SECOND_PROMPT}"`,
       () => {
-        const f = join(ws, "conversations", "default", "ledger.jsonl");
+        const f = join(ws, "conversations", "root", "ledger.jsonl");
         if (!existsSync(f)) return { pass: false, actual: "missing" };
         const body = readFileSync(f, "utf8");
         return { pass: body.includes(SECOND_PROMPT), actual: body.includes(SECOND_PROMPT) ? "found" : "not found" };
