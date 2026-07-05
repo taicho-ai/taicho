@@ -225,6 +225,7 @@ export function App(props: {
   const streamFromRef = useRef("");
   const streamedRef = useRef(false);
   const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
+  const streamRunIdRef = useRef<string | undefined>(undefined); // Plan 13: track which run is streaming (so flushStream can gate on root)
   // Plan 10 live status: statusRef is the authoritative per-run status map (dodges stale closures in
   // the rapid onStep stream); `statuses` is the rendered snapshot. Plan 02: `inspect` holds the
   // derived span tree while the waterfall inspector is open (it owns the keyboard via cardKeyRef).
@@ -385,13 +386,20 @@ export function App(props: {
 
   // Commit the in-progress streamed text (if any) as a finalized agent line — called when a tool
   // interrupts the stream and at run end. No-op when nothing has streamed.
+  // Plan 13 (corrected): only commit root's direct reply AND foreground @agent turns to scrollback;
+  // background dispatched runs stay in blocks.
   const flushStream = () => {
     if (streamRef.current) {
-      const { blocks, tail } = splitCompletedBlocks(streamRef.current);
-      if (blocks.length > streamBlocksRef.current) for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: streamFromRef.current, text: b, rendered: true });
-      if (tail.trim()) say({ kind: "agent", from: streamFromRef.current, text: tail, rendered: true });
+      const runEntry = streamRunIdRef.current ? activeRuns.current.get(streamRunIdRef.current) : undefined;
+      const isForegroundRun = !runEntry || runEntry.triggeredBy === "user";
+      const isRootReply = streamFromRef.current === "root" || isForegroundRun;
+      if (isRootReply) {
+        const { blocks, tail } = splitCompletedBlocks(streamRef.current);
+        if (blocks.length > streamBlocksRef.current) for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: streamFromRef.current, text: b, rendered: true });
+        if (tail.trim()) say({ kind: "agent", from: streamFromRef.current, text: tail, rendered: true });
+      }
     }
-    streamRef.current = ""; streamBlocksRef.current = 0;
+    streamRef.current = ""; streamBlocksRef.current = 0; streamRunIdRef.current = undefined;
   };
 
   // Run the highlighted command now (no arg) or fill `/<cmd> ` so the captain can type its argument.
@@ -554,15 +562,21 @@ export function App(props: {
         }
       }
       if (delta) {
-        streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
-        // Plan 13 (corrected): commit to scrollback for ALL streamed text (root and agents).
-        // The consistent blocks provide a bounded VIEW of the live stream, but the full text
-        // still commits to scrollback for now. A future iteration will fully replace the
-        // scrollback dump with the block-only view for delegated work.
-        const { blocks } = splitCompletedBlocks(streamRef.current);
-        if (blocks.length > streamBlocksRef.current) {
-          for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: agent, text: b, rendered: true });
-          streamBlocksRef.current = blocks.length;
+        // Plan 13 (corrected): ONLY accumulate root's direct reply AND foreground @agent turns in
+        // streamRef (for scrollback). Background dispatched runs only go to the block feed — the
+        // block is their only on-screen presence. Check by: (1) agent is root, OR (2) run is
+        // foreground (triggeredBy === "user"), OR (3) no runId (legacy path).
+        const runEntry = ev.runId ? activeRuns.current.get(ev.runId) : undefined;
+        const isForegroundRun = !runEntry || runEntry.triggeredBy === "user";
+        const isRootReply = agent === "root" || isForegroundRun;
+        if (isRootReply) {
+          streamedRef.current = true; streamFromRef.current = agent; streamRef.current += delta;
+          streamRunIdRef.current = ev.runId;
+          const { blocks } = splitCompletedBlocks(streamRef.current);
+          if (blocks.length > streamBlocksRef.current) {
+            for (const b of blocks.slice(streamBlocksRef.current)) say({ kind: "agent", from: agent, text: b, rendered: true });
+            streamBlocksRef.current = blocks.length;
+          }
         }
         return;
       }
@@ -674,7 +688,7 @@ export function App(props: {
     setActivity(parsed.kind === "address" ? `${parsed.to} · thinking…` : "root · thinking…");
     foregroundRootRef.current = null; // the next user-triggered onRunStart claims this turn's root
     aborter.current = new AbortController();
-    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0;
+    streamRef.current = ""; streamFromRef.current = ""; streamedRef.current = false; streamBlocksRef.current = 0; streamRunIdRef.current = undefined;
     clearStatuses();
     clearPaneFeed();
     clearBlockFeed();

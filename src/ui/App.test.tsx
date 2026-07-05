@@ -994,6 +994,36 @@ test("Plan 10 Phase 4: below the minimum terminal size the panes degrade to bar-
   await waitFor(lastFrame, "done");
 });
 
+// ── Plan 13 (corrected): consistent agent blocks — sub-agent reply NOT in scrollback ──
+
+test("Plan 13 (corrected): a delegation renders blocks for the sub-agent, and the sub-agent's full reply is NOT in scrollback", async () => {
+  // Root delegates to a worker. The worker produces a long reply. The block shows a bounded tail,
+  // but the full reply text does NOT appear in scrollback (the block is the sub-agent's only on-screen
+  // presence; the full text stays in the on-disk transcript).
+  const SUB_AGENT_REPLY = "writer produced a very long reply that should NOT appear in scrollback because it would flood the screen";
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "write something" }),
+    finalText("root done"),
+  ) as any });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const writerModel = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(200); return finalText(SUB_AGENT_REPLY); }) as any });
+  const { ws, db, props } = await setup({ model: rootModel });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (props as any).resolveModel = (id: string) => id === "writer" ? { model: writerModel, modelId: "m" } : { model: rootModel, modelId: "m" };
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "have writer do it", ENTER);
+  await waitFor(lastFrame, "root done", 8000); // the delegation completed
+
+  // The sub-agent's full reply text is NOT in scrollback (the block is its only on-screen presence).
+  expect(lastFrame()).not.toContain(SUB_AGENT_REPLY);
+  // But the block IS rendered (the sub-agent's name + state appear in the block header).
+  expect(lastFrame()).toContain("writer");
+  // And root's reply IS in scrollback (root's direct reply uses the scrollback channel).
+  expect(lastFrame()).toContain("root done");
+});
+
 // ── Plan 04: routeSteer routing (Layer-1, through the real App) ──
 
 test("routeSteer: an @agent steer with no live run for that agent tells the captain (no silent misroute)", async () => {
