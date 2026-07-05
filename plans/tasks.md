@@ -503,15 +503,33 @@ only *abandons* the promise (never aborts), so the wedged stream + its whole clo
 tools, ctx) leaks — the likely cause of the session slowdown ~30min after a failure.
 
 - [x] Delete `guardModelCall` + `ModelStalledError` from `loop.ts` (the watchdog is the bug — remove, don't replace). *Removed the timer, the `ModelStalledError` class, the `ABORT_GRACE_MS`/`DEFAULT_MODEL_IDLE_TIMEOUT_MS` constants, the `modelCallTimeoutMs` option, and the `ModelStalledError` catch branch; the loop now consumes the stream directly.*
-- [x] Put an `AbortSignal.timeout(ms)` on the model fetch (transport layer, e.g. `makeAuthFetch`) so a genuinely hung request (open socket, zero tokens) becomes a normal error — and cannot see tool execution, which happens after the model's HTTP stream closes. *`core/providers/request-timeout.ts` `withRequestTimeout` wraps the fetch for EVERY provider path (codex via `createCodexProvider`; env-key anthropic/openai/openrouter via `model.ts` `createAnthropic`/`createOpenAI`/`createOpenRouter` with a custom `fetch`). Config-disposed via `defaults.modelRequestTimeoutMs` (default 120s).*
+- [~] Put an `AbortSignal.timeout(ms)` on the model fetch (transport layer, e.g. `makeAuthFetch`) so a genuinely hung request (open socket, zero tokens) becomes a normal error — and cannot see tool execution, which happens after the model's HTTP stream closes. *`core/providers/request-timeout.ts` `withRequestTimeout` wraps the fetch for EVERY provider path (codex via `createCodexProvider`; env-key anthropic/openai/openrouter via `model.ts` `createAnthropic`/`createOpenAI`/`createOpenRouter` with a custom `fetch`). Config-disposed via `defaults.modelRequestTimeoutMs` (default 120s).* **⚠ REOPENED 2026-07-05 — code is wired but did NOT fire against a REAL codex hang (`root/2026-07-04-run8`); see the REOPENED block below.**
 - [x] Route that error through the AI SDK's existing `maxRetries` (don't hand-roll retry); on exhaustion the run fails / provider is dropped like any other error. *The deadline surfaces a retryable `ETIMEDOUT`-coded error (isBunNetworkError → isRetryable) so the SDK's own retry machinery handles it; verified end-to-end (real provider → fetch called maxRetries+1 times → fails cleanly).*
 - [ ] Confirm real abort tears the stream/connection/closure down (fixes the abandon-don't-cancel leak); reproduce the pre-fix leak with a heap snapshot as evidence. *DONE: real abort teardown is implemented (the deadline aborts the underlying fetch's signal — real connection teardown) and proven by a test asserting `signal.aborted === true` on timeout + user-abort propagation. LEFT OPEN: the heap-snapshot reproduction of the pre-fix leak is descoped as a post-merge fast-follow (see PR).*
 - [x] Fix the failure surface: report the real transport error, never a fabricated "backend stalled" string. *The fabricated `ModelStalledError`/"[timed out]" text is gone; the loop returns `[error]` carrying the REAL transport error message.*
-- [x] Tests: a long (>old-timeout) delegation completes and the parent surfaces the child result (the `shot-planner` case); a truly hung fetch errors + retries + fails cleanly with no leaked stream. Update `CLAUDE.md` (remove the watchdog notes) + the `loop-model-call-hang-and-cancel` memory. *`loop.test.ts`: a slow tool round-trip completes (no loop deadline on tool execution). `request-timeout.test.ts`: hung fetch → ETIMEDOUT → SDK retries → clean fail (no leaked stream) + real teardown + user-abort passthrough. `CLAUDE.md`/`TESTING.md`/stale comments updated. The `loop-model-call-hang-and-cancel` memory lives outside the repo (`~/.claude`) — flagged in the PR as a post-merge update.*
+- [~] Tests: a long (>old-timeout) delegation completes and the parent surfaces the child result (the `shot-planner` case); a truly hung fetch errors + retries + fails cleanly with no leaked stream. Update `CLAUDE.md` (remove the watchdog notes) + the `loop-model-call-hang-and-cancel` memory. *`loop.test.ts`: a slow tool round-trip completes (no loop deadline on tool execution). `request-timeout.test.ts`: hung fetch → ETIMEDOUT → SDK retries → clean fail (no leaked stream) + real teardown + user-abort passthrough. `CLAUDE.md`/`TESTING.md`/stale comments updated.* **⚠ REOPENED 2026-07-05 — the "hung fetch" test used a mock that HONORS abort. A real codex stream may NOT (that was the whole reason the watchdog existed); the test never covered the real failure mode, and `run8` proves it slips through. See REOPENED block.**
+
+### REOPENED 2026-07-05 — the transport deadline did NOT rescue a real codex hang (`root/2026-07-04-run8`)
+
+**Evidence.** `root/2026-07-04-run8` ran on the merged post-Plan-12 code (started 2 min after the pull + `bun --watch` restart onto new code). It did real work (10 model turns; 3 children — production-coordinator / platform-adapter / short-form-editor — completed AND produced artifacts, so Plan 14 works), then fired its final `model_request` at `18:45:53Z` and **got no response**. Transcript is frozen there; the dev process (PID 4604) stayed alive and **wedged for hours** — NO `ETIMEDOUT`, NO retry, NO `model_error`, no finalized trace. The root trace is a stub (`interrupted`, 0 tokens, empty `delegatedOut`) and its task is stuck `status: "running"`.
+
+**Hypothesis (needs confirming — this is exactly what the descoped T4 repro was for).** `AbortSignal.timeout` only rescues a hang if the underlying `fetch`/stream **honors the abort**. The original watchdog existed precisely because the Codex stream reportedly *"never errors, never closes, and never honors abort"* ([[loop-model-call-hang-and-cancel]]). If that still holds: the deadline fires at 120s, signals abort, the codex stream **ignores it**, and the loop stays blocked in `consumeStream` **forever with no fallback** — arguably WORSE than the old watchdog, which at least abandoned the promise so the loop moved on. Our tests never caught this because they mocked a fetch that dutifully honors abort.
+
+- [ ] **Reproduce a REAL codex hang** and observe whether `AbortSignal.timeout` (via `AbortSignal.any`) actually tears the codex `fetch`/`consumeStream` down, or the stream ignores abort and the loop stays blocked. This is the load-bearing T4 that was descoped — it just became a live regression.
+- [ ] **If the codex stream ignores abort:** the transport deadline alone is insufficient. Add a real escape that does NOT reintroduce the tool-timing bug — e.g. `Promise.race` the model-stream consumption against the deadline so the loop REJECTS/returns even when the underlying stream never settles (scoped to the model-stream phase ONLY, never wrapping tool execution). Surface a real error → SDK retry → fail.
+- [ ] **Boot-reconciliation for a wedged root run:** `run8` left a stub trace + a task stuck `running`. Confirm `reconcileTasks` on next boot flips it → `interrupted` and surfaces it (and that a clean dev restart isn't required to un-wedge the REPL).
+- [ ] Re-verify the whole path against a real (or faithfully abort-ignoring) codex mock before re-closing T2/T6.
 
 ---
 
 ## Plan 13 — Rolling compact live-stream view (UI)
+
+**Detail:** [`reference/consistent-agent-blocks.md`](reference/consistent-agent-blocks.md) · mockup
+`https://claude.ai/code/artifact/4442e6d7-df82-4e37-b9b5-ed7f4df2e2d7`
+
+**⚠ RE-OPENED 2026-07-05 — the shipped version was the wrong shape and did not solve the problem.**
+The corrected design (approved by the captain, see the reference doc) is below the original task
+list; the original `/view stream` approach is superseded.
 
 **One line:** Bound each live agent's streaming output to a small **rolling window** (≈4 lines, 5
 max) instead of dumping the whole stream into the CLI scrollback — you can see that streaming and
@@ -529,6 +547,27 @@ not the transcript.
 - [x] Collapse cleanly: window disappears when the agent settles (brief `done` beat like panes), degrades below min terminal size, "+N more" when multiple agents stream at once. *(settle machinery mirrors SquadPanes; `resolveLayout`/component guard degrades to bar-only below `MIN_PANE_COLS/ROWS`; height-cap + `+N more` overflow — all tested: App-test collapse-on-completion, resolveLayout+component degrade, component `+N more`.)*
 - [x] Never load-bearing for context: this is display-only and must not change what's recorded or replayed (it's a view, not a compaction of the ledger — that's Plan 05). *(a separate UI ref; the reply still commits to scrollback via `streamRef`; nothing writes transcript/ledger/replay. The App test proves the reply still flushes to scrollback normally.)*
 - [x] Layer-1 `App.test.tsx`: window shows the last N delta lines during a streaming run, rolls as new deltas arrive, clears on completion. Update `TESTING.md`, `CLAUDE.md`. *(the "Plan 13: /view stream shows a rolling tail…" test; TESTING.md's Squad UI section + CLAUDE.md's `src/ui/` line updated.)*
+
+### RE-OPENED 2026-07-05 — consistent agent blocks (the correct design)
+
+**Detail + visual: [`reference/consistent-agent-blocks.md`](reference/consistent-agent-blocks.md).**
+The shipped `/view stream` was an opt-in mode nobody turns on, and even when on it left the
+full-reply scrollback dump intact — so the firehose (the actual problem) was never removed. The
+corrected design: an agent is **one block** (header + fixed 2-line body) that keeps **one shape its
+whole life** — thinking → writing → done change only the state label, rail colour, and body content;
+the block you watch live is the exact block that settles into scrollback. It is the **default**
+render (no `/view` command). Every block is focusable; open one for the full output.
+
+- [ ] **Kill the scrollback dump.** Remove the full-reply commit for agent work in `App.tsx` (the `streamRef` / `splitCompletedBlocks` path). An agent's only on-screen presence is its two-line block; the full text stays in the on-disk transcript (never on screen). *This is the core behaviour change — verify a delegation no longer floods scrollback.*
+- [ ] **Consistent block component** (`RollingStream.tsx` → the agent block; rename if clearer): header `name · state · elapsed [· artifact@vN]` + **fixed 2-line body (3 max)**; `live` (amber rail, rolling tail) / `done` (green rail, settled summary + artifact in header) / `failed` (red) variants — SAME shape across all. Nest children by delegation depth; stable ordering (a block never jumps when it settles).
+- [ ] **Settle in place → scrollback.** A live block redraws in the dynamic region; on run end the same-shaped block commits to Ink `<Static>` scrollback. Scrollback = prompt(s) + one block per agent + root's answer.
+- [ ] **Delete `/view stream`** — remove `stream` from `store/prefs.ts` `VIEW_MODES`/`isViewMode`, the `showStream` branch in `resolveLayout`, the slash surface, and `RollingStream`'s opt-in gating. The consistent-block view is the default.
+- [ ] **Focus navigation:** `shift+tab` moves focus from the input into the blocks (up-arrow stays input history); `↑↓` move a focus ring over blocks (live AND done); `⏎` opens the focused block; `esc` returns. Input visually pauses while focus is in the squad.
+- [ ] **Operation view (drill-in)** — new `OperationView.tsx`, cardKeyRef-owned: brief · the agent's **full untrimmed output** (scrollable) · tools · artifact. Reads run evidence via `core/trace-tree.ts` (reuse, no parallel reader). Keys: `↑↓` scroll · `⏎` open artifact · `t` full `/trace` · `esc` back to squad.
+- [ ] **UI polish:** header segments use a single ` · ` separator with uniform padding (the name must not crowd tighter than the other segments); elapsed is fixed-width so it doesn't jitter. (The red error affordance in the mockup's "firehose" frame is illustrative — do NOT build it.)
+- [ ] **Layer-4 VHS evidence (REQUIRED — was missing):** a slow-mode `e2e-model.ts` mode + `e2e/scenarios/consistent-blocks.ts` — drive a real root→squad delegation, gate + screenshot the live two-line blocks, the settled (done) state, and the `shift+tab`→`⏎` operation view; file assertions decide pass/fail. Same bar as Plan 10's `squad-panes`.
+- [ ] **Layer-1 `App.test.tsx`:** a delegation renders consistent blocks (not a scrollback flood); a block keeps its shape from live→done; `shift+tab` focus + `⏎` opens the operation view; the full reply is NOT in scrollback. Update `TESTING.md`, `CLAUDE.md` (replace the `/view stream` line).
+- [?] **Decisions to confirm before build** (reference doc §"Open decisions"): body height (2 fixed vs 2-live/1-done) · focus key (`shift+tab` vs `ctrl+↑`) · long-squad cap (`+N more · ⏎ expand` vs all stand) · root's own final answer renders in full as the conversational reply (block-only applies to delegated/sub-agent work).
 
 ---
 
