@@ -422,3 +422,30 @@ test("a slow tool round-trip completes — tool execution is never subject to a 
   expect(res.toolCalls.slow).toBe(1);
   expect(res.text).toBe("all done");     // and the parent surfaced the post-tool final result
 }, 5000);
+
+// Plan 12 (reopened): a stream that hangs forever (ignores abort) is bounded by the consumeStream()
+// deadline. The transport timeout on the fetch catches genuine hangs, but if the underlying stream
+// ignores the abort signal, consumeStream() can still hang forever. This test simulates that scenario
+// by creating a stream that never completes and verifying the loop rejects with a timeout error.
+test("Plan 12 (reopened): a hung stream that ignores abort is bounded by the consumeStream() deadline", async () => {
+  // A doStream that returns a ReadableStream that NEVER completes (simulates a codex stream that ignores abort).
+  // The stream starts but never emits any chunks or closes.
+  const hangingStream = new ReadableStream({
+    pull(controller) {
+      // Never call controller.enqueue() or controller.close() — the stream hangs forever
+      return new Promise(() => {}); // hang forever
+    },
+  });
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({ stream: hangingStream as any }),
+  });
+  // Use a short timeout (200ms) so the test completes quickly
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools: {},
+    modelRequestTimeoutMs: 200,
+  });
+  // The loop should have rejected with a timeout error
+  expect(res.error).toBeDefined();
+  expect(res.error).toContain("deadline");
+  expect(res.text).toBe("[error]");
+}, 5000);

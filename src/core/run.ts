@@ -496,6 +496,9 @@ export async function executeRun(
     // Plan 09: deck-wide ceilings are metered + enforced here, the same place per-run caps are. Shared
     // across every run (parent + delegated children) so the whole deck's spend counts against them.
     deckLedger: deps.deckLedger,
+    // Plan 12 (reopened): per-request transport deadline for the model fetch. Also bounds consumeStream()
+    // in case the underlying stream ignores the abort signal. Config-disposed via defaults.modelRequestTimeoutMs.
+    modelRequestTimeoutMs: deps.configDefaults?.modelRequestTimeoutMs,
   });
   // The run has COMPLETED the moment runLoop returns a terminal result — mark the turn closed HERE,
   // BEFORE the post-loop finalization/close block. This scopes the catch's recordTurnFailure to genuine

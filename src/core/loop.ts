@@ -7,6 +7,7 @@ import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
 import { deckCeilingHit, type DeckLedger } from "../store/deck-budget";
 import { compactMessages, estimateContextTokens, type CompactionSummary } from "./compaction";
+import { DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from "./providers/request-timeout";
 
 /** Plan 05: how many recent tool round-trips the compaction fold keeps VERBATIM (the system prompt +
  *  the original brief are kept separately). The oldest round-trips beyond this window are folded. */
@@ -78,6 +79,11 @@ export async function runLoop(opts: {
    *  call we commit that call's spend. Subscription calls commit 0 USD (unmeasurable) but still count
    *  tokens, so a USD ceiling never fabricates spend. Undefined ⇒ no deck ceilings configured. */
   deckLedger?: DeckLedger;
+  /** Plan 12 (reopened): per-request transport deadline (ms) for the model fetch. A genuinely hung
+   *  request (open socket, zero tokens) becomes a retryable error routed through the AI SDK's maxRetries,
+   *  instead of the deleted loop-level idle watchdog. Config-disposed; defaults to 120s. Also used to
+   *  bound consumeStream() in case the underlying stream ignores the abort signal. */
+  modelRequestTimeoutMs?: number;
 }): Promise<LoopResult> {
   const counts: Record<string, number> = {};
   const transcript: LoopResult["transcript"] = [];
@@ -188,7 +194,22 @@ export async function runLoop(opts: {
         // at once when the run returns).
         onChunk: ({ chunk }) => { if (chunk.type === "text-delta") opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text }); },
       });
-      await s.consumeStream();
+      // Plan 12 (reopened): the transport timeout on the fetch catches genuine hangs, but if the
+      // underlying stream ignores the abort signal, consumeStream() can still hang forever. Race
+      // consumeStream() against a deadline so the loop rejects/returns even when the stream never
+      // settles. The deadline matches the transport timeout so it only fires if the transport timeout
+      // failed to tear the stream down. This is scoped to the model-stream phase: tool execution
+      // happens AFTER the model finishes streaming, so a hung stream during the model phase is caught
+      // here; tool execution is not affected (it completes in seconds/minutes, not 120s+).
+      const timeoutMs = opts.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS;
+      const streamTimeout = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          const err = new Error(`model stream consumption exceeded the ${timeoutMs}ms deadline (stream never settled)`);
+          (err as Error & { code?: string }).code = "ETIMEDOUT";
+          reject(err);
+        }, timeoutMs);
+      });
+      await Promise.race([s.consumeStream(), streamTimeout]);
       if (streamErr) throw streamErr;
       out = {
         text: await s.text,
