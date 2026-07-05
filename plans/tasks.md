@@ -594,3 +594,42 @@ reference** to a tool the agent doesn't have.
 - [x] Backfill the existing 9 toolless agents (a boot reconcile / migration that grants the default trio to any worker with `tools: []`), so the live deck is usable without hand-editing each `agent.md`. *`reconcileWorkerTools(ws)` in `roster.ts` — a CODE-level boot migration (the 9 live agents are in the captain's gitignored `agents/`, not in-repo): scans `agents/`, grants the baseline to any non-root worker persisted with `tools: []`, rewrites its `agent.md`, and returns the fixed ids for a boot notice. Wired into `index.tsx` boot after `seedLibrarian`. A deliberate non-empty grant (and root/librarian) is left untouched. Tested with a synthetic `content-strategist` `tools:[]` worker in `roster.test.ts` (fixes it, preserves a narrow grant, idempotent).*
 - [x] Reconcile the dangling skill: point `write-a-clear-artifact` at the real `save_artifact` (not the legacy `write_artifact`), or gate the guidance on the tool actually being granted. *`seed-skills.ts` `write-a-clear-artifact` now coaches "before you save_artifact a work product (the structured, always-granted hand-off tool)" and its step 5 uses `save_artifact`'s `id`/`title`/`summary`/handle vocabulary (was `write_artifact`'s `topicSlug`). `write_artifact` is confirmed still a REAL tool (a back-compat wrapper over `saveArtifact`, `tools.ts:57`) and stays in the grant baseline — only the skill guidance repoints to the preferred structured tool. Locked by a test in `seed-skills.test.ts` (references `save_artifact`, no longer says "calling write_artifact").*
 - [x] Test: a freshly `create_agent`'d worker (no `tools` field AND explicit `tools: []`) ends up with the artifact trio bound; a delegated child can `save_artifact` and hand off by reference (proves the `root/2026-07-04-run6` gap is closed). Update `CLAUDE.md`. *`tools.test.ts` Plan 14 block: both create paths bind the artifact tools via `toolsForAgent`; a created child `save_artifact`s a dossier and hands back the HANDLE (`c.artifacts === [research-dossier@v1]`, body on disk — not loose text); a regression-witness test proves the OLD `tools:[]` state bound only `find_skills`/`use_skill`. `CLAUDE.md` updated (store `roster.ts` note + a "Workers are never born toolless" convention bullet).*
+
+---
+
+## Plan 15 — Artifact viewer + completion action bar
+
+**Detail:** [`reference/artifact-viewer.md`](reference/artifact-viewer.md) · mockup
+`https://claude.ai/code/artifact/22d69f7e-d2be-49b1-ac97-068de06477c1`
+
+**One line:** When a flow finishes, root names the deliverable (no paste) and the app offers **View
+artifacts** — a built-in, markdown-rendering viewer that opens on the newest artifact and lets the
+captain browse the whole chat's artifacts (`←/→` + a `tab` jump list). Stop dumping artifact bodies
+into the terminal; make them viewable after the run.
+
+**Why:** on `root/2026-07-05-run3` root pasted the entire master script into the terminal. The
+captain wants the content OUT of the chat and in a viewer they can navigate to after completion.
+`/artifacts show` only prints the envelope today (no body render) — the viewer is the missing surface.
+
+### Phase 0 — Decisions (captain-approved 2026-07-05)
+- [x] **Mechanism:** built-in TUI viewer (not root shelling out per-turn; not system auto-open). *Decided.*
+- [x] **Trigger:** deterministic completion action bar when a user turn produced ≥1 artifact. *Decided.*
+- [x] **Order:** latest-first; open on the newest (the deliverable); browse the rest. *Decided.*
+- [x] **Scope:** the conversation's artifacts. *Decided.*
+
+### Phase 1 — Stop the dump
+- [ ] `prompt.ts`: root's final reply NAMES the deliverable handle and never pastes the artifact body. Assert in a Layer-1 test that a completed flow's root reply contains the handle, not the body.
+
+### Phase 2 — Completion action bar
+- [ ] In `App.tsx`, when a `triggeredBy:"user"` turn completes and its subtree produced ≥1 artifact, show a keyboard-navigable bar (`▸ View artifacts (N) · Continue chatting`); `←/→` move, `⏎` select, `esc`/type → chat. No bar when 0 artifacts. Keyboard via the existing card/focus forwarding.
+
+### Phase 3 — Artifact viewer
+- [ ] New `src/ui/ArtifactViewer.tsx` (cardKeyRef-owned): renders the selected artifact's BODY as markdown (reuse the existing streamed-reply/block markdown render — no second renderer), scrollable; header = handle · producer · age · position · verdict.
+- [ ] Ordered latest-first, opens on the newest; `←/→` prev/next; `tab` jump list (this chat's artifacts, latest-first, `title · handle · producer · age`, `↑↓`+`⏎`); `esc` back to chat.
+- [ ] Data: gather the conversation's produced artifacts from its run traces (`artifacts`/`outputArtifacts` across `rootRunId` + children), de-dup by handle, order by `created` desc; resolve via `readArtifact`+`readArtifactBody`. Reuse a `trace-tree`-style walk. Pure-unit the gather/order.
+- [ ] Optional escape hatch: `o` opens the real file in `$EDITOR`/`code` (configured opener; default keep). `/artifacts view` slash reopens the viewer for the current conversation.
+
+### Phase 4 — Tests & docs
+- [ ] Layer-1 `App.test.tsx`: completion bar appears with correct count; `⏎` opens viewer on newest; `←/→` steps; `tab` jump list switches; `esc` returns; no-artifact turn → no bar; root reply has no body.
+- [ ] Layer-4 VHS evidence (same bar as Plan 10/13): drive a delegation to completion → screenshot the bar → open the viewer (markdown body on screen) → open the jump list; file assertions confirm artifacts exist and the body is NOT in scrollback.
+- [ ] Update `TESTING.md`, `CLAUDE.md`.
