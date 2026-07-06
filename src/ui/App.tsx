@@ -41,7 +41,7 @@ import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
 import { addMcpServer, removeMcpServer } from "../store/mcp-store";
 import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand, parseArtifactsCommand, tokenize } from "./slash";
-import { listArtifacts, readArtifact, artifactVersions, gcArtifacts, collectReferencedArtifacts } from "../store/artifacts";
+import { listArtifacts, readArtifact, readArtifactBody, artifactVersions, gcArtifacts, collectReferencedArtifacts } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { artifactHandle } from "../schemas/artifact";
 import { syncKnowledgeSources } from "../knowledge/sync";
@@ -945,6 +945,18 @@ export function App(props: {
         say({ kind: "system", text: `  type=${a.type} role=${a.role} producer=${a.producer} run=${a.runId} versions=[${artifactVersions(props.ws, a.id).join(", ")}]` });
         if (a.parents.length) say({ kind: "system", text: `  parents: ${a.parents.join(", ")}` });
         if (a.summary) say({ kind: "system", text: `  summary: ${a.summary}` });
+        // Render the artifact BODY (not just the envelope) so `/artifacts show` actually shows the
+        // content — the in-terminal complement to the full-screen viewer. readArtifactBody returns
+        // null for external (MCP-fronted) refs, so those just show the envelope + locator.
+        if (a.location.kind === "external") {
+          say({ kind: "system", text: `  external: ${a.location.uri}` });
+        } else {
+          const body = readArtifactBody(props.ws, artifactHandle(a));
+          if (body && body.length) {
+            say({ kind: "system", text: "  ───" });
+            renderMarkdown(body.toString("utf8"), mdWidth).split("\n").forEach((ln) => say({ kind: "system", text: `  ${ln}` }));
+          }
+        }
         const anns = listAnnotations(props.ws, artifactHandle(a));
         if (!anns.length) say({ kind: "system", text: "  (no annotations)" });
         else anns.forEach((an) => say({ kind: "system", text: `  ✎ [${an.id}] (${an.status}) ${an.kind} · ${an.author}: ${an.body}${an.verdict ? ` [${an.verdict.pass ? "pass" : "FAIL"}]` : ""}` }));

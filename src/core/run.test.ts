@@ -763,6 +763,33 @@ test("a FAILED verdict annotates only the child's LATEST output version — a sa
   expect(listAnnotations(ws, "out@v1").length).toBe(0); // NOT smeared onto the superseded version
 });
 
+test("the checker judges the child's PRODUCED ARTIFACT BODY, not its hand-off text (workers hand off by reference)", async () => {
+  const { ws, db } = await boot();
+  putAgent(ws, db, { id: "boss", role: "boss", identity: "You delegate.", tools: ["delegate_task"], canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 10, maxWorkItemsPerRequest: 20 } });
+  putAgent(ws, db, { id: "worker", role: "worker", identity: "You write.", tools: ["save_artifact"], canSee: ["*"], canDelegateTo: [], budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 } });
+  // The worker produces the deliverable AS AN ARTIFACT (the body mentions Y) and returns only a terse
+  // hand-off sentence that does NOT contain Y — exactly how a real worker hands off by reference.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }),      // boss
+    call("save_artifact", { id: "brief", title: "Brief", body: "FULL BODY CONTENT: this deliverable clearly mentions Y in detail." }), // worker → brief@v1
+    text("Saved the brief as brief@v1."),                                                       // worker hand-off (NO "Y")
+    text('{"pass": true, "reasons": []}'),                                                      // checker
+    text("boss done"),                                                                          // boss final
+  ) as any });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.verification.length).toBe(1);
+  // The checker's own model call is the one carrying the acceptance-checker framing. Its prompt MUST
+  // contain the artifact BODY (so the checker can actually judge the deliverable), not merely the
+  // hand-off sentence.
+  const calls = (model as any).doGenerateCalls as { prompt: unknown }[];
+  const checkerCall = calls.find((c) => JSON.stringify(c.prompt).includes("CANDIDATE OUTPUT"));
+  expect(checkerCall).toBeDefined();
+  const checkerPrompt = JSON.stringify(checkerCall!.prompt);
+  expect(checkerPrompt).toContain("FULL BODY CONTENT: this deliverable clearly mentions Y in detail."); // the body reached the checker
+  expect(checkerPrompt).toContain("brief@v1");                                                          // labelled by handle
+});
+
 test("the verification retry consumes a work item — a budget-exhausted retry is refused, result surfaced with the failed verdict", async () => {
   const { ws, db } = await boot();
   bossAndWorker(ws, db, { workItems: 1 }); // boss may delegate ONCE; the retry needs a 2nd → refused

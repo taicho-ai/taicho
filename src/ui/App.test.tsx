@@ -1170,9 +1170,9 @@ test("/artifacts approve records a captain sign-off", async () => {
   expect(listAnnotations(ws, "dossier").map((a) => a.kind)).toEqual(["approval"]);
 });
 
-test("/artifacts show surfaces provenance + the open feedback on an artifact", async () => {
+test("/artifacts show surfaces provenance + the artifact BODY + the open feedback", async () => {
   const { ws, props } = await setup();
-  saveArtifact(ws, { id: "dossier", title: "Dossier", type: "dossier", summary: "sum", body: "BODY", producer: "root", runId: "root/1" });
+  saveArtifact(ws, { id: "dossier", title: "Dossier", type: "dossier", summary: "sum", body: "THE ACTUAL DELIVERABLE BODY", producer: "root", runId: "root/1" });
   annotateArtifact(ws, { target: "dossier@v1", author: "human", body: "add dates" });
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "/artifacts show dossier", ENTER);
@@ -1180,6 +1180,7 @@ test("/artifacts show surfaces provenance + the open feedback on an artifact", a
   const frame = lastFrame() ?? "";
   expect(frame).toContain("producer=root");
   expect(frame).toContain("versions=[1]");
+  expect(frame).toContain("THE ACTUAL DELIVERABLE BODY"); // the BODY is rendered, not just the envelope
 });
 
 test("/artifacts annotate on a missing artifact reports the error (no dangling feedback)", async () => {
