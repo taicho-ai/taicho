@@ -184,30 +184,31 @@ export async function runLoop(opts: {
       let streamErr: unknown;
       let toolExecuting = false;
       const timeoutMs = opts.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS;
+      // Timer state — per-run, not global (concurrency-safe)
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      let rejectIdle: ((err: Error) => void) | null = null;
+      const resetIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        if (toolExecuting) return; // disarmed during tool execution
+        idleTimer = setTimeout(() => {
+          const err = new Error(`model stream idle for ${timeoutMs}ms (no chunks, no tool execution)`);
+          (err as Error & { code?: string }).code = "ETIMEDOUT";
+          rejectIdle?.(err);
+        }, timeoutMs);
+      };
+      const setToolExecuting = (executing: boolean) => {
+        toolExecuting = executing;
+        if (executing && idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        } else if (!executing) {
+          resetIdleTimer();
+        }
+      };
       // Create a promise that rejects when the idle timer fires
       const idleTimeoutPromise = new Promise<never>((_, reject) => {
-        let timer: ReturnType<typeof setTimeout> | null = null;
-        const resetTimer = () => {
-          if (timer) clearTimeout(timer);
-          if (toolExecuting) return; // disarmed during tool execution
-          timer = setTimeout(() => {
-            const err = new Error(`model stream idle for ${timeoutMs}ms (no chunks, no tool execution)`);
-            (err as Error & { code?: string }).code = "ETIMEDOUT";
-            reject(err);
-          }, timeoutMs);
-        };
-        // Expose the reset function via a global (hacky but works for this scope)
-        (globalThis as any).__resetIdleTimer = resetTimer;
-        (globalThis as any).__setToolExecuting = (executing: boolean) => {
-          toolExecuting = executing;
-          if (executing && timer) {
-            clearTimeout(timer);
-            timer = null;
-          } else if (!executing) {
-            resetTimer();
-          }
-        };
-        resetTimer();
+        rejectIdle = reject;
+        resetIdleTimer();
       });
       const s = streamText({
         model: opts.model,
@@ -225,23 +226,22 @@ export async function runLoop(opts: {
         // Surface each chunk so the UI can render the response live as it streams (instead of all
         // at once when the run returns). Also reset the idle timer on each chunk.
         onChunk: ({ chunk }) => {
-          (globalThis as any).__resetIdleTimer?.();
+          resetIdleTimer();
           if (chunk.type === "text-delta") {
             opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text });
           } else if (chunk.type === "tool-call") {
             // Tool execution is about to start — disarm the idle timer
-            (globalThis as any).__setToolExecuting?.(true);
+            setToolExecuting(true);
           } else if (chunk.type === "tool-result") {
             // Tool execution completed — re-arm the idle timer
-            (globalThis as any).__setToolExecuting?.(false);
+            setToolExecuting(false);
           }
         },
       });
       // Race consumeStream() against the idle timeout
       await Promise.race([s.consumeStream(), idleTimeoutPromise]);
-      // Clean up the global functions
-      delete (globalThis as any).__resetIdleTimer;
-      delete (globalThis as any).__setToolExecuting;
+      // Clean up the timer
+      if (idleTimer) clearTimeout(idleTimer);
       if (streamErr) throw streamErr;
       out = {
         text: await s.text,
