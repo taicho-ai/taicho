@@ -422,3 +422,112 @@ test("a slow tool round-trip completes — tool execution is never subject to a 
   expect(res.toolCalls.slow).toBe(1);
   expect(res.text).toBe("all done");     // and the parent surfaced the post-tool final result
 }, 5000);
+
+// Plan 12 (reopened): a stream that hangs forever (no chunks, no tool execution) is caught by the
+// idle timer. The timer resets on each chunk and is disarmed during tool execution, so it only fires
+// when there's genuine inactivity (no chunks, no tool execution).
+test("Plan 12 (reopened): a hung stream with no chunks is caught by the idle timer", async () => {
+  // A doStream that returns a ReadableStream that NEVER emits any chunks (simulates a hung stream).
+  const hangingStream = new ReadableStream({
+    pull(controller) {
+      // Never call controller.enqueue() or controller.close() — the stream hangs forever
+      return new Promise(() => {}); // hang forever
+    },
+  });
+  const model = new MockLanguageModelV3({
+    doStream: async () => ({ stream: hangingStream as any }),
+  });
+  // Use a short timeout (200ms) so the test completes quickly
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools: {},
+    modelRequestTimeoutMs: 200,
+  });
+  // The loop should have rejected with a timeout error
+  expect(res.error).toBeDefined();
+  expect(res.error).toContain("idle");
+  expect(res.text).toBe("[error]");
+}, 5000);
+
+// Plan 12 (reopened): a tool slower than the deadline still completes. The idle timer is disarmed
+// during tool execution, so a long tool (like the 156s shot-planner delegation) is not killed.
+test("Plan 12 (reopened): a tool slower than the deadline still completes (shot-planner regression)", async () => {
+  // A tool that takes 400ms to execute
+  let toolRan = false;
+  const slowTools: ToolSet = {
+    slow: tool({
+      description: "a tool whose execution takes longer than the deadline",
+      inputSchema: z.object({}),
+      execute: async () => { await new Promise((r) => setTimeout(r, 400)); toolRan = true; return { done: true }; },
+    }),
+  };
+  // A stream that emits a tool-call chunk, then waits for the tool to execute, then emits the final chunks
+  const slowCallChunks = [
+    { type: "stream-start", warnings: [] },
+    { type: "tool-call", toolCallId: "s1", toolName: "slow", input: "{}" },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_use" }, usage },
+  ];
+  const model = new MockLanguageModelV3({ doStream: streamSeq(slowCallChunks, finalChunks) });
+  // Use a 200ms deadline — the tool takes 400ms, so it would be killed by a naive Promise.race
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools: slowTools,
+    modelRequestTimeoutMs: 200,
+  });
+  // The tool should have completed despite being slower than the deadline
+  expect(toolRan).toBe(true);
+  expect(res.toolCalls.slow).toBe(1);
+  expect(res.error).toBeUndefined();
+}, 5000);
+
+// Plan 12 (reopened): two CONCURRENT runs must not interfere with each other's idle timers.
+// The timer state must be per-run, not global.
+test("Plan 12 (reopened): two concurrent runs with long tools both complete (no timer cross-wiring)", async () => {
+  // Two tools that each take 400ms to execute
+  let toolARan = false;
+  let toolBRan = false;
+  const slowToolsA: ToolSet = {
+    slowA: tool({
+      description: "tool A",
+      inputSchema: z.object({}),
+      execute: async () => { await new Promise((r) => setTimeout(r, 400)); toolARan = true; return { done: true }; },
+    }),
+  };
+  const slowToolsB: ToolSet = {
+    slowB: tool({
+      description: "tool B",
+      inputSchema: z.object({}),
+      execute: async () => { await new Promise((r) => setTimeout(r, 400)); toolBRan = true; return { done: true }; },
+    }),
+  };
+  // Streams that emit tool-call chunks, then wait for tools to execute, then emit final chunks
+  const slowCallChunksA = [
+    { type: "stream-start", warnings: [] },
+    { type: "tool-call", toolCallId: "a1", toolName: "slowA", input: "{}" },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_use" }, usage },
+  ];
+  const slowCallChunksB = [
+    { type: "stream-start", warnings: [] },
+    { type: "tool-call", toolCallId: "b1", toolName: "slowB", input: "{}" },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_use" }, usage },
+  ];
+  const modelA = new MockLanguageModelV3({ doStream: streamSeq(slowCallChunksA, finalChunks) });
+  const modelB = new MockLanguageModelV3({ doStream: streamSeq(slowCallChunksB, finalChunks) });
+  // Use a 200ms deadline — both tools take 400ms, so they would be killed by a naive Promise.race
+  // or if the timers cross-wired (one run's chunks reset the other run's timer)
+  const [resA, resB] = await Promise.all([
+    runLoop({
+      model: modelA, agent, system: "S", messages: [{ role: "user", content: "go" }], tools: slowToolsA,
+      modelRequestTimeoutMs: 200,
+    }),
+    runLoop({
+      model: modelB, agent, system: "S", messages: [{ role: "user", content: "go" }], tools: slowToolsB,
+      modelRequestTimeoutMs: 200,
+    }),
+  ]);
+  // Both tools should have completed despite being slower than the deadline
+  expect(toolARan).toBe(true);
+  expect(toolBRan).toBe(true);
+  expect(resA.toolCalls.slowA).toBe(1);
+  expect(resB.toolCalls.slowB).toBe(1);
+  expect(resA.error).toBeUndefined();
+  expect(resB.error).toBeUndefined();
+}, 5000);
