@@ -265,6 +265,24 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           return child;
         };
 
+        // What the checker actually judges. Workers hand off BY REFERENCE (Plan 14) — the child's chat
+        // reply is a hand-off sentence ("Saved the brief as brief@v2"), NOT the deliverable, so judging
+        // `child.text` against content criteria false-fails EVERY artifact-producing worker (the checker
+        // literally never sees the content). Resolve the child's PRODUCED artifact bodies (latest version
+        // per id) and judge those; fall back to the chat text only when the child produced no artifact
+        // (a genuinely text-only delegation, today's behavior).
+        const candidateOutput = (c: RunResult): string => {
+          const bodies: string[] = [];
+          for (const h of latestHandlePerId(c.trace.artifacts)) {
+            try {
+              const body = readArtifactBody(ctx.ws, h);
+              if (body && body.length) bodies.push(`ARTIFACT ${h}:\n${body.toString("utf8")}`);
+            } catch { /* unreadable handle → skip, fall through to chat text if none resolve */ }
+          }
+          if (!bodies.length) return c.text;
+          return c.text ? `${c.text}\n\n${bodies.join("\n\n")}` : bodies.join("\n\n");
+        };
+
         try {
           let child = await spawn(context);
           ctx.inputArtifacts.push(...resolved); // hand-off graph: handles I sent down (same set for any retry)
@@ -323,7 +341,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
 
           // Independent checker call, BEFORE the result reaches the parent's context. Its spend is
           // real model spend this run caused → fold it into the aggregate (like child-run spend).
-          const first = await ctx.checkCriteria({ goal, criteria, output: child.text });
+          const first = await ctx.checkCriteria({ goal, criteria, output: candidateOutput(child) });
           ctx.verifierSpend.tokens += first.tokens;
           ctx.verifierSpend.costUsd += first.costUsd ?? 0; // null (subscription) folds as 0 in the sum; recorded value stays null
           ctx.verifications.push({ criteria, verdict: first.verdict, runId: child.runId, retried: false, tokens: first.tokens, costUsd: first.costUsd, costNote: first.costNote });
@@ -346,7 +364,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
             // Retry-spawn ALSO threads inputArtifacts (via the closure's `resolved`) so the retried
             // child still receives the same input handles by reference.
             const retry = await spawn(context ? `${context}\n\n${feedback}` : feedback);
-            const second = await ctx.checkCriteria({ goal, criteria, output: retry.text });
+            const second = await ctx.checkCriteria({ goal, criteria, output: candidateOutput(retry) });
             ctx.verifierSpend.tokens += second.tokens;
             ctx.verifierSpend.costUsd += second.costUsd ?? 0; // null (subscription) folds as 0 in the sum; recorded value stays null
             ctx.verifications.push({ criteria, verdict: second.verdict, runId: retry.runId, retried: true, tokens: second.tokens, costUsd: second.costUsd, costNote: second.costNote });
