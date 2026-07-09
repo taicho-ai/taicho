@@ -15,6 +15,7 @@
  *  Tests use `createLogger({ file })` for isolation. */
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { trace, context } from "@opentelemetry/api";
 
 export type LogLevel = "debug" | "info" | "warn" | "error" | "silent";
 
@@ -68,7 +69,12 @@ function serialize(data: unknown): string {
 function format(level: LogLevel, msg: string, data?: unknown): string {
   const tail = serialize(data);
   const line = tail ? `${msg} :: ${tail}` : msg;
-  return `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} ${redact(line)}\n`;
+  // Plan 17: correlate the execution log with OpenTelemetry. When a span is active (a run/model/tool
+  // is in flight), stamp its trace_id/span_id so a taicho.log line lines up with the exact span in
+  // Jaeger/LangSmith/etc. No-op when telemetry is off (no active span) or outside a run.
+  const sc = trace.getSpanContext(context.active());
+  const corr = sc ? ` trace_id=${sc.traceId} span_id=${sc.spanId}` : "";
+  return `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} ${redact(line)}${corr}\n`;
 }
 
 class FileLogger implements Logger {

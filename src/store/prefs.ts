@@ -7,10 +7,10 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { log } from "../core/logger";
 
-/** The live-view surfaces: the status bar (summary), the split panes (per-agent detail), both, or the
- *  live waterfall (Plan 02 Phase 6 — the redrawing span tree of the in-flight run). Plan 13's
- *  consistent-block view is the DEFAULT render (no mode toggle needed). */
-export const VIEW_MODES = ["bar", "panes", "both", "waterfall"] as const;
+/** The live-view surfaces: the status bar (summary), the split panes (per-agent detail), or both.
+ *  Plan 13's consistent-block view is the DEFAULT render (no mode toggle needed). The live waterfall
+ *  was retired with the /trace inspector (Plan 17) — trace visualization is OpenTelemetry's job now. */
+export const VIEW_MODES = ["bar", "panes", "both"] as const;
 export type ViewMode = (typeof VIEW_MODES)[number];
 export const DEFAULT_VIEW_MODE: ViewMode = "both";
 

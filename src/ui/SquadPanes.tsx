@@ -39,16 +39,14 @@ const RULE = "▎";         // the left-accent that reads as a pane's column edg
 
 /** Pure layout decision shared by the App and its tests: which surfaces show for a mode + terminal
  *  size. Panes hide in `bar`/`waterfall` mode and whenever the terminal is too small (degrade
- *  to bar-only); the `waterfall` mode (Plan 02 Phase 6) shows the redrawing live span tree in place of
- *  the panes; the bar stays only in `bar`/`both` (and everywhere when too small to render a richer surface).
+ *  to bar-only); the bar stays only in `bar`/`both` (and everywhere when too small to render panes).
  *  Plan 13's consistent-block view is the DEFAULT render — it replaces the panes as the primary squad view. */
-export function resolveLayout(viewMode: ViewMode, columns: number, rows: number): { showPanes: boolean; showBar: boolean; showWaterfall: boolean } {
+export function resolveLayout(viewMode: ViewMode, columns: number, rows: number): { showPanes: boolean; showBar: boolean } {
   const tooSmall = columns < MIN_PANE_COLS || rows < MIN_PANE_ROWS;
   return {
-    showWaterfall: viewMode === "waterfall" && !tooSmall,
-    showPanes: viewMode !== "bar" && viewMode !== "waterfall" && !tooSmall,
-    // Bar is the complete summary; it owns the surface in bar/both, and is the fallback whenever a
-    // richer surface (panes/waterfall) can't render because the terminal is too small.
+    showPanes: viewMode !== "bar" && !tooSmall,
+    // Bar is the complete summary; it owns the surface in bar/both, and is the fallback whenever the
+    // panes can't render because the terminal is too small.
     showBar: viewMode === "bar" || viewMode === "both" || tooSmall,
   };
 }

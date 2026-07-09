@@ -13,7 +13,6 @@ const trace = (id: string): RunTrace => ({
 const deps = {
   roster,
   listTraces: (a?: string) => (a ? [trace(`${a}/2026-06-11-run1`)] : [trace("root/2026-06-11-run1"), trace("w/2026-06-11-run1")]),
-  readTrace: (id: string) => { if (id === "missing") throw new Error("nope"); return trace(id); },
   listPolicies: (a: string) => a === "w" ? [{ id: "pol_1", agent: "w", when: "x", do: "y", scope: "agent", status: "approved", taughtBy: "user", created: "2026-06-11T00:00:00.000Z", expanded: [] } as any] : [],
   deletePolicy: (_a: string, p: string) => p === "pol_1",
   approvePolicy: (p: string) => p === "pol_1" ? ({ id: "pol_1", agent: "w", when: "x", do: "y", scope: "agent", status: "approved", taughtBy: "verification", created: "2026-06-11T00:00:00.000Z", expanded: [] } as any) : null,
@@ -25,17 +24,10 @@ test("/agents lists roster with root marked", () => {
   expect(out.some((t) => t.includes("* root"))).toBe(true);
   expect(out.some((t) => t.includes("- w"))).toBe(true);
 });
-test("/runs lists all; /runs <agent> filters", () => {
-  expect(runSlash("runs", "", deps).length).toBe(2);
-  expect(runSlash("runs", "w", deps).length).toBe(1);
+test("/costs rolls up spend from the run traces", () => {
+  expect(runSlash("costs", "", deps).length).toBeGreaterThan(0);
 });
-test("/runs rows include a duration (the waterfall picker)", () => {
-  expect(runSlash("runs", "", deps)[0].text).toMatch(/\d+\.\d+s/);
-});
-test("/runs with no runs -> message", () => {
-  expect(runSlash("runs", "", { ...deps, listTraces: () => [] })[0].text).toContain("no runs");
-});
-// `/trace` is now interactive (App.tsx opens the TraceInspector) — no longer a pure one-liner here.
+// Plan 17: /runs and /trace were retired with the waterfall — trace viewing is OpenTelemetry's job now.
 test("unknown command -> message", () => { expect(runSlash("frob", "", deps)[0].text).toContain("unknown command"); });
 
 test("/policies lists an agent's notes; empty -> message", () => {
@@ -58,9 +50,9 @@ test("/policies approve <id> flips a proposed note (via approvePolicy); unknown 
 test("suggestCommands: all on bare slash, prefix-filtered, none past the command or for non-slash", () => {
   expect(suggestCommands("/").length).toBe(COMMANDS.length);
   expect(suggestCommands("/te").map((c) => c.name)).toEqual(["teach"]);
-  expect(suggestCommands("/TR").map((c) => c.name)).toEqual(["trace"]); // case-insensitive
+  expect(suggestCommands("/CO").map((c) => c.name)).toEqual(["costs"]); // case-insensitive
   expect(suggestCommands("/zzz")).toEqual([]);
-  expect(suggestCommands("/runs ")).toEqual([]); // space -> into args, not completing the name
+  expect(suggestCommands("/costs ")).toEqual([]); // space -> into args, not completing the name
   expect(suggestCommands("hello")).toEqual([]);
   expect(suggestCommands("")).toEqual([]);
 });
@@ -73,7 +65,7 @@ test("cycleIndex: wraps both ends, moves in the middle, guards empty", () => {
 });
 
 test("/help is derived from COMMANDS (lists every command)", () => {
-  const text = runSlash("help", "", { roster: [], listTraces: () => [], readTrace: () => { throw new Error(); }, listPolicies: () => [], deletePolicy: () => false, approvePolicy: () => null }).map((l) => l.text).join("\n");
+  const text = runSlash("help", "", { roster: [], listTraces: () => [], listPolicies: () => [], deletePolicy: () => false, approvePolicy: () => null }).map((l) => l.text).join("\n");
   for (const c of COMMANDS) expect(text).toContain(`/${c.name}`);
 });
 

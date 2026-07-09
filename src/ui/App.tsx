@@ -9,13 +9,10 @@ import { SquadPanes, resolveLayout, type PaneEntry, type PaneFeedMap } from "./S
 import { AgentBlock, useBlockSettle, useBlockTicker, tailLines, type AgentBlockData } from "./AgentBlock";
 import { OperationView } from "./OperationView";
 import { ArtifactViewer } from "./ArtifactViewer";
-import { TraceInspector } from "./TraceInspector";
-import { LiveWaterfall } from "./LiveWaterfall";
 import { parseInput } from "./input";
 import { BANNER } from "./banner";
 import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
-import { deriveTrace, deriveTaskTrace, gatherConversationArtifacts, type Span } from "../core/trace-tree";
-import { emptyLiveTrace, liveRunStart, liveStep, liveRunEnd, liveSpans, type LiveTraceState } from "../core/live-trace";
+import { gatherConversationArtifacts } from "../core/conversation-artifacts";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTraces, readTrace } from "../store/trace";
@@ -230,25 +227,10 @@ export function App(props: {
   const streamBlocksRef = useRef(0); // how many completed streamed blocks we've committed this run
   const streamRunIdRef = useRef<string | undefined>(undefined); // Plan 13: track which run is streaming (so flushStream can gate on root)
   // Plan 10 live status: statusRef is the authoritative per-run status map (dodges stale closures in
-  // the rapid onStep stream); `statuses` is the rendered snapshot. Plan 02: `inspect` holds the
-  // derived span tree while the waterfall inspector is open (it owns the keyboard via cardKeyRef).
+  // the rapid onStep stream); `statuses` is the rendered snapshot.
   const statusRef = useRef<StatusMap>(new Map());
   const [statuses, setStatuses] = useState<AgentStatus[]>([]);
-  const [inspect, setInspect] = useState<{ rootId: string; spans: Span[] } | null>(null);
   const clearStatuses = () => { statusRef.current = new Map(); setStatuses([]); };
-  // Plan 02 Phase 6 (live waterfall): liveTraceRef is the authoritative partial span tree (dodges the
-  // rapid onStep stream's stale closures, like statusRef); `liveTraceSpans` is the rendered snapshot
-  // the LiveWaterfall redraws from. Both fold the SAME event stream the status map does.
-  const liveTraceRef = useRef<LiveTraceState>(emptyLiveTrace());
-  const [liveTraceSpans, setLiveTraceSpans] = useState<Span[]>([]);
-  // The accumulator is folded on EVERY run (cheap ref mutation), but the snapshot state — the only
-  // part that re-renders the App — is pushed only when the live waterfall is the active surface, so
-  // the default bar/panes/both modes pay nothing extra per engine event. viewModeRef tracks the live
-  // mode for the onStep closure (which captures viewMode at run start and would otherwise go stale).
-  const viewModeRef = useRef(viewMode);
-  viewModeRef.current = viewMode;
-  const pushLiveTrace = () => { if (viewModeRef.current === "waterfall") setLiveTraceSpans(liveSpans(liveTraceRef.current)); };
-  const clearLiveTrace = () => { liveTraceRef.current = emptyLiveTrace(); setLiveTraceSpans([]); };
   // Plan 10 Phase 4: per-run activity feed for the split-pane view (recent tool lines + the live
   // streamed/final text), built off the SAME event stream the status map is. Reset at each new turn.
   const PANE_FEED_LINES = 4;
@@ -327,7 +309,7 @@ export function App(props: {
     // when the captain's first keystroke arrives, so we forward it to the active card. (A card-owned
     // useInput registers a beat after its render commits and would drop that first key — the hang
     // we're fixing.) The card publishes its handler to cardKeyRef during render.
-    if (pending || inspect || operationRunId || artifactViewerOpen) { cardKeyRef.current?.(input, key); return; } // a card OR the trace inspector OR operation view OR artifact viewer owns the keyboard
+    if (pending || operationRunId || artifactViewerOpen) { cardKeyRef.current?.(input, key); return; } // a card OR the operation view OR artifact viewer owns the keyboard
     // Plan 15: completion action bar navigation. ←/→ move, ⏎ select, esc/type → dismiss.
     if (completionArtifacts && completionArtifacts.length > 0) {
       if (key.escape) { setCompletionArtifacts(null); setActionBarFocus(0); return; }
@@ -562,9 +544,6 @@ export function App(props: {
         const now = Date.now();
         statusRef.current = statusReducer(statusRef.current, ev, now);
         setStatuses(statusList(statusRef.current));
-        // Plan 02 Phase 6: fold the same phase event into the live waterfall's partial span tree.
-        liveStep(liveTraceRef.current, ev, now);
-        pushLiveTrace();
         // The pane feed carries tool activity only (the streamed/final reply stays in the scrollback
         // reply channel — duplicating it in the pane raced that channel; see SquadPanes PaneEntry).
         if (phase === "tool_start" && tool)
@@ -627,20 +606,13 @@ export function App(props: {
     awaitTask,
     // Live-run bookkeeping only. The per-turn AUDIT (ledger user turn + task open) now lives in the
     // engine seam (recordUserTurn in executeRun, guarded by triggeredBy === "user") — Plan 01 Ph5.
-    onRunStart: ({ runId, agent, triggeredBy, spawnCallId }) => {
+    onRunStart: ({ runId, agent, triggeredBy }) => {
       activeRuns.current.set(runId, { agent, triggeredBy });
-      // Plan 02 Phase 6: open the run's span in the live waterfall. A delegated child nests under the
-      // EXACT delegate_task span that spawned it (addressed by spawnCallId); else parent by triggeredBy.
-      liveRunStart(liveTraceRef.current, { runId, agent, triggeredBy, spawnCallId }, Date.now());
-      pushLiveTrace();
       if (triggeredBy === "user" && !foregroundRootRef.current) foregroundRootRef.current = runId;
     },
-    onRunEnd: ({ runId, agent, triggeredBy, outcome }) => {
+    onRunEnd: ({ runId }) => {
       activeRuns.current.delete(runId);
       steerRoutes.current.delete(runId);
-      // Plan 02 Phase 6: settle the run's span (and any still-open child spans) in the live waterfall.
-      liveRunEnd(liveTraceRef.current, { runId, agent, triggeredBy, outcome }, Date.now());
-      pushLiveTrace();
       if (foregroundRootRef.current === runId) foregroundRootRef.current = null;
     },
   });
@@ -716,7 +688,6 @@ export function App(props: {
     clearStatuses();
     clearPaneFeed();
     clearBlockFeed();
-    clearLiveTrace();
     try {
       if (parsed.kind === "chat") {
         // In-memory conversation for THIS session. The durable audit (ledger + task) and the derived
@@ -734,7 +705,7 @@ export function App(props: {
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
           maybeSayAuthExpired(res.text);
-          say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}) · /trace to inspect` });
+          say({ kind: "system", text: `  run: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)})` });
         }
         setRoster(loadIndex(props.db)); // create_agent may have grown the squad
       } else {
@@ -744,7 +715,7 @@ export function App(props: {
         flushStream();
         if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text, rendered: true });
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
-        say({ kind: "system", text: `  trace: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s)) · /trace to inspect` });
+        say({ kind: "system", text: `  run: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
         // Plan 15: gather artifacts from the conversation's run tree and show the completion action bar
         const artifacts = gatherConversationArtifacts(props.ws, res.runId);
         if (artifacts.length > 0) setCompletionArtifacts(artifacts);
@@ -753,7 +724,7 @@ export function App(props: {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
       // explicit-model guard for a misconfigured OpenRouter agent. Surface it instead of crashing Ink.
       say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
-    } finally { setBusy(false); clearStatuses(); clearLiveTrace(); clearBlockFeed(); }
+    } finally { setBusy(false); clearStatuses(); clearBlockFeed(); }
   };
 
   const runSlash = async (cmd: string, arg: string) => {
@@ -1042,33 +1013,9 @@ export function App(props: {
       }
       return;
     }
-    if (cmd === "trace") {
-      // Plan 02 Phase 6: a task id (or `task:<id>`) roots the waterfall at a TASK — grouping all of
-      // the task's runs across turns into one inspectable trace — instead of a single user-run.
-      const raw = arg.trim();
-      if (raw.startsWith("task:") || raw.startsWith("task_")) {
-        const taskId = raw.replace(/^task:/, "");
-        let taskSpans: Span[];
-        try { taskSpans = deriveTaskTrace(props.ws, taskId); }
-        catch (e) { say({ kind: "system", text: `  no such task: ${taskId} (${e instanceof Error ? e.message : String(e)})` }); return; }
-        if (!taskSpans.length) { say({ kind: "system", text: `  no runs for task: ${taskId}` }); return; }
-        setInspect({ rootId: `task ${taskId}`, spans: taskSpans });
-        return;
-      }
-      // No arg → the latest user-triggered run (the "what just happened" case); <id> → that run.
-      const id = raw || latestUserRunId(props.ws);
-      if (!id) { say({ kind: "system", text: "  (no runs yet)" }); return; }
-      let spans: Span[];
-      try { spans = deriveTrace(props.ws, id); }
-      catch (e) { say({ kind: "system", text: `  no such trace: ${id} (${e instanceof Error ? e.message : String(e)})` }); return; }
-      if (!spans.length) { say({ kind: "system", text: `  no such trace: ${id}` }); return; }
-      setInspect({ rootId: id, spans });
-      return;
-    }
     runSlashPure(cmd, arg, {
       roster,
       listTraces: (a?: string) => listTraces(props.ws, a),
-      readTrace: (id: string) => readTrace(props.ws, id),
       listPolicies: (a: string) => listPolicies(props.ws, a),
       deletePolicy: (a: string, p: string) => deletePolicy(props.ws, a, p),
       // A proposed note's id is all the captain has (from the ⚑ message); find its owning agent by id.
@@ -1077,12 +1024,6 @@ export function App(props: {
         return null;
       },
     }).forEach(say);
-  };
-
-  /** The most recent user-triggered run id (listTraces is sorted by start time ascending). */
-  const latestUserRunId = (ws: string): string | undefined => {
-    const userRuns = listTraces(ws).filter((t) => t.triggeredBy === "user");
-    return userRuns.length ? userRuns[userRuns.length - 1].id : undefined;
   };
 
   // Plan 10: which live surfaces render for the current mode + terminal size (bar-only when small).
@@ -1114,16 +1055,7 @@ export function App(props: {
           </Text>
         );
       })}
-      {inspect && (
-        <TraceInspector
-          rootId={inspect.rootId}
-          spans={inspect.spans}
-          width={mdWidth + 2}
-          keyHandlerRef={cardKeyRef}
-          onClose={() => { cardKeyRef.current = null; setInspect(null); }}
-        />
-      )}
-      {!inspect && pending && (() => {
+      {pending && (() => {
         // key = the head request's stable id: a fresh card (with its own reset useState) mounts per
         // request, but the visible head never remounts just because another request queued behind it.
         if (pending.req.kind === "ask_human") {
@@ -1150,18 +1082,12 @@ export function App(props: {
       })()}
       {/* Plan 10 Phase 4: split panes (one per live agent) sit above the spinner + bar. The mode
           (bar/panes/both) and terminal size decide what shows; too small ⇒ degrade to bar-only. */}
-      {!inspect && !operationRunId && layout.showPanes && (
+      {!operationRunId && layout.showPanes && (
         <SquadPanes statuses={statuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
-      )}
-      {/* Plan 02 Phase 6: the live waterfall — a redrawing span tree of the in-flight run, in place of
-          the panes when /view waterfall is active. The ↳ breadcrumbs still land in scrollback as the
-          record; this is the live reader. */}
-      {!inspect && !operationRunId && layout.showWaterfall && liveTraceSpans.length > 0 && (
-        <LiveWaterfall spans={liveTraceSpans} width={termSize.columns} maxRows={Math.max(6, termSize.rows - 8)} />
       )}
       {/* Plan 13 (corrected): consistent agent blocks — the default squad view. Every agent (root and
           sub-agents) is rendered as a single block: header + fixed 2-line body. The block IS the record. */}
-      {!inspect && !operationRunId && allBlocks.length > 0 && (() => {
+      {!operationRunId && allBlocks.length > 0 && (() => {
         const blockWidth = Math.min(termSize.columns - 4, 96);
         return (
           <Box flexDirection="column">
@@ -1189,7 +1115,7 @@ export function App(props: {
         />
       )}
       {/* Plan 15: completion action bar — shown when a user turn produces artifacts. */}
-      {!inspect && !pending && !operationRunId && !artifactViewerOpen && completionArtifacts && completionArtifacts.length > 0 && (
+      {!pending && !operationRunId && !artifactViewerOpen && completionArtifacts && completionArtifacts.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Box>
             <Text color={actionBarFocus === 0 ? "cyan" : "gray"} bold={actionBarFocus === 0}>
@@ -1213,10 +1139,10 @@ export function App(props: {
           onClose={() => { cardKeyRef.current = null; setArtifactViewerOpen(false); }}
         />
       )}
-      {!inspect && !pending && busy && <RunStatus activity={activity} />}
+      {!pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
-      {!inspect && layout.showBar && statuses.length > 0 && <StatusBar statuses={statuses} width={termSize.columns} />}
-      {!inspect && !pending && !operationRunId && (
+      {layout.showBar && statuses.length > 0 && <StatusBar statuses={statuses} width={termSize.columns} />}
+      {!pending && !operationRunId && (
         <>
           <Box>
             <Text color={busy ? "gray" : focusMode ? "gray" : "cyan"}>{busy ? "❯ " : focusMode ? "  " : "> "}</Text>
@@ -1259,5 +1185,5 @@ function initialLines(p: { model: Model | null; roster: RegistryRow[]; authSourc
       { kind: "system", text: "taicho — your squad is empty (root is ready)." },
       { kind: "system", text: 'Describe your first agent to me (e.g. "I need a researcher that covers geopolitics, with web search"). /agents to list, ESC to quit.' },
     ];
-  return [{ kind: "system", text: "taicho — squad ready. Bare messages go to root; @agent to address directly; /runs, /trace, /agents. ESC to quit." }];
+  return [{ kind: "system", text: "taicho — squad ready. Bare messages go to root; @agent to address directly; /agents, /costs, /help. ESC to quit." }];
 }
