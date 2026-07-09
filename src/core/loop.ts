@@ -3,7 +3,7 @@
  *  spend (tokens + advisory USD) and the single place caps + cancellation are enforced. */
 import { generateText, streamText, type ModelMessage, type ToolSet } from "ai";
 import type { Tracer } from "@opentelemetry/api";
-import { trace as otelTrace, context as otelContext, SpanStatusCode, ioAttrs, type Span } from "./otel";
+import { trace as otelTrace, context as otelContext, SpanStatusCode, chatMessageAttrs, type Span } from "./otel";
 import type { AgentDef } from "../schemas/agent";
 import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
@@ -239,7 +239,11 @@ export async function runLoop(opts: {
             "gen_ai.request.model": tel.model,
             "taicho.agent": tel.agent,
             "taicho.iteration": iterations + 1,
-            ...(tel.captureContent ? ioAttrs("input", safeJson(messages)) : {}),
+            // The prompt as a proper GenAI message list (system + conversation), rendered by backends
+            // as a conversation — NOT a JSON dump. System is message 0 so the instructions are visible.
+            ...(tel.captureContent
+              ? chatMessageAttrs("gen_ai.prompt", [{ role: "system", content: opts.system }, ...(messages as { role: string; content: unknown }[])])
+              : {}),
           },
         });
       }
@@ -300,8 +304,12 @@ export async function runLoop(opts: {
           "gen_ai.response.finish_reasons": String(fin),
         });
         if (tel.captureContent) {
-          const output = out.text?.trim() ? out.text : safeJson(out.toolCalls);
-          chatSpan.setAttributes(ioAttrs("output", output));
+          // The completion as an assistant message — its reply text, or the tool calls it decided to
+          // make rendered as `→ tool(args)` lines — again a message, not a JSON dump.
+          const content = out.text?.trim()
+            ? out.text
+            : (out.toolCalls ?? []).map((tc) => `→ ${tc.toolName}(${safeJson(tc.input)})`).join("\n");
+          chatSpan.setAttributes(chatMessageAttrs("gen_ai.completion", [{ role: "assistant", content }]));
         }
         chatSpan.end();
       }

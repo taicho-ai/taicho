@@ -154,9 +154,23 @@ test("the run span carries input + output when content capture IS opted in", asy
   const writer = await loadAgent(ws, "writer");
   await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "MY_QUESTION_42" }], triggeredBy: "user" });
 
-  const runSpan = spans.getFinishedSpans().find((s) => s.name === "writer · user turn")!;
+  const finished = spans.getFinishedSpans();
+  const runSpan = finished.find((s) => s.name === "writer · user turn")!;
   // The run node now shows WHAT it was asked and WHAT it produced — not "No inputs".
   expect(String(runSpan.attributes["gen_ai.prompt"])).toContain("MY_QUESTION_42");
   expect(String(runSpan.attributes["gen_ai.completion"])).toContain("here is the answer");
+
+  // The chat span carries the prompt as a STRUCTURED message list (indexed gen_ai.* role/content) —
+  // rendered as a conversation by backends, not a raw JSON dump. The user's question is a user message.
+  const chat = finished.find((s) => s.name.startsWith("chat "))!;
+  expect(chat.attributes["gen_ai.prompt.0.role"]).toBe("system");
+  const roles = Object.keys(chat.attributes).filter((k) => /^gen_ai\.prompt\.\d+\.role$/.test(k));
+  expect(roles.length).toBeGreaterThanOrEqual(2); // system + at least the user turn
+  const userMsg = Object.entries(chat.attributes).find(([k, v]) => /gen_ai\.prompt\.\d+\.content/.test(k) && String(v).includes("MY_QUESTION_42"));
+  expect(userMsg).toBeDefined();
+  expect(String(chat.attributes["gen_ai.completion.0.role"])).toBe("assistant");
+  expect(String(chat.attributes["gen_ai.completion.0.content"])).toContain("here is the answer");
+  // ...and NOT a JSON blob under a single key.
+  expect(chat.attributes["gen_ai.prompt"]).toBeUndefined();
   await telemetry.shutdown();
 });

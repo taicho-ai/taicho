@@ -159,5 +159,47 @@ export function ioAttrs(kind: "input" | "output", text: string): Record<string, 
     : { "output.value": v, "gen_ai.completion": v, "langsmith.span.outputs": JSON.stringify({ output: v }) };
 }
 
+/** Flatten an AI SDK message's content (string | parts[]) to a readable line, so a chat message shows
+ *  as text — not a nested JSON blob. Tool calls/results render compactly (`→ tool(args)` / `← tool: …`). */
+function contentToText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .map((p: any) => {
+        if (typeof p === "string") return p;
+        if (p?.type === "text") return p.text ?? "";
+        if (p?.type === "reasoning") return p.text ?? "";
+        if (p?.type === "tool-call") return `→ ${p.toolName}(${JSON.stringify(p.input ?? p.args ?? {})})`;
+        if (p?.type === "tool-result") {
+          const r = p.output ?? p.result;
+          return `← ${p.toolName}: ${typeof r === "string" ? r : JSON.stringify(r ?? {})}`;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return content == null ? "" : String(content);
+}
+
+/** GenAI-convention chat-message attributes (the indexed OpenLLMetry form: `<prefix>.<i>.role` /
+ *  `<prefix>.<i>.content`) that LangSmith and other backends render as a MESSAGE LIST instead of a raw
+ *  JSON dump. `prefix` is "gen_ai.prompt" (input) or "gen_ai.completion" (output). Each message's
+ *  content is flattened to readable text and capped. This is the proper OpenTelemetry way to carry a
+ *  conversation on a span — used for the `chat` (LLM) spans; single-string I/O uses ioAttrs instead. */
+export function chatMessageAttrs(prefix: string, messages: { role: string; content: unknown }[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  let i = 0;
+  for (const m of messages) {
+    const text = contentToText(m.content);
+    if (!text) continue;
+    out[`${prefix}.${i}.role`] = m.role;
+    out[`${prefix}.${i}.content`] = text.length > 8_000 ? text.slice(0, 8_000) + "…[truncated]" : text;
+    i++;
+  }
+  return out;
+}
+
 /** Re-export the api surface run.ts/loop.ts/tools.ts need to open + nest spans, from one place. */
 export { trace, context, SpanStatusCode, type Span } from "@opentelemetry/api";
