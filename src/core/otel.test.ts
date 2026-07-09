@@ -131,3 +131,23 @@ test("prompt content is NOT exported unless OTEL_TAICHO_CAPTURE_CONTENT opts in"
   expect(dump.includes(SECRET)).toBe(false);
   await telemetry.shutdown();
 });
+
+test("the run span carries input + output when content capture IS opted in", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const spans = new InMemorySpanExporter();
+  const metricReader = new PeriodicExportingMetricReader({ exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE), exportIntervalMillis: 60_000 });
+  const telemetry = initTelemetry({ spanExporter: spans, metricReader, env: { OTEL_EXPORTER_OTLP_ENDPOINT: "x", OTEL_TAICHO_CAPTURE_CONTENT: "1" } })!;
+  expect(telemetry.captureContent).toBe(true);
+
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(text("here is the answer")) as any });
+  const deps = makeDeps({ ws, db, model, telemetry });
+  const writer = await loadAgent(ws, "writer");
+  await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "MY_QUESTION_42" }], triggeredBy: "user" });
+
+  const runSpan = spans.getFinishedSpans().find((s) => s.name === "run writer")!;
+  // The run node now shows WHAT it was asked and WHAT it produced — not "No inputs".
+  expect(String(runSpan.attributes["gen_ai.prompt"])).toContain("MY_QUESTION_42");
+  expect(String(runSpan.attributes["gen_ai.completion"])).toContain("here is the answer");
+  await telemetry.shutdown();
+});
