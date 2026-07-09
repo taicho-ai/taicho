@@ -118,6 +118,13 @@ test("a delegated child run nests under its parent — one trace across the dele
   expect(child!.attributes["taicho.triggered_by"]).toBe(res.runId);
   // The child run nests under the delegate_task TOOL span (the mockup's structure), not the run directly.
   expect(child!.parentSpanContext?.spanId).toBe(toolSpan!.spanContext().spanId);
+  // Each agent is its OWN OTel service (service.name = agent), namespaced under the base — so a
+  // backend colors/groups by agent and can draw the delegation graph. The tool span belongs to the
+  // delegating agent (root), the child run to the delegate (helper).
+  expect(parent!.resource.attributes["service.name"]).toBe("root");
+  expect(child!.resource.attributes["service.name"]).toBe("helper");
+  expect(toolSpan!.resource.attributes["service.name"]).toBe("root");
+  expect(child!.resource.attributes["service.namespace"]).toBe("taicho");
   await telemetry.shutdown();
 });
 

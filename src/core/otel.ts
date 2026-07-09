@@ -11,7 +11,7 @@
  *  This is Plan 16 Phase 1 ("emit alongside"): OTel spans are produced in addition to today's transcript
  *  evidence, so /trace is unchanged and the export is purely additive. Phases 2/3 (repointing /trace at
  *  the span store, retiring the transcript-derived path) are follow-ups. */
-import { metrics, type Tracer, type Histogram, type Counter, type UpDownCounter } from "@opentelemetry/api";
+import { metrics, context as otelContextApi, type Tracer, type Histogram, type Counter, type UpDownCounter } from "@opentelemetry/api";
 import {
   NodeTracerProvider,
   BatchSpanProcessor,
@@ -41,8 +41,13 @@ export interface ModelCallMetric {
 
 /** The live telemetry handle threaded through RunDeps (like the deck ledger). Undefined ⇒ disabled. */
 export interface Telemetry {
-  /** The tracer handed to the AI SDK's experimental_telemetry so its gen_ai spans export through us. */
+  /** Base tracer (service = the aggregate service name) for any span not tied to a specific agent. */
   tracer: Tracer;
+  /** A tracer whose spans belong to a per-AGENT OTel service (`service.name = <agent>`, namespaced
+   *  under the base service). So a backend that groups/colors by service — Jaeger's waterfall + its
+   *  System Architecture graph — shows each agent as its own service and draws the delegation edges,
+   *  instead of one undifferentiated "taicho". Providers are cached per agent. */
+  tracerFor(agent: string): Tracer;
   /** Whether prompt/completion text may leave the process (OTEL_TAICHO_CAPTURE_CONTENT). Off by default. */
   captureContent: boolean;
   /** Per model call → gen_ai token-usage + operation-duration histograms + the taicho cost counter. */
@@ -79,26 +84,39 @@ export function initTelemetry(opts: InitTelemetryOpts = {}): Telemetry | undefin
   const testMode = opts.spanExporter != null || opts.metricReader != null;
   if (!endpoint && !testMode) return undefined; // the on-switch is the endpoint; absent it, a no-op
 
-  const serviceName = opts.serviceName ?? env.OTEL_SERVICE_NAME ?? "taicho";
-  const resource = resourceFromAttributes({
-    "service.name": serviceName,
-    "service.version": opts.serviceVersion ?? "0.0.1",
-  });
+  const baseService = opts.serviceName ?? env.OTEL_SERVICE_NAME ?? "taicho";
+  const version = opts.serviceVersion ?? "0.0.1";
+  const useTest = opts.spanExporter != null;
 
-  let tracerProvider: NodeTracerProvider;
+  // ONE trace exporter, shared by every per-agent provider (so all agents' spans go to the same
+  // OTLP endpoint / in-memory buffer). Each agent gets its OWN provider whose resource carries
+  // `service.name = <agent>` — that is what a backend groups + colors by.
+  const providers = new Map<string, NodeTracerProvider>();
+  let traceExporter: SpanExporter;
   let meterProvider: MeterProvider | undefined;
+  const providerFor = (svc: string): NodeTracerProvider => {
+    let p = providers.get(svc);
+    if (!p) {
+      p = new NodeTracerProvider({
+        resource: resourceFromAttributes({ "service.name": svc, "service.namespace": baseService, "service.version": version }),
+        spanProcessors: [useTest ? new SimpleSpanProcessor(traceExporter) : new BatchSpanProcessor(traceExporter)],
+      });
+      providers.set(svc, p);
+    }
+    return p;
+  };
   try {
-    const spanProcessor = opts.spanExporter
-      ? new SimpleSpanProcessor(opts.spanExporter)
-      : new BatchSpanProcessor(new OTLPTraceExporter());
-    tracerProvider = new NodeTracerProvider({ resource, spanProcessors: [spanProcessor] });
-    // AsyncLocalStorage context propagation — how a delegated child run's spans nest under their
-    // parent across await boundaries. Bun implements AsyncLocalStorage, so this works on Bun.
-    tracerProvider.register({ contextManager: new AsyncLocalStorageContextManager().enable() });
+    traceExporter = opts.spanExporter ?? new OTLPTraceExporter();
+    // AsyncLocalStorage context propagation, set ONCE globally (independent of any single provider) so
+    // a delegated child agent's spans — created via a DIFFERENT per-agent provider — still nest under
+    // the parent's span in ONE trace across await boundaries. Bun implements AsyncLocalStorage.
+    otelContextApi.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+    providerFor(baseService); // warm the base provider
 
     const reader = opts.metricReader
       ?? new PeriodicExportingMetricReader({ exporter: new OTLPMetricExporter(), exportIntervalMillis: 15_000 });
-    meterProvider = new MeterProvider({ resource, readers: [reader] });
+    // Metrics stay under the single aggregate service (they're deck-wide, not per-agent).
+    meterProvider = new MeterProvider({ resource: resourceFromAttributes({ "service.name": baseService, "service.version": version }), readers: [reader] });
     metrics.setGlobalMeterProvider(meterProvider);
   } catch (e) {
     // Never let a telemetry misconfiguration take down the app — log and run without it.
@@ -106,7 +124,7 @@ export function initTelemetry(opts: InitTelemetryOpts = {}): Telemetry | undefin
     return undefined;
   }
 
-  const tracer = tracerProvider.getTracer("taicho", opts.serviceVersion ?? "0.0.1");
+  const tracer = providerFor(baseService).getTracer("taicho", version);
   const meter = (meterProvider ?? metrics.getMeterProvider()).getMeter("taicho");
 
   // GenAI semantic-convention instruments (portable names every backend understands) + a taicho cost
@@ -118,10 +136,13 @@ export function initTelemetry(opts: InitTelemetryOpts = {}): Telemetry | undefin
   const runDuration: Histogram = meter.createHistogram("taicho.run.duration", { unit: "s", description: "Agent run wall-clock" });
 
   const captureContent = truthy(env.OTEL_TAICHO_CAPTURE_CONTENT);
-  log.info("opentelemetry enabled", { serviceName, endpoint: endpoint ?? "(test exporter)", captureContent });
+  log.info("opentelemetry enabled", { service: baseService, perAgentServices: true, endpoint: endpoint ?? "(test exporter)", captureContent });
 
   return {
     tracer,
+    tracerFor(agent: string) {
+      return providerFor(agent || baseService).getTracer("taicho", version);
+    },
     captureContent,
     recordModelCall(m) {
       const attrs = { "gen_ai.system": m.provider, "gen_ai.request.model": m.model };
@@ -139,8 +160,10 @@ export function initTelemetry(opts: InitTelemetryOpts = {}): Telemetry | undefin
     },
     async shutdown() {
       // shutdown() force-flushes then closes. Swallow errors: an unreachable collector on exit must
-      // never crash the process or block the REPL quit path.
-      try { await tracerProvider.shutdown(); } catch (e) { log.warn("otel tracer shutdown failed", e); }
+      // never crash the process or block the REPL quit path. Every per-agent provider is flushed.
+      for (const p of providers.values()) {
+        try { await p.shutdown(); } catch (e) { log.warn("otel tracer shutdown failed", e); }
+      }
       try { await meterProvider?.shutdown(); } catch (e) { log.warn("otel meter shutdown failed", e); }
     },
   };
