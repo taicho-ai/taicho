@@ -144,6 +144,19 @@ The root orchestrator has two extra, captain-gated powers:
 Both are root-only. There's no sandbox in this version — the guard, the fail-safe (when in doubt,
 ask), and your approval on every blocked command are the guardrails, not a per-deck toggle.
 
+## Observability
+
+taicho emits **standard OpenTelemetry over OTLP** — spans for every run, model call, tool (including
+MCP), and verification, plus token/cost/latency metrics. It bundles no dashboard; you point it at your
+own backend with the standard `OTEL_*` env vars. Off by default (no endpoint ⇒ no-op).
+
+```
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"   # your collector / backend
+```
+
+Copy-paste configs for LangSmith, Langfuse, Jaeger, Grafana Tempo, Honeycomb, Datadog, and generic
+collectors — plus the content-capture privacy flag — are in **[`docs/observability.md`](docs/observability.md)**.
+
 ## Development
 
 Requires [Bun](https://bun.sh).

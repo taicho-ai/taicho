@@ -152,14 +152,14 @@ What REMAINS after the retirement (deliberately kept — NOT tracing UI):
 
 ## OpenTelemetry — standard export (Plan 16)
 
-taicho's rich per-run evidence (traces, `transcript.jsonl`, coaching ledger, `/trace` waterfall) was
-**taicho-only**. Plan 16 exports the SAME model/tool/delegation activity as **standard OpenTelemetry** —
-`gen_ai.*` semantic-convention spans nested under a taicho run span, plus metrics — over OTLP to any
-collector (Jaeger, Tempo, Honeycomb, LangSmith…). **Off by default**: with no
-`OTEL_EXPORTER_OTLP_ENDPOINT` configured, `initTelemetry` returns undefined and every seam skips it
-(zero overhead, no provider, no network). Phase 1 ("emit alongside") is shipped; the `/trace` waterfall
-is unchanged and OTel is purely additive. Phases 2–3 (repoint `/trace` at the span store, retire the
-transcript-derived path) are follow-ups — see `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`.
+taicho exports its model/tool/delegation activity as **standard OpenTelemetry** — `gen_ai.*`
+semantic-convention spans + metrics — over OTLP to ANY backend the user configures (Jaeger, Grafana
+Tempo, Honeycomb, LangSmith, Langfuse, Datadog…). taicho ships **no bundled observability UI**; users
+drop in their own OTLP config via the standard `OTEL_*` env vars. **Off by default**: with no
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `initTelemetry` returns undefined and every seam skips it (zero overhead,
+no provider, no network). Since Plan 17 this is the ONLY trace-visualization path (the internal `/trace`
+waterfall was retired). **User-facing setup + copy-paste backend configs: `docs/observability.md`.**
+Design/rationale: `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`.
 
 - **`src/core/otel.ts`** — `initTelemetry` builds a `NodeTracerProvider` +
   `AsyncLocalStorageContextManager` (context propagation across the delegation's await boundaries — Bun
