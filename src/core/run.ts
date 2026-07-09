@@ -299,7 +299,7 @@ export async function executeRun(
     : opts.triggeredBy.startsWith("schedule:") ? "scheduled"
     : opts.triggeredBy.startsWith("task_") ? "task"
     : "delegated";
-  const runSpan: Span | undefined = tel?.tracer.startSpan(`${opts.agent.id} · ${runKind}`, {
+  const runSpan: Span | undefined = tel?.tracerFor(opts.agent.id).startSpan(`${opts.agent.id} · ${runKind}`, {
     attributes: {
       "taicho.agent": opts.agent.id,
       "taicho.run.id": runId,
@@ -334,7 +334,7 @@ export async function executeRun(
   if (runSpan && picked?.modelId) runSpan.setAttribute("gen_ai.request.model", picked.modelId);
   const loopTelemetry = tel && runSpan
     ? {
-        tracer: tel.tracer,
+        tracer: tel.tracerFor(opts.agent.id),
         captureContent: tel.captureContent,
         model: picked?.modelId ?? "model",
         provider: providerLabel(picked?.modelId, subscription),
@@ -415,7 +415,7 @@ export async function executeRun(
       });
       // Plan 16: the independent verification checker as its own "VERIFY" span — nests under the active
       // delegate_task tool span, named with the verdict once known ("checker · criteria pass/fail").
-      const span = tel?.tracer.startSpan("checker", {
+      const span = tel?.tracerFor(opts.agent.id).startSpan("checker", {
         attributes: { "taicho.kind": "verify", ...(tel.captureContent ? ioAttrs("input", p.criteria) : {}) },
       });
       if (!span) return run();

@@ -768,7 +768,7 @@ function instrument(set: ToolSet, ctx: RunContext, untrustedSources?: Set<string
       // …", "write_artifact · findings") so the trace reads meaningfully, carrying args in / result out,
       // and made ACTIVE so a delegated child run nests under this exact tool span.
       const tel = ctx.telemetry;
-      const span = tel?.tracer.startSpan(preview ? `${name} · ${preview}` : name, {
+      const span = tel?.tracerFor(ctx.agentId).startSpan(preview ? `${name} · ${preview}` : name, {
         attributes: { "taicho.tool": name, ...(tel.captureContent ? ioAttrs("input", capJson(input)) : {}) },
       });
       let result: unknown, err: string | undefined;
