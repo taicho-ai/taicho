@@ -155,6 +155,7 @@ export interface HeadlessDeps {
   mcp?: RunDeps["mcp"];
   embed?: RunDeps["embed"];
   deckLedger?: RunDeps["deckLedger"]; // Plan 09: deck-wide ceilings enforced in the loop
+  telemetry?: RunDeps["telemetry"]; // Plan 16: OpenTelemetry export (undefined ⇒ off)
 }
 
 export interface HeadlessResult {
@@ -225,6 +226,7 @@ export async function runHeadless(
     mcp: hd.mcp,
     embed: hd.embed,
     deckLedger: hd.deckLedger,
+    telemetry: hd.telemetry,
     signal: opts.signal,
   });
 

@@ -32,6 +32,7 @@ import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { isStdioServer } from "../store/config";
 import type { DeckLedger } from "../store/deck-budget";
+import type { Telemetry } from "../core/otel";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
 import { renderMarkdown } from "./markdown";
@@ -137,6 +138,7 @@ export function App(props: {
   embed?: (text: string) => Promise<Float32Array>;
   startupNotice?: string;
   deckLedger?: DeckLedger; // Plan 09: deck-wide spend ledger (undefined ⇒ no deck ceilings configured)
+  telemetry?: Telemetry;   // Plan 16: OpenTelemetry handle (undefined ⇒ OTLP export off)
   viewMode?: ViewMode;     // Plan 10: initial live-view mode (defaults to the persisted pref / `both`)
   terminalSize?: { columns: number; rows: number }; // Plan 10: authoritative size seam (tests/embeds); else live stdout
 }) {
@@ -352,7 +354,7 @@ export function App(props: {
       return; // consume other keys while in focus mode
     }
     if (key.shift && key.tab) { setFocusMode(true); return; } // enter focus mode
-    if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else { void (async () => { await props.mcp?.closeAll(); exit(); })(); } return; }
+    if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else { void (async () => { await props.mcp?.closeAll(); await props.telemetry?.shutdown(); exit(); })(); } return; }
     if (sugg.length > 0) {
       if (key.upArrow)   { setSelected((s) => cycleIndex(s, sugg.length, -1)); return; }
       if (key.downArrow) { setSelected((s) => cycleIndex(s, sugg.length, +1)); return; }
@@ -377,7 +379,7 @@ export function App(props: {
     say({ kind: "system", text: `  ⏰ schedule ${s.id} firing → ${s.agent}: ${s.goal} (approvals: ${s.approve})` });
     try {
       const res = await runHeadless(
-        { ws: props.ws, db: props.db, model: activeModel, resolveModel, priceUsd, configDefaults: props.configDefaults, mcp: props.mcp, embed: props.embed, deckLedger: props.deckLedger },
+        { ws: props.ws, db: props.db, model: activeModel, resolveModel, priceUsd, configDefaults: props.configDefaults, mcp: props.mcp, embed: props.embed, deckLedger: props.deckLedger, telemetry: props.telemetry },
         // scheduleFireOptions stamps triggeredBy: schedule:<id> — keeps this UNATTENDED fire OUT of the
         // target agent's conversation ledger + boot-replay cache (it still gets full run evidence).
         // Otherwise every cron/interval/watch fire appended a user+assistant pair and replayed as prior
@@ -620,6 +622,7 @@ export function App(props: {
     mcp: props.mcp,
     embed: props.embed,
     deckLedger: props.deckLedger, // Plan 09: deck-wide ceilings enforced in the loop, shared by all runs
+    telemetry: props.telemetry,   // Plan 16: OpenTelemetry export, shared by all runs this session
     dispatch,
     awaitTask,
     // Live-run bookkeeping only. The per-turn AUDIT (ledger user turn + task open) now lives in the

@@ -33,6 +33,7 @@ import type { McpServerConfig } from "../store/config";
 import type { DeckLedger } from "../store/deck-budget";
 import type { Verdict } from "./command-guard";
 import { log, redact } from "./logger";
+import { trace as otelTrace, context, SpanStatusCode, type Span, type Telemetry } from "./otel";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -175,6 +176,21 @@ export interface RunDeps {
   /** Plan 09: deck-wide spend ledger, shared by ALL runs in a session (including delegated children),
    *  enforced in the loop and persisted across sessions. Undefined ⇒ no deck ceilings configured. */
   deckLedger?: DeckLedger;
+  /** Plan 16: OpenTelemetry handle, shared by ALL runs in a session. When set, executeRun opens a run
+   *  span (making it active so the AI SDK's gen_ai spans + delegated child runs nest under it) and feeds
+   *  run/model metrics. Undefined ⇒ telemetry disabled (no OTLP endpoint configured). */
+  telemetry?: Telemetry;
+}
+
+/** Coarse provider label for the token/duration metric attributes. The authoritative gen_ai.system is
+ *  set on the AI SDK span by the provider itself; this is a best-effort heuristic for the metric slice. */
+function providerLabel(modelId: string | undefined, subscription: boolean): string {
+  if (subscription) return "openai"; // ChatGPT subscription rides the Codex (OpenAI) backend
+  if (!modelId) return "unknown";
+  if (modelId.includes("/")) return "openrouter"; // namespaced vendor/model
+  if (modelId.startsWith("claude")) return "anthropic";
+  if (/^(gpt|o[13]|text-|chatgpt)/.test(modelId)) return "openai";
+  return "unknown";
 }
 
 /** Build RunDeps with real wiring; tests override pieces (e.g. requestApproval). */
@@ -197,6 +213,7 @@ export function makeDeps(opts: {
   dispatch?: RunDeps["dispatch"];
   awaitTask?: RunDeps["awaitTask"];
   deckLedger?: RunDeps["deckLedger"];
+  telemetry?: RunDeps["telemetry"];
 }): RunDeps {
   return {
     ws: opts.ws, db: opts.db, model: opts.model,
@@ -210,6 +227,7 @@ export function makeDeps(opts: {
     onRunStart: opts.onRunStart, onRunEnd: opts.onRunEnd,
     dispatch: opts.dispatch, awaitTask: opts.awaitTask,
     deckLedger: opts.deckLedger,
+    telemetry: opts.telemetry,
   };
 }
 
@@ -261,6 +279,34 @@ export async function executeRun(
   // failure. (runLoop itself does NOT throw for model errors — it returns result.error → outcome
   // "failed", which the normal close records via recordTurnOutcome, not the catch.)
   let turnClosed = false;
+
+  // Plan 16: open THIS run's OpenTelemetry span BEFORE the try, so a pre-loop throw still closes it in
+  // the catch. It parents to whatever span is active — for a delegated child that is the parent run's
+  // `delegate_task` tool span (the AI SDK sets it active during execute), so a delegation is ONE
+  // distributed trace. It is made active around runLoop (below) so the AI SDK's gen_ai spans and any
+  // child runs nest under it. finishRunSpan is idempotent: called on the normal finalize AND in the
+  // catch, so the span always closes and the active-run gauge always decrements exactly once.
+  const tel = deps.telemetry;
+  const runSpan: Span | undefined = tel?.tracer.startSpan(`run ${opts.agent.id}`, {
+    attributes: {
+      "taicho.agent": opts.agent.id,
+      "taicho.run.id": runId,
+      "taicho.triggered_by": opts.triggeredBy,
+      "taicho.depth": depth,
+    },
+  });
+  if (runSpan) tel!.runStarted(opts.agent.id);
+  let runSpanDone = false;
+  const finishRunSpan = (o: RunTrace["outcome"], attrs?: Record<string, string | number>, err?: string) => {
+    if (!tel || !runSpan || runSpanDone) return;
+    runSpanDone = true;
+    if (attrs) runSpan.setAttributes(attrs);
+    runSpan.setAttribute("taicho.run.outcome", o);
+    if (err) runSpan.setStatus({ code: SpanStatusCode.ERROR, message: err });
+    runSpan.end();
+    tel.runFinished({ agent: opts.agent.id, outcome: o, durationMs: performance.now() - t0 });
+  };
+
   try {
   // Resolve THIS agent's model up front (before tools are built) so the delegation checker can run
   // on the same model plumbing the loop uses — an independent call on the delegating agent's model.
@@ -268,6 +314,25 @@ export async function executeRun(
   const subscription = picked?.subscription === true;
   const model = picked?.model ?? deps.model;
   const priceUsd = picked ? pricerFor(picked.modelId) : deps.priceUsd;
+
+  // Plan 16: the run span was opened before the try (so the catch can close it); now that the model is
+  // resolved, stamp the model id and build the loop's telemetry (gen_ai spans + per-call metrics).
+  if (runSpan && picked?.modelId) runSpan.setAttribute("gen_ai.request.model", picked.modelId);
+  const loopTelemetry = tel && runSpan
+    ? {
+        tracer: tel.tracer,
+        captureContent: tel.captureContent,
+        functionId: `taicho.${opts.agent.id}.chat`,
+        metadata: { "taicho.agent": opts.agent.id, "taicho.run.id": runId, "taicho.triggered_by": opts.triggeredBy },
+        onModelCall: (m: { inputTokens: number; outputTokens: number; costUsd: number; durationMs: number }) =>
+          tel.recordModelCall({
+            provider: providerLabel(picked?.modelId, subscription),
+            model: picked?.modelId ?? "unknown",
+            inputTokens: m.inputTokens, outputTokens: m.outputTokens,
+            costUsd: subscription ? null : m.costUsd, durationMs: m.durationMs,
+          }),
+      }
+    : undefined;
 
   // The shared instrumentation seam (Plan 02 waterfall spans + Plan 10 live status). Tool spans are
   // pushed by the execute() wrapper in tools.ts; approval spans by the wrapped requestApproval below.
@@ -473,8 +538,9 @@ export async function executeRun(
   });
   const tools = toolsForAgent(opts.agent, ctx, deps.mcp);
 
-  const result = await runLoop({
+  const runLoopCall = () => runLoop({
     model, agent: opts.agent, system, messages: opts.messages, tools,
+    telemetry: loopTelemetry, // Plan 16: gen_ai spans + model metrics for this run's calls
     onStep: emitStep, // stamps agent + runId (Plan 02/10) then forwards to deps.onStep
     // Per-run steer routing (Phase 4): a steer aimed at THIS runId reaches only this run; fall back
     // to the flat queue for unit contexts that don't route.
@@ -500,6 +566,11 @@ export async function executeRun(
     // in case the underlying stream ignores the abort signal. Config-disposed via defaults.modelRequestTimeoutMs.
     modelRequestTimeoutMs: deps.configDefaults?.modelRequestTimeoutMs,
   });
+  // Plan 16: run the loop with THIS run's span active, so the AI SDK's gen_ai spans and any delegated
+  // child runs nest under it (context propagation via AsyncLocalStorage). No span ⇒ call it directly.
+  const result = runSpan
+    ? await context.with(otelTrace.setSpan(context.active(), runSpan), runLoopCall)
+    : await runLoopCall();
   // The run has COMPLETED the moment runLoop returns a terminal result — mark the turn closed HERE,
   // BEFORE the post-loop finalization/close block. This scopes the catch's recordTurnFailure to genuine
   // PRE-loop throws only: a throw in finalization (writeTrace / recordTurnOutcome → rebuildReplayCache /
@@ -557,9 +628,20 @@ export async function executeRun(
       keepRecentTurns: deps.configDefaults?.replayKeepTurns,
     });
   }
+  // Plan 16: close the run span with the final rollups (tokens, cost, context) + outcome/status.
+  finishRunSpan(outcome, {
+    "taicho.tokens": result.tokens,
+    "gen_ai.usage.input_tokens": result.inputTokens,
+    "gen_ai.usage.output_tokens": result.outputTokens,
+    "taicho.context.tokens": result.contextTokens,
+    ...(subscription ? {} : { "taicho.cost.usd": result.costUsd }),
+  }, result.error);
   deps.onRunEnd?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, outcome });
   return { runId, text: finalText, trace };
   } catch (err) {
+    // Plan 16: a throw anywhere in the run must still close the span + decrement the active-run gauge
+    // (idempotent — a no-op if finalize already closed it on the normal path).
+    finishRunSpan("failed", undefined, err instanceof Error ? err.message : String(err));
     // A PRE-loop throw (resolveModel / prompt + tool build) between recordUserTurn and runLoop returning
     // would strand the open turn — settle it to a terminal `failed` outcome so the ledger + task never
     // dangle, then re-throw so the caller still sees the real error. `turnClosed` is already true once
