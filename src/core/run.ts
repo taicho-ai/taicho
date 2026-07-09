@@ -182,6 +182,18 @@ export interface RunDeps {
   telemetry?: Telemetry;
 }
 
+/** Run-span input/output attributes, in the keys backends read for a span's I/O. Set ONLY when
+ *  content capture is opted in (OTEL_TAICHO_CAPTURE_CONTENT). Without these, the top-level run in a
+ *  viewer shows "No inputs" — the prompt/completion live only on the nested gen_ai spans. `gen_ai.*`
+ *  is the generic (OpenLLMetry) convention; `langsmith.span.*` is LangSmith's explicit reader. Capped
+ *  so a huge brief/answer can't bloat a span attribute. */
+function ioAttrs(kind: "input" | "output", text: string): Record<string, string> {
+  const v = text.length > 12_000 ? text.slice(0, 12_000) + "…[truncated]" : text;
+  return kind === "input"
+    ? { "gen_ai.prompt": v, "langsmith.span.inputs": JSON.stringify({ input: v }) }
+    : { "gen_ai.completion": v, "langsmith.span.outputs": JSON.stringify({ output: v }) };
+}
+
 /** Coarse provider label for the token/duration metric attributes. The authoritative gen_ai.system is
  *  set on the AI SDK span by the provider itself; this is a best-effort heuristic for the metric slice. */
 function providerLabel(modelId: string | undefined, subscription: boolean): string {
@@ -287,20 +299,25 @@ export async function executeRun(
   // child runs nest under it. finishRunSpan is idempotent: called on the normal finalize AND in the
   // catch, so the span always closes and the active-run gauge always decrements exactly once.
   const tel = deps.telemetry;
+  // The run's input = the delegated goal, else this turn's user text — so the run/sub-run node shows
+  // WHAT it was asked (gated by captureContent, like the model-span prompt/completion).
+  const runInput = opts.brief?.goal ?? lastUserText(opts.messages);
   const runSpan: Span | undefined = tel?.tracer.startSpan(`run ${opts.agent.id}`, {
     attributes: {
       "taicho.agent": opts.agent.id,
       "taicho.run.id": runId,
       "taicho.triggered_by": opts.triggeredBy,
       "taicho.depth": depth,
+      ...(tel.captureContent && runInput ? ioAttrs("input", runInput) : {}),
     },
   });
   if (runSpan) tel!.runStarted(opts.agent.id);
   let runSpanDone = false;
-  const finishRunSpan = (o: RunTrace["outcome"], attrs?: Record<string, string | number>, err?: string) => {
+  const finishRunSpan = (o: RunTrace["outcome"], attrs?: Record<string, string | number>, err?: string, output?: string) => {
     if (!tel || !runSpan || runSpanDone) return;
     runSpanDone = true;
     if (attrs) runSpan.setAttributes(attrs);
+    if (tel.captureContent && output) runSpan.setAttributes(ioAttrs("output", output)); // WHAT it produced
     runSpan.setAttribute("taicho.run.outcome", o);
     if (err) runSpan.setStatus({ code: SpanStatusCode.ERROR, message: err });
     runSpan.end();
@@ -635,7 +652,7 @@ export async function executeRun(
     "gen_ai.usage.output_tokens": result.outputTokens,
     "taicho.context.tokens": result.contextTokens,
     ...(subscription ? {} : { "taicho.cost.usd": result.costUsd }),
-  }, result.error);
+  }, result.error, finalText);
   deps.onRunEnd?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, outcome });
   return { runId, text: finalText, trace };
   } catch (err) {
