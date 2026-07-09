@@ -3,6 +3,7 @@
  *  spend (tokens + advisory USD) and the single place caps + cancellation are enforced. */
 import { generateText, streamText, type ModelMessage, type ToolSet } from "ai";
 import type { Tracer } from "@opentelemetry/api";
+import { trace as otelTrace, context as otelContext, SpanStatusCode, ioAttrs, type Span } from "./otel";
 import type { AgentDef } from "../schemas/agent";
 import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
@@ -85,16 +86,17 @@ export async function runLoop(opts: {
    *  instead of the deleted loop-level idle watchdog. Config-disposed; defaults to 120s. Also used to
    *  bound consumeStream() in case the underlying stream ignores the abort signal. */
   modelRequestTimeoutMs?: number;
-  /** Plan 16: OpenTelemetry. When set, each streamText call runs under the AI SDK's
-   *  experimental_telemetry so its `gen_ai.*` spans export through `tracer` (nesting under the run
-   *  span run.ts made active). After every call, onModelCall feeds the token/duration/cost metrics.
-   *  `captureContent` gates whether prompt/completion text is recorded onto the spans (privacy: off by
-   *  default). Undefined ⇒ no telemetry, zero overhead. */
+  /** Plan 16: OpenTelemetry. When set, each model iteration opens taicho's OWN `chat <model>` span
+   *  (named + carrying gen_ai.* attrs and, when captureContent, the prompt/completion) made ACTIVE
+   *  around the call so tool spans nest under it. onModelCall feeds the token/duration/cost metrics.
+   *  We emit our own spans rather than the AI SDK's generic `ai.streamText.doStream` ones so the trace
+   *  reads meaningfully in any backend. Undefined ⇒ no telemetry, zero overhead. */
   telemetry?: {
     tracer: Tracer;
     captureContent: boolean;
-    functionId: string;
-    metadata: Record<string, string>;
+    model: string;
+    provider: string;
+    agent: string;
     onModelCall: (m: { inputTokens: number; outputTokens: number; costUsd: number; durationMs: number }) => void;
   };
 }): Promise<LoopResult> {
@@ -177,6 +179,7 @@ export async function runLoop(opts: {
     };
     let out: ModelOut;
     let callStart = 0; // set right before streamText; read after the call for the OTel duration metric
+    let chatSpan: Span | undefined; // Plan 16: taicho's own model-call span (named + carries I/O)
     try {
       // emit() (Plan 04) flushes the transcript event live via onEvent; onStep model_start (Plan 02/10)
       // drives the live "thinking" status. Keep both.
@@ -224,17 +227,28 @@ export async function runLoop(opts: {
         rejectIdle = reject;
         resetIdleTimer();
       });
+      // Plan 16: open taicho's OWN model-call span, named `chat <model>` and made ACTIVE around the
+      // stream — so the tool spans (opened in tools.ts) nest under it, and it carries the prompt/
+      // completion in the keys backends read (via ioAttrs) instead of the AI SDK's opaque `ai.*` keys.
+      const tel = opts.telemetry;
+      if (tel) {
+        chatSpan = tel.tracer.startSpan(`chat ${tel.model} · iter ${iterations + 1}`, {
+          attributes: {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.system": tel.provider,
+            "gen_ai.request.model": tel.model,
+            "taicho.agent": tel.agent,
+            "taicho.iteration": iterations + 1,
+            ...(tel.captureContent ? ioAttrs("input", safeJson(messages)) : {}),
+          },
+        });
+      }
       callStart = performance.now();
       const s = streamText({
         model: opts.model,
         messages,
         tools: opts.tools,
         abortSignal: opts.signal,
-        // Plan 16: emit standard OpenTelemetry gen_ai spans for this call. recordInputs/recordOutputs
-        // gate prompt & completion text — off unless OTEL_TAICHO_CAPTURE_CONTENT opts in (privacy).
-        ...(opts.telemetry
-          ? { experimental_telemetry: { isEnabled: true, tracer: opts.telemetry.tracer, functionId: opts.telemetry.functionId, metadata: opts.telemetry.metadata, recordInputs: opts.telemetry.captureContent, recordOutputs: opts.telemetry.captureContent } }
-          : {}),
         // Codex backend (subscription) requires the system prompt in the top-level `instructions`
         // field with store:false ("Instructions are required") — NOT a system message. Every other
         // provider takes a normal `system` prompt. (SSE streaming — "Stream must be set to true" —
@@ -258,8 +272,12 @@ export async function runLoop(opts: {
           }
         },
       });
-      // Race consumeStream() against the idle timeout
-      await Promise.race([s.consumeStream(), idleTimeoutPromise]);
+      // Race consumeStream() against the idle timeout — with the chat span ACTIVE so the tool spans
+      // opened during tool execution (inside consumeStream) nest under this model call.
+      const consume = () => Promise.race([s.consumeStream(), idleTimeoutPromise]);
+      await (chatSpan
+        ? otelContext.with(otelTrace.setSpan(otelContext.active(), chatSpan), consume)
+        : consume());
       // Clean up the timer
       if (idleTimer) clearTimeout(idleTimer);
       if (streamErr) throw streamErr;
@@ -272,8 +290,24 @@ export async function runLoop(opts: {
         // streamed path too (aggregated from the finish part); captureProviderCost reads it below.
         providerMetadata: await s.providerMetadata,
       };
+      // Finalize the chat span: usage + finish reason, and (when capture is on) the completion text
+      // (the assistant's reply, or a JSON of the tool calls it decided to make).
+      if (chatSpan && tel) {
+        const fin = await s.finishReason;
+        chatSpan.setAttributes({
+          "gen_ai.usage.input_tokens": out.usage?.inputTokens ?? 0,
+          "gen_ai.usage.output_tokens": out.usage?.outputTokens ?? 0,
+          "gen_ai.response.finish_reasons": String(fin),
+        });
+        if (tel.captureContent) {
+          const output = out.text?.trim() ? out.text : safeJson(out.toolCalls);
+          chatSpan.setAttributes(ioAttrs("output", output));
+        }
+        chatSpan.end();
+      }
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
+      if (chatSpan) { chatSpan.setStatus({ code: SpanStatusCode.ERROR, message: error }); chatSpan.end(); }
       emit({ ts: new Date().toISOString(), kind: "model_error", iteration: iterations + 1, data: { error } });
       if (opts.signal?.aborted) return done({ text: "[cancelled]", aborted: true });
       return done({ text: "[error]", error });
@@ -319,6 +353,11 @@ export async function runLoop(opts: {
     messages.push(...responseMessages);
   }
   return done({ text: "[budget exhausted]", exhausted: true });
+}
+
+/** Best-effort JSON for span I/O attributes (never throws on a circular/odd value). */
+function safeJson(v: unknown): string {
+  try { return JSON.stringify(v) ?? String(v); } catch { return String(v); }
 }
 
 /** Read the authoritative USD cost OpenRouter returns under providerMetadata.openrouter.usage.cost.

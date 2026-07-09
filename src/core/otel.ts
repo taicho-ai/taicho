@@ -146,5 +146,18 @@ export function initTelemetry(opts: InitTelemetryOpts = {}): Telemetry | undefin
   };
 }
 
-/** Re-export the api surface run.ts needs to open the per-run span, so callers import from one place. */
+/** Span input/output attributes, in the keys trace backends actually read. Without these, a viewer
+ *  shows "No inputs" — the AI SDK writes prompt/response under its own `ai.*` keys, which the generic
+ *  OTLP path does NOT map. We set the widely-read ones: OpenInference (`input.value`/`output.value`),
+ *  the generic GenAI (`gen_ai.prompt`/`gen_ai.completion`), and LangSmith's explicit reader
+ *  (`langsmith.span.inputs`/`outputs`). Gated by content capture at every call site. Capped so a huge
+ *  brief/answer can't bloat an attribute. */
+export function ioAttrs(kind: "input" | "output", text: string): Record<string, string> {
+  const v = text.length > 12_000 ? text.slice(0, 12_000) + "…[truncated]" : text;
+  return kind === "input"
+    ? { "input.value": v, "gen_ai.prompt": v, "langsmith.span.inputs": JSON.stringify({ input: v }) }
+    : { "output.value": v, "gen_ai.completion": v, "langsmith.span.outputs": JSON.stringify({ output: v }) };
+}
+
+/** Re-export the api surface run.ts/loop.ts/tools.ts need to open + nest spans, from one place. */
 export { trace, context, SpanStatusCode, type Span } from "@opentelemetry/api";
