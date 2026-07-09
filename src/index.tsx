@@ -27,6 +27,7 @@ import { createE2eModel } from "./core/e2e-model";
 import { parseCli, runHeadless, runTail, scheduleFireOptions } from "./core/headless";
 import { runScheduleCli } from "./core/schedule-cli";
 import { configureLogger, log } from "./core/logger";
+import { initTelemetry } from "./core/otel";
 
 const ws = process.cwd();
 const cli = parseCli(process.argv);
@@ -114,6 +115,12 @@ if (mcp) process.on("SIGTERM", () => { void mcp.closeAll().finally(() => process
 // with no `budgets` in taicho.yaml the loop does zero extra DB work (pre-Plan-09 behavior).
 const deckLedger = hasCeilings(config.budgets) ? makeDeckLedger(db, config.budgets) : undefined;
 
+// Plan 16: OpenTelemetry. Enabled only when an OTLP endpoint is configured (OTEL_EXPORTER_OTLP_ENDPOINT)
+// — otherwise undefined and every seam skips it (zero overhead). Shared by every run this session. Must
+// be flushed on exit (BatchSpanProcessor buffers), so each exit path below awaits telemetry?.shutdown().
+const telemetry = initTelemetry({ serviceVersion: "0.0.1" });
+if (telemetry) process.on("SIGTERM", () => { void telemetry.shutdown(); });
+
 const e2eModel = createE2eModel(process.env.TAICHO_E2E_MODEL);
 const authSource = e2eModel
   ? { kind: "env" as const, provider: "openai" as const, model: `e2e:${process.env.TAICHO_E2E_MODEL}` }
@@ -195,11 +202,12 @@ if (cli.command?.kind === "run") {
       ws, db, model: initial.model,
       resolveModel: initial.resolveModel, priceUsd: initial.priceUsd,
       configDefaults: config.defaults, mcp, embed: embedder?.embed,
-      deckLedger,
+      deckLedger, telemetry,
     },
     { goal: cli.command.goal, agent: cli.command.agent, approve: cli.command.approve },
   );
   if (mcp) await mcp.closeAll().catch((e) => log.warn("mcp closeAll failed", e));
+  await telemetry?.shutdown(); // flush buffered spans/metrics before exit
   process.exit(res.ok ? 0 : 1);
 }
 
@@ -207,7 +215,7 @@ if (cli.command?.kind === "run") {
 // scheduled run uses — the schedule's own approval mode (default reject) applies (no captain, so no
 // unsupervised privileged exec). add/list/remove already exited above; only `run` reaches here.
 if (cli.command?.kind === "schedule") {
-  const hd = { ws, db, model: initial.model, resolveModel: initial.resolveModel, priceUsd: initial.priceUsd, configDefaults: config.defaults, mcp, embed: embedder?.embed, deckLedger };
+  const hd = { ws, db, model: initial.model, resolveModel: initial.resolveModel, priceUsd: initial.priceUsd, configDefaults: config.defaults, mcp, embed: embedder?.embed, deckLedger, telemetry };
   const r = await runScheduleCli(
     // `schedule run` is the same UNATTENDED path a live scheduled fire uses — mark it schedule:<id> so it
     // is EXCLUDED from the target agent's conversation ledger + boot-replay cache (still gets run evidence).
@@ -215,6 +223,7 @@ if (cli.command?.kind === "schedule") {
     cli.command.args,
   );
   if (mcp) await mcp.closeAll().catch((e) => log.warn("mcp closeAll failed", e));
+  await telemetry?.shutdown(); // flush buffered spans/metrics before exit
   process.exit(r.ok ? 0 : 1);
 }
 
@@ -234,6 +243,7 @@ render(
     mcpYamlServers={Object.keys(config.mcp?.servers ?? {})}
     embed={embedder?.embed}
     deckLedger={deckLedger}
+    telemetry={telemetry}
     startupNotice={startupNotice}
     {...initial}
     cfg={authSource.kind === "env" ? { provider: authSource.provider, model: authSource.model } : null}

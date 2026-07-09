@@ -2,6 +2,7 @@
  *  AgentDef/config — model-supplied budget params are ignored. The loop is the single meter for
  *  spend (tokens + advisory USD) and the single place caps + cancellation are enforced. */
 import { generateText, streamText, type ModelMessage, type ToolSet } from "ai";
+import type { Tracer } from "@opentelemetry/api";
 import type { AgentDef } from "../schemas/agent";
 import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
@@ -84,6 +85,18 @@ export async function runLoop(opts: {
    *  instead of the deleted loop-level idle watchdog. Config-disposed; defaults to 120s. Also used to
    *  bound consumeStream() in case the underlying stream ignores the abort signal. */
   modelRequestTimeoutMs?: number;
+  /** Plan 16: OpenTelemetry. When set, each streamText call runs under the AI SDK's
+   *  experimental_telemetry so its `gen_ai.*` spans export through `tracer` (nesting under the run
+   *  span run.ts made active). After every call, onModelCall feeds the token/duration/cost metrics.
+   *  `captureContent` gates whether prompt/completion text is recorded onto the spans (privacy: off by
+   *  default). Undefined ⇒ no telemetry, zero overhead. */
+  telemetry?: {
+    tracer: Tracer;
+    captureContent: boolean;
+    functionId: string;
+    metadata: Record<string, string>;
+    onModelCall: (m: { inputTokens: number; outputTokens: number; costUsd: number; durationMs: number }) => void;
+  };
 }): Promise<LoopResult> {
   const counts: Record<string, number> = {};
   const transcript: LoopResult["transcript"] = [];
@@ -163,6 +176,7 @@ export async function runLoop(opts: {
       providerMetadata: GenResult["providerMetadata"];
     };
     let out: ModelOut;
+    let callStart = 0; // set right before streamText; read after the call for the OTel duration metric
     try {
       // emit() (Plan 04) flushes the transcript event live via onEvent; onStep model_start (Plan 02/10)
       // drives the live "thinking" status. Keep both.
@@ -210,11 +224,17 @@ export async function runLoop(opts: {
         rejectIdle = reject;
         resetIdleTimer();
       });
+      callStart = performance.now();
       const s = streamText({
         model: opts.model,
         messages,
         tools: opts.tools,
         abortSignal: opts.signal,
+        // Plan 16: emit standard OpenTelemetry gen_ai spans for this call. recordInputs/recordOutputs
+        // gate prompt & completion text — off unless OTEL_TAICHO_CAPTURE_CONTENT opts in (privacy).
+        ...(opts.telemetry
+          ? { experimental_telemetry: { isEnabled: true, tracer: opts.telemetry.tracer, functionId: opts.telemetry.functionId, metadata: opts.telemetry.metadata, recordInputs: opts.telemetry.captureContent, recordOutputs: opts.telemetry.captureContent } }
+          : {}),
         // Codex backend (subscription) requires the system prompt in the top-level `instructions`
         // field with store:false ("Instructions are required") — NOT a system message. Every other
         // provider takes a normal `system` prompt. (SSE streaming — "Stream must be set to true" —
@@ -275,6 +295,9 @@ export async function runLoop(opts: {
     const provCost = opts.captureProviderCost ? openrouterCostUsd(providerMetadata) : undefined;
     const callCost = provCost ?? opts.priceUsd?.({ inputTokens: inTok, outputTokens: outTok }) ?? 0;
     costUsd += callCost;
+    // Plan 16: feed this call's usage to the OTel metrics (gen_ai token + duration histograms, cost
+    // counter). The gen_ai span itself was emitted by the AI SDK; this is the aggregate-metrics half.
+    opts.telemetry?.onModelCall({ inputTokens: inTok, outputTokens: outTok, costUsd: callCost, durationMs: performance.now() - callStart });
     // Commit this call's spend to the deck ledger (Plan 09). Tokens always count; USD only for priced
     // runs — a subscription (codex backend) call has no measurable USD, so it commits 0 (honest: the
     // token ceiling still bounds it, the USD ceiling never sees a fabricated figure).

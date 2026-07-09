@@ -1,0 +1,150 @@
+/** Plan 16: OpenTelemetry instrumentation. The engine already produces rich internal evidence
+ *  (transcript.jsonl, RunTrace, the /trace waterfall) — but it is taicho-only. This module exports the
+ *  SAME model/tool/delegation activity as STANDARD OpenTelemetry: `gen_ai.*` semantic-convention spans
+ *  (via the AI SDK's experimental_telemetry) nested under a taicho run span, plus a small metrics
+ *  pipeline. Everything ships over OTLP to any collector (Jaeger, Grafana Tempo, Honeycomb, LangSmith…).
+ *
+ *  OFF BY DEFAULT: with no OTLP endpoint configured, initTelemetry returns undefined and the engine
+ *  does zero extra work — no provider, no spans, no network. Turning it on is one env var
+ *  (OTEL_EXPORTER_OTLP_ENDPOINT), read by the standard OTel SDK exactly as every other OTel app reads it.
+ *
+ *  This is Plan 16 Phase 1 ("emit alongside"): OTel spans are produced in addition to today's transcript
+ *  evidence, so /trace is unchanged and the export is purely additive. Phases 2/3 (repointing /trace at
+ *  the span store, retiring the transcript-derived path) are follow-ups. */
+import { metrics, type Tracer, type Histogram, type Counter, type UpDownCounter } from "@opentelemetry/api";
+import {
+  NodeTracerProvider,
+  BatchSpanProcessor,
+  SimpleSpanProcessor,
+  type SpanExporter,
+} from "@opentelemetry/sdk-trace-node";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import {
+  MeterProvider,
+  PeriodicExportingMetricReader,
+  type MetricReader,
+} from "@opentelemetry/sdk-metrics";
+import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import { resourceFromAttributes } from "@opentelemetry/resources";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import { log } from "./logger";
+
+/** One model call's telemetry, recorded as metrics (the span attributes come from the AI SDK). */
+export interface ModelCallMetric {
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null; // null on a subscription/unpriced run — never a fabricated 0
+  durationMs: number;
+}
+
+/** The live telemetry handle threaded through RunDeps (like the deck ledger). Undefined ⇒ disabled. */
+export interface Telemetry {
+  /** The tracer handed to the AI SDK's experimental_telemetry so its gen_ai spans export through us. */
+  tracer: Tracer;
+  /** Whether prompt/completion text may leave the process (OTEL_TAICHO_CAPTURE_CONTENT). Off by default. */
+  captureContent: boolean;
+  /** Per model call → gen_ai token-usage + operation-duration histograms + the taicho cost counter. */
+  recordModelCall(m: ModelCallMetric): void;
+  /** A run began → active-runs gauge +1. */
+  runStarted(agent: string): void;
+  /** A run finished (any outcome) → active-runs gauge −1 + the run-duration histogram. */
+  runFinished(a: { agent: string; outcome: string; durationMs: number }): void;
+  /** Flush + close exporters. MUST be awaited before process exit or buffered spans are lost. */
+  shutdown(): Promise<void>;
+}
+
+export interface InitTelemetryOpts {
+  serviceName?: string;
+  serviceVersion?: string;
+  /** Test seam: export spans here instead of OTLP (an InMemorySpanExporter in unit tests). When set,
+   *  telemetry is forced ON regardless of env, and a SimpleSpanProcessor is used (synchronous flush). */
+  spanExporter?: SpanExporter;
+  /** Test seam: use this metric reader instead of the OTLP periodic reader. */
+  metricReader?: MetricReader;
+  env?: Record<string, string | undefined>;
+}
+
+const truthy = (v: string | undefined): boolean => v === "1" || v === "true" || v === "yes";
+
+/** Build the telemetry pipeline, or return undefined when disabled.
+ *
+ *  Enabled when EITHER an OTLP endpoint is configured (OTEL_EXPORTER_OTLP_ENDPOINT /
+ *  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) OR a test spanExporter is injected. The OTLP exporters read
+ *  their endpoint/headers/protocol from the standard OTEL_* env vars themselves — nothing bespoke. */
+export function initTelemetry(opts: InitTelemetryOpts = {}): Telemetry | undefined {
+  const env = opts.env ?? process.env;
+  const endpoint = env.OTEL_EXPORTER_OTLP_ENDPOINT ?? env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
+  const testMode = opts.spanExporter != null || opts.metricReader != null;
+  if (!endpoint && !testMode) return undefined; // the on-switch is the endpoint; absent it, a no-op
+
+  const serviceName = opts.serviceName ?? env.OTEL_SERVICE_NAME ?? "taicho";
+  const resource = resourceFromAttributes({
+    "service.name": serviceName,
+    "service.version": opts.serviceVersion ?? "0.0.1",
+  });
+
+  let tracerProvider: NodeTracerProvider;
+  let meterProvider: MeterProvider | undefined;
+  try {
+    const spanProcessor = opts.spanExporter
+      ? new SimpleSpanProcessor(opts.spanExporter)
+      : new BatchSpanProcessor(new OTLPTraceExporter());
+    tracerProvider = new NodeTracerProvider({ resource, spanProcessors: [spanProcessor] });
+    // AsyncLocalStorage context propagation — how a delegated child run's spans nest under their
+    // parent across await boundaries. Bun implements AsyncLocalStorage, so this works on Bun.
+    tracerProvider.register({ contextManager: new AsyncLocalStorageContextManager().enable() });
+
+    const reader = opts.metricReader
+      ?? new PeriodicExportingMetricReader({ exporter: new OTLPMetricExporter(), exportIntervalMillis: 15_000 });
+    meterProvider = new MeterProvider({ resource, readers: [reader] });
+    metrics.setGlobalMeterProvider(meterProvider);
+  } catch (e) {
+    // Never let a telemetry misconfiguration take down the app — log and run without it.
+    log.warn("opentelemetry init failed — continuing without telemetry", e);
+    return undefined;
+  }
+
+  const tracer = tracerProvider.getTracer("taicho", opts.serviceVersion ?? "0.0.1");
+  const meter = (meterProvider ?? metrics.getMeterProvider()).getMeter("taicho");
+
+  // GenAI semantic-convention instruments (portable names every backend understands) + a taicho cost
+  // counter and active-run gauge for the things the spec doesn't cover.
+  const tokenUsage: Histogram = meter.createHistogram("gen_ai.client.token.usage", { unit: "{token}", description: "Tokens used per model call" });
+  const opDuration: Histogram = meter.createHistogram("gen_ai.client.operation.duration", { unit: "s", description: "Model call latency" });
+  const costCounter: Counter = meter.createCounter("taicho.cost.usd", { unit: "USD", description: "Advisory model spend" });
+  const activeRuns: UpDownCounter = meter.createUpDownCounter("taicho.run.active", { description: "Runs currently in flight" });
+  const runDuration: Histogram = meter.createHistogram("taicho.run.duration", { unit: "s", description: "Agent run wall-clock" });
+
+  const captureContent = truthy(env.OTEL_TAICHO_CAPTURE_CONTENT);
+  log.info("opentelemetry enabled", { serviceName, endpoint: endpoint ?? "(test exporter)", captureContent });
+
+  return {
+    tracer,
+    captureContent,
+    recordModelCall(m) {
+      const attrs = { "gen_ai.system": m.provider, "gen_ai.request.model": m.model };
+      tokenUsage.record(m.inputTokens, { ...attrs, "gen_ai.token.type": "input" });
+      tokenUsage.record(m.outputTokens, { ...attrs, "gen_ai.token.type": "output" });
+      opDuration.record(m.durationMs / 1000, attrs);
+      if (m.costUsd != null && m.costUsd > 0) costCounter.add(m.costUsd, { "gen_ai.request.model": m.model });
+    },
+    runStarted(agent) {
+      activeRuns.add(1, { "taicho.agent": agent });
+    },
+    runFinished(a) {
+      activeRuns.add(-1, { "taicho.agent": a.agent });
+      runDuration.record(a.durationMs / 1000, { "taicho.agent": a.agent, "taicho.run.outcome": a.outcome });
+    },
+    async shutdown() {
+      // shutdown() force-flushes then closes. Swallow errors: an unreachable collector on exit must
+      // never crash the process or block the REPL quit path.
+      try { await tracerProvider.shutdown(); } catch (e) { log.warn("otel tracer shutdown failed", e); }
+      try { await meterProvider?.shutdown(); } catch (e) { log.warn("otel meter shutdown failed", e); }
+    },
+  };
+}
+
+/** Re-export the api surface run.ts needs to open the per-run span, so callers import from one place. */
+export { trace, context, SpanStatusCode, type Span } from "@opentelemetry/api";

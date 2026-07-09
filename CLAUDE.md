@@ -175,6 +175,41 @@ native to the terminal, **no external service**.
   key for a task spanning multiple turns/runs) and nests each run's subtree under one synthetic
   task-root span, reusing the same walker + layout as `deriveTrace`.
 
+## OpenTelemetry — standard export (Plan 16)
+
+taicho's rich per-run evidence (traces, `transcript.jsonl`, coaching ledger, `/trace` waterfall) was
+**taicho-only**. Plan 16 exports the SAME model/tool/delegation activity as **standard OpenTelemetry** —
+`gen_ai.*` semantic-convention spans nested under a taicho run span, plus metrics — over OTLP to any
+collector (Jaeger, Tempo, Honeycomb, LangSmith…). **Off by default**: with no
+`OTEL_EXPORTER_OTLP_ENDPOINT` configured, `initTelemetry` returns undefined and every seam skips it
+(zero overhead, no provider, no network). Phase 1 ("emit alongside") is shipped; the `/trace` waterfall
+is unchanged and OTel is purely additive. Phases 2–3 (repoint `/trace` at the span store, retire the
+transcript-derived path) are follow-ups — see `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`.
+
+- **`src/core/otel.ts`** — `initTelemetry` builds a `NodeTracerProvider` +
+  `AsyncLocalStorageContextManager` (context propagation across the delegation's await boundaries — Bun
+  implements `AsyncLocalStorage`) + a `MeterProvider`, both OTLP. Returns a `Telemetry` handle threaded
+  through `RunDeps` like the deck ledger (undefined ⇒ disabled). Test seam: inject `spanExporter` /
+  `metricReader` (in-memory, no network). The OTLP exporters read the STANDARD `OTEL_*` env vars
+  themselves (endpoint/headers/protocol) — nothing bespoke.
+- **`loop.ts`** — every `streamText` gets `experimental_telemetry: { isEnabled, tracer, … }`, so the AI
+  SDK emits the gen_ai spans (`ai.streamText` → `ai.streamText.doStream`). `recordInputs`/`recordOutputs`
+  are gated by `OTEL_TAICHO_CAPTURE_CONTENT` — **off by default**, so prompt/completion text never leaves
+  the process unless opted in. Per call, `onModelCall` feeds the token/duration/cost metrics.
+- **`run.ts`** — `executeRun` opens a `run <agent>` span BEFORE the try (so a pre-loop throw still closes
+  it) and makes it ACTIVE around `runLoop` via `context.with`, so the gen_ai spans AND delegated child
+  runs nest under it — a delegation is ONE distributed trace. `finishRunSpan` is idempotent (finalize +
+  catch), stamps tokens/cost/context/outcome, and decrements the active-run gauge exactly once. A
+  `taicho.*` attribute namespace carries what the spec doesn't (agent, run id, triggered-by, depth,
+  advisory USD, context tokens). The OTel `trace` import is aliased `otelTrace` to avoid colliding with
+  the local `RunTrace` object named `trace`.
+- **Boot (`index.tsx`)** — `initTelemetry()` once; threaded into headless, the REPL (`App` props), and
+  the schedule-fire path. Every exit path awaits `telemetry.shutdown()` so the `BatchSpanProcessor`
+  flushes buffered spans before the process dies (a SIGTERM handler too).
+- **Metrics** — `gen_ai.client.token.usage` + `gen_ai.client.operation.duration` histograms,
+  `taicho.cost.usd` counter (0/absent for subscription — never a fabricated price), `taicho.run.active`
+  gauge, `taicho.run.duration` histogram.
+
 ## Models, providers & auth
 
 Credentials are read from the environment only — **never** from `taicho.yaml`. Providers:
