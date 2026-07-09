@@ -33,7 +33,7 @@ import type { McpServerConfig } from "../store/config";
 import type { DeckLedger } from "../store/deck-budget";
 import type { Verdict } from "./command-guard";
 import { log, redact } from "./logger";
-import { trace as otelTrace, context, SpanStatusCode, type Span, type Telemetry } from "./otel";
+import { trace as otelTrace, context, SpanStatusCode, ioAttrs, type Span, type Telemetry } from "./otel";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 
@@ -138,6 +138,9 @@ export interface RunContext {
    *  to transcript.jsonl for the waterfall) and (b) emit a live typed phase via `emitStep`. */
   spanEvents: RunTranscriptEvent[];
   emitStep?: (info: StepInfo) => void;
+  /** Plan 16: OpenTelemetry handle, so the tool `instrument()` wrapper can open a `<tool>` span per
+   *  call (named + carrying args/result), under which a delegated child run nests. Undefined ⇒ off. */
+  telemetry?: Telemetry;
 }
 
 /** What check_task / await_task hand back: a reference, never the payload (Plan 01 discipline). */
@@ -182,20 +185,8 @@ export interface RunDeps {
   telemetry?: Telemetry;
 }
 
-/** Run-span input/output attributes, in the keys backends read for a span's I/O. Set ONLY when
- *  content capture is opted in (OTEL_TAICHO_CAPTURE_CONTENT). Without these, the top-level run in a
- *  viewer shows "No inputs" — the prompt/completion live only on the nested gen_ai spans. `gen_ai.*`
- *  is the generic (OpenLLMetry) convention; `langsmith.span.*` is LangSmith's explicit reader. Capped
- *  so a huge brief/answer can't bloat a span attribute. */
-function ioAttrs(kind: "input" | "output", text: string): Record<string, string> {
-  const v = text.length > 12_000 ? text.slice(0, 12_000) + "…[truncated]" : text;
-  return kind === "input"
-    ? { "gen_ai.prompt": v, "langsmith.span.inputs": JSON.stringify({ input: v }) }
-    : { "gen_ai.completion": v, "langsmith.span.outputs": JSON.stringify({ output: v }) };
-}
-
-/** Coarse provider label for the token/duration metric attributes. The authoritative gen_ai.system is
- *  set on the AI SDK span by the provider itself; this is a best-effort heuristic for the metric slice. */
+/** Coarse provider label (gen_ai.system) for the model spans + metrics. taicho emits its own spans
+ *  (not the AI SDK's), so this is the provider attribute source; a best-effort id-shape heuristic. */
 function providerLabel(modelId: string | undefined, subscription: boolean): string {
   if (subscription) return "openai"; // ChatGPT subscription rides the Codex (OpenAI) backend
   if (!modelId) return "unknown";
@@ -302,7 +293,13 @@ export async function executeRun(
   // The run's input = the delegated goal, else this turn's user text — so the run/sub-run node shows
   // WHAT it was asked (gated by captureContent, like the model-span prompt/completion).
   const runInput = opts.brief?.goal ?? lastUserText(opts.messages);
-  const runSpan: Span | undefined = tel?.tracer.startSpan(`run ${opts.agent.id}`, {
+  // A meaningful, mockup-grade label: "root · user turn", "researcher · delegated".
+  const runKind = opts.triggeredBy === "user" ? "user turn"
+    : opts.ingestSource ? "ingest"
+    : opts.triggeredBy.startsWith("schedule:") ? "scheduled"
+    : opts.triggeredBy.startsWith("task_") ? "task"
+    : "delegated";
+  const runSpan: Span | undefined = tel?.tracer.startSpan(`${opts.agent.id} · ${runKind}`, {
     attributes: {
       "taicho.agent": opts.agent.id,
       "taicho.run.id": runId,
@@ -339,8 +336,9 @@ export async function executeRun(
     ? {
         tracer: tel.tracer,
         captureContent: tel.captureContent,
-        functionId: `taicho.${opts.agent.id}.chat`,
-        metadata: { "taicho.agent": opts.agent.id, "taicho.run.id": runId, "taicho.triggered_by": opts.triggeredBy },
+        model: picked?.modelId ?? "model",
+        provider: providerLabel(picked?.modelId, subscription),
+        agent: opts.agent.id,
         onModelCall: (m: { inputTokens: number; outputTokens: number; costUsd: number; durationMs: number }) =>
           tel.recordModelCall({
             provider: providerLabel(picked?.modelId, subscription),
@@ -383,7 +381,7 @@ export async function executeRun(
     // this closes the synchronous cross-run brief-laundering path (parent ingests → hides a command in
     // the child's brief → child auto-runs it). See the cross-run residual note for what remains.
     untrusted: { entered: opts.taintedContext === true, sources: opts.taintedContext ? ["parent-brief"] : [] },
-    spanEvents, emitStep,
+    spanEvents, emitStep, telemetry: tel,
     requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
     canDelegate: (toId) => canDelegate(opts.agent, toId),
@@ -406,14 +404,34 @@ export async function executeRun(
       });
     },
     verifications: [],
-    checkCriteria: (p) => runChecker({
-      model, agent: opts.agent, subscription, priceUsd,
-      captureProviderCost: picked?.captureCost, signal: deps.signal,
-      // Plan 09: the checker runs on the same shared deck ledger the primary loop uses, so its tokens
-      // (and USD, when priced) count against the deck ceiling and are bounded by it — not invisible.
-      deckLedger: deps.deckLedger,
-      goal: p.goal, criteria: p.criteria, output: p.output,
-    }),
+    checkCriteria: async (p) => {
+      const run = () => runChecker({
+        model, agent: opts.agent, subscription, priceUsd,
+        captureProviderCost: picked?.captureCost, signal: deps.signal,
+        // Plan 09: the checker runs on the same shared deck ledger the primary loop uses, so its tokens
+        // (and USD, when priced) count against the deck ceiling and are bounded by it — not invisible.
+        deckLedger: deps.deckLedger,
+        goal: p.goal, criteria: p.criteria, output: p.output,
+      });
+      // Plan 16: the independent verification checker as its own "VERIFY" span — nests under the active
+      // delegate_task tool span, named with the verdict once known ("checker · criteria pass/fail").
+      const span = tel?.tracer.startSpan("checker", {
+        attributes: { "taicho.kind": "verify", ...(tel.captureContent ? ioAttrs("input", p.criteria) : {}) },
+      });
+      if (!span) return run();
+      try {
+        const r = await context.with(otelTrace.setSpan(context.active(), span), run);
+        span.updateName(`checker · criteria ${r.verdict.pass ? "pass" : "fail"}`);
+        span.setAttribute("taicho.verify.pass", r.verdict.pass);
+        if (tel!.captureContent) span.setAttributes(ioAttrs("output", r.verdict.reasons?.join("; ") || (r.verdict.pass ? "pass" : "fail")));
+        return r;
+      } catch (e) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: e instanceof Error ? e.message : String(e) });
+        throw e;
+      } finally {
+        span.end();
+      }
+    },
     emit: emitStep ? (info) => emitStep({ note: info.note }) : undefined,
     // Plan 04: dispatch resolves the child agent (like runChild) then hands it to the host scheduler,
     // which starts a detached run and returns the taskId immediately. Undefined when unwired.

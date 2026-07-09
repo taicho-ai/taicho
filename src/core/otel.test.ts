@@ -63,22 +63,27 @@ test("a run emits a taicho run span with the gen_ai model call nested under it",
   // shutdown() flushes to OTLP — that path is exercised by index.tsx, not here.
   const finished = spans.getFinishedSpans();
 
-  // The run span carries the taicho identity + a terminal outcome.
-  const runSpan = finished.find((s) => s.name === "run writer");
+  // The run span is named meaningfully ("<agent> · user turn") and carries identity + outcome.
+  const runSpan = finished.find((s) => s.name === "writer · user turn");
   expect(runSpan).toBeDefined();
   expect(runSpan!.attributes["taicho.agent"]).toBe("writer");
   expect(runSpan!.attributes["taicho.run.id"]).toBe(res.runId);
   expect(runSpan!.attributes["taicho.run.outcome"]).toBe("completed");
   expect(runSpan!.attributes["taicho.tokens"]).toBeGreaterThan(0);
 
-  // The AI SDK emitted at least one gen_ai/ai.* span for the model call…
-  const aiSpans = finished.filter((s) => s.name.startsWith("ai."));
-  expect(aiSpans.length).toBeGreaterThan(0);
-  // …and it is a descendant of the run span (one distributed trace, correct parenting).
-  expect(aiSpans.every((s) => s.spanContext().traceId === runSpan!.spanContext().traceId)).toBe(true);
-  const someNestedUnderRun = aiSpans.some((s) => s.parentSpanContext?.spanId === runSpan!.spanContext().spanId)
-    || aiSpans.some((s) => finished.some((p) => p.spanContext().spanId === s.parentSpanContext?.spanId));
-  expect(someNestedUnderRun).toBe(true);
+  // taicho emits its OWN model-call span named `chat <model> · iter N` (not the AI SDK's opaque
+  // `ai.streamText.doStream`), nested under the run span, carrying gen_ai.* attributes.
+  const chatSpans = finished.filter((s) => s.name.startsWith("chat "));
+  expect(chatSpans.length).toBeGreaterThan(0);
+  expect(chatSpans[0]!.attributes["gen_ai.request.model"]).toBeDefined();
+  expect(chatSpans.every((s) => s.spanContext().traceId === runSpan!.spanContext().traceId)).toBe(true);
+  expect(chatSpans.some((s) => s.parentSpanContext?.spanId === runSpan!.spanContext().spanId)).toBe(true);
+  // No opaque AI SDK spans leak into the trace anymore.
+  expect(finished.some((s) => s.name.startsWith("ai."))).toBe(false);
+  // The tool call is its own named span ("write_artifact · …"), nested under the chat span.
+  const toolSpan = finished.find((s) => s.name.startsWith("write_artifact"));
+  expect(toolSpan).toBeDefined();
+  expect(toolSpan!.attributes["taicho.tool"]).toBe("write_artifact");
   await telemetry.shutdown();
 });
 
@@ -102,13 +107,17 @@ test("a delegated child run nests under its parent — one trace across the dele
   expect(res.trace.delegatedOut.length).toBe(1); // the delegation actually fired
 
   const finished = spans.getFinishedSpans(); // read before shutdown (see note above)
-  const parent = finished.find((s) => s.name === "run root");
-  const child = finished.find((s) => s.name === "run helper");
+  const parent = finished.find((s) => s.name === "root · user turn");
+  const child = finished.find((s) => s.name === "helper · delegated");
+  const toolSpan = finished.find((s) => s.name.startsWith("delegate_task"));
   expect(parent).toBeDefined();
   expect(child).toBeDefined();
+  expect(toolSpan).toBeDefined();
   // Same trace id ⇒ the delegation is ONE distributed trace, not two disconnected ones.
   expect(child!.spanContext().traceId).toBe(parent!.spanContext().traceId);
   expect(child!.attributes["taicho.triggered_by"]).toBe(res.runId);
+  // The child run nests under the delegate_task TOOL span (the mockup's structure), not the run directly.
+  expect(child!.parentSpanContext?.spanId).toBe(toolSpan!.spanContext().spanId);
   await telemetry.shutdown();
 });
 
@@ -145,9 +154,23 @@ test("the run span carries input + output when content capture IS opted in", asy
   const writer = await loadAgent(ws, "writer");
   await executeRun(deps, { agent: writer, messages: [{ role: "user", content: "MY_QUESTION_42" }], triggeredBy: "user" });
 
-  const runSpan = spans.getFinishedSpans().find((s) => s.name === "run writer")!;
+  const finished = spans.getFinishedSpans();
+  const runSpan = finished.find((s) => s.name === "writer · user turn")!;
   // The run node now shows WHAT it was asked and WHAT it produced — not "No inputs".
   expect(String(runSpan.attributes["gen_ai.prompt"])).toContain("MY_QUESTION_42");
   expect(String(runSpan.attributes["gen_ai.completion"])).toContain("here is the answer");
+
+  // The chat span carries the prompt as a STRUCTURED message list (indexed gen_ai.* role/content) —
+  // rendered as a conversation by backends, not a raw JSON dump. The user's question is a user message.
+  const chat = finished.find((s) => s.name.startsWith("chat "))!;
+  expect(chat.attributes["gen_ai.prompt.0.role"]).toBe("system");
+  const roles = Object.keys(chat.attributes).filter((k) => /^gen_ai\.prompt\.\d+\.role$/.test(k));
+  expect(roles.length).toBeGreaterThanOrEqual(2); // system + at least the user turn
+  const userMsg = Object.entries(chat.attributes).find(([k, v]) => /gen_ai\.prompt\.\d+\.content/.test(k) && String(v).includes("MY_QUESTION_42"));
+  expect(userMsg).toBeDefined();
+  expect(String(chat.attributes["gen_ai.completion.0.role"])).toBe("assistant");
+  expect(String(chat.attributes["gen_ai.completion.0.content"])).toContain("here is the answer");
+  // ...and NOT a JSON blob under a single key.
+  expect(chat.attributes["gen_ai.prompt"]).toBeUndefined();
   await telemetry.shutdown();
 });

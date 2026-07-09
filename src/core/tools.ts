@@ -28,6 +28,7 @@ import { rankSkills } from "../skills/retrieval";
 import { Skill } from "../schemas/skill";
 import { classifyCommand, runShell, runSandboxed, isInsideWorkspace } from "./command-guard";
 import { argsPreview, capJson } from "./instrument";
+import { trace as otelTrace, context as otelContext, SpanStatusCode, ioAttrs } from "./otel";
 
 // read_artifact body cap: default returns metadata + summary only; a body read is capped so an
 // uncapped read can't funnel a large payload back into context (the pollution this plan exists to kill).
@@ -763,9 +764,18 @@ function instrument(set: ToolSet, ctx: RunContext, untrustedSources?: Set<string
       const preview = argsPreview(name, input);
       ctx.spanEvents?.push({ ts: new Date().toISOString(), kind: "tool_start", data: { tool: name, callId, argsPreview: preview, args: capJson(input) } });
       ctx.emitStep?.({ phase: "tool_start", tool: name, argsPreview: preview, callId });
+      // Plan 16: taicho's own tool span — named `<tool> · <preview>` (e.g. "delegate_task · researcher:
+      // …", "write_artifact · findings") so the trace reads meaningfully, carrying args in / result out,
+      // and made ACTIVE so a delegated child run nests under this exact tool span.
+      const tel = ctx.telemetry;
+      const span = tel?.tracer.startSpan(preview ? `${name} · ${preview}` : name, {
+        attributes: { "taicho.tool": name, ...(tel.captureContent ? ioAttrs("input", capJson(input)) : {}) },
+      });
       let result: unknown, err: string | undefined;
       try {
-        result = await orig(input, options);
+        result = await (span
+          ? otelContext.with(otelTrace.setSpan(otelContext.active(), span), () => orig(input, options))
+          : orig(input, options));
         // Arm the injection guard once an untrusted source returns (see fn doc). Guarded on
         // ctx.untrusted so partial unit-test contexts without the field don't crash.
         if (ctx.untrusted && untrustedSources?.has(name)) {
@@ -775,6 +785,7 @@ function instrument(set: ToolSet, ctx: RunContext, untrustedSources?: Set<string
         return result;
       } catch (e) {
         err = e instanceof Error ? e.message : String(e);
+        span?.setStatus({ code: SpanStatusCode.ERROR, message: err });
         throw e;
       } finally {
         const childRunId =
@@ -783,6 +794,11 @@ function instrument(set: ToolSet, ctx: RunContext, untrustedSources?: Set<string
             : undefined;
         ctx.spanEvents?.push({ ts: new Date().toISOString(), kind: "tool_end", data: { tool: name, callId, ok: !err, error: err, childRunId, result: capJson(result) } });
         ctx.emitStep?.({ phase: "tool_end", tool: name, ok: !err, callId });
+        if (span) {
+          if (tel!.captureContent && !err) span.setAttributes(ioAttrs("output", capJson(result)));
+          if (childRunId) span.setAttribute("taicho.child_run", childRunId);
+          span.end();
+        }
       }
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
