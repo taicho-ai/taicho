@@ -14,12 +14,10 @@ export interface SlashCommand { name: string; summary: string; usage?: string; r
 export const COMMANDS: SlashCommand[] = [
   { name: "help", summary: "list commands" },
   { name: "agents", summary: "list the squad" },
-  { name: "runs", summary: "list runs", usage: "[agent]" },
   { name: "costs", summary: "cross-session spend rollup (agent / day / model)", usage: "[agent]" },
   { name: "tasks", summary: "list / cancel background tasks", usage: "[cancel <id>]" },
   { name: "schedules", summary: "scheduled/triggered runs (cron / interval / watch)", usage: "list | add <goal> --every … | remove <id> | run <id>" },
-  { name: "trace", summary: "open the waterfall inspector (no arg = latest run; task_<id> = a whole task)", usage: "[id|task_<id>]" },
-  { name: "view", summary: "switch the live view (persists; waterfall = span tree)", usage: "bar|panes|both|waterfall" },
+  { name: "view", summary: "switch the live view (persists)", usage: "bar|panes|both" },
   { name: "teach", summary: "teach an agent a standing instruction", usage: "<agent> <correction>", requiresArg: true },
   { name: "policies", summary: "list an agent's coaching notes; approve a proposed one", usage: "<agent> | approve <pol_id>", requiresArg: true },
   { name: "forget", summary: "remove a coaching note", usage: "<agent> <pol_id>", requiresArg: true },
@@ -48,8 +46,7 @@ export function suggestCommands(buffer: string): SlashCommand[] {
 
 export interface SlashDeps {
   roster: RegistryRow[];
-  listTraces: (agentId?: string) => RunTrace[];
-  readTrace: (id: string) => RunTrace;
+  listTraces: (agentId?: string) => RunTrace[]; // still the source /costs rolls up
   listPolicies: (agentId: string) => PolicyNote[];
   deletePolicy: (agentId: string, polId: string) => boolean;
   /** Approve a `proposed` note by id (search is caller-scoped across agents). Null ⇒ no such note. */
@@ -67,19 +64,11 @@ export function runSlash(cmd: string, arg: string, deps: SlashDeps): Line[] {
     ];
   if (cmd === "agents")
     return deps.roster.map((r) => sys(`  ${r.is_root ? "*" : "-"} ${r.id}: ${r.role}`));
-  if (cmd === "runs") {
-    const traces = deps.listTraces(arg || undefined);
-    if (!traces.length) return [sys("  (no runs yet)")];
-    // Duration surfaced so /runs doubles as the waterfall picker (open one with /trace <id>).
-    return traces.map((t) => sys(`  ${t.id}  ${t.outcome}  ${t.tokens}tok  ${(t.durationMs / 1000).toFixed(1)}s`));
-  }
   if (cmd === "costs") {
-    // Cross-session rollup from the SAME traces /runs reads. Honest about subscription (costUsd:null)
-    // runs — reports their tokens, never a fabricated $0. Optional [agent] scopes to one agent.
+    // Cross-session spend rollup from the per-run RunTrace records. Honest about subscription
+    // (costUsd:null) runs — reports their tokens, never a fabricated $0. Optional [agent] scopes it.
     return formatCostRollup(rollupCosts(deps.listTraces(arg || undefined))).map(sys);
   }
-  // NOTE: `/trace` is handled interactively in App.tsx (it opens the TraceInspector over the derived
-  // span tree — see deriveTrace); it can't live here because that needs workspace file access.
   if (cmd === "policies") {
     const parts = arg.split(/\s+/).filter(Boolean);
     // `/policies approve <pol_id>` — the captain gate that flips a `proposed` note (e.g. a repeated-

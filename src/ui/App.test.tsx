@@ -210,9 +210,9 @@ test("suggester highlight STAYS put across re-renders (uncontrolled @inkjs/ui on
   await send(stdin, DOWN);
   await waitFor(lastFrame, "› /agents");           // row 1
   await send(stdin, DOWN);
-  await waitFor(lastFrame, "› /runs");             // row 2 — proves it advanced twice, not reset
+  await waitFor(lastFrame, "› /costs");            // row 2 — proves it advanced twice, not reset
   await sleep(60);                                  // let any stray re-render/onChange fire
-  expect(lastFrame()).toContain("› /runs");        // still on row 2, not snapped back to /help
+  expect(lastFrame()).toContain("› /costs");       // still on row 2, not snapped back to /help
 });
 
 test("the input clears after submitting a message (uncontrolled TextInput remounts on submit)", async () => {
@@ -758,88 +758,8 @@ test("delegation with acceptance criteria: a twice-failed verdict is surfaced to
   expect(task?.verifications.length).toBe(2);
 });
 
-// ── Plan 02: the /trace waterfall inspector (Layer-1, through the real App) ──
-
-test("/trace opens the waterfall inspector over the latest run's span tree", async () => {
-  const { props } = await setup({ model: mockModel("waterfall reply") });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "say hi", ENTER);
-  await waitFor(lastFrame, "waterfall reply");
-  await send(stdin, "/trace", ENTER);
-  await waitFor(lastFrame, "TRACE");                 // the inspector header
-  expect(lastFrame()).toContain("root · chat");      // the root run span row
-  expect(lastFrame()).toContain("llm #1");           // an llm span derived from the transcript
-  expect(lastFrame()).toContain("expand");           // the key hint footer
-});
-
-test("waterfall: ↓ then ⏎ drills into a span's per-kind detail; q closes it", async () => {
-  const { props } = await setup({ model: mockModel("hello detail") });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "go", ENTER);
-  await waitFor(lastFrame, "hello detail");
-  await send(stdin, "/trace", ENTER);
-  await waitFor(lastFrame, "TRACE");
-  await send(stdin, DOWN);                            // move selection off the root run onto llm #1
-  await send(stdin, ENTER);                           // open the detail panel
-  await waitFor(lastFrame, "iteration: 1");           // llm detail (only shown in the drill-in)
-  expect(lastFrame()).toContain("response:");
-  await send(stdin, "q");                             // first q closes the detail panel…
-  await waitForGone(lastFrame, "iteration: 1");
-  await send(stdin, "q");                             // …second q closes the inspector
-  await waitForGone(lastFrame, "TRACE");
-});
-
-test("waterfall renders an error span (✗) for a failed run and shows the error on drill-in", async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const failing = new MockLanguageModelV3({ doGenerate: (() => { throw new Error("kaboom-trace"); }) as any });
-  const { props } = await setup({ model: failing });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "do the impossible", ENTER);
-  await waitFor(lastFrame, "failed");
-  await send(stdin, "/trace", ENTER);
-  await waitFor(lastFrame, "TRACE");
-  expect(lastFrame()).toContain("✗");                 // the failed run/llm span marker
-  await send(stdin, DOWN);                            // onto the errored llm span
-  await send(stdin, ENTER);
-  await waitFor(lastFrame, "kaboom-trace");           // the error detail
-});
-
-// ── Plan 02 Phase 6: the LIVE waterfall (Layer-1, through the real App) ──
-
-test("live waterfall (/view waterfall): the redrawing span tree lights up as model/tool/delegation events arrive mid-run", async () => {
-  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
-    toolCall("delegate_task", { to: "writer", goal: "write the thing" }),
-    finalText("root done"),
-  ) as any });
-  // A slow child so the delegation is observable mid-flight (the waterfall redraws while it runs).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const slowWriter = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(350); return finalText("writer done"); }) as any });
-  const { ws, db, props } = await setup({ model: rootModel });
-  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (props as any).resolveModel = (id: string) => id === "writer" ? { model: slowWriter, modelId: "m" } : { model: rootModel, modelId: "m" };
-  const { stdin, lastFrame } = render(<App {...props} viewMode="waterfall" terminalSize={{ columns: 120, rows: 40 }} />);
-  await send(stdin, "have writer do it", ENTER);
-  await waitFor(lastFrame, "WATERFALL (live)");        // the live waterfall surface, not the panes/bar
-  await waitFor(lastFrame, "delegate_task");           // a TOOL span row — proves tool events redraw the tree
-  const mid = lastFrame() ?? "";
-  expect(mid).toContain("root · chat");                // the foreground root run span, live
-  expect(mid).toContain("writer");                     // the delegated child run nested + live at the same time
-  await waitFor(lastFrame, "root done");               // the cascade completes → reply lands
-  await waitForGone(lastFrame, "WATERFALL (live)");    // …and the live waterfall clears
-});
-
-test("live waterfall shows a single run's llm span while the model is thinking", async () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(300); return finalText("thought"); }) as any });
-  const { props } = await setup({ model: slow });
-  const { stdin, lastFrame } = render(<App {...props} viewMode="waterfall" terminalSize={{ columns: 120, rows: 40 }} />);
-  await send(stdin, "go", ENTER);
-  await waitFor(lastFrame, "WATERFALL (live)");
-  await waitFor(lastFrame, "llm #1");                  // the llm span derived from the live model_start event
-  await waitFor(lastFrame, "thought");
-  await waitForGone(lastFrame, "WATERFALL (live)");
-});
+// ── Plan 17: the /trace waterfall (inspector + live) was retired — trace visualization is
+//    OpenTelemetry's job now. The tests that drove it are removed with it. ──
 
 // ── Plan 10: the live status bar (Layer-1, through the real App) ──
 
@@ -889,23 +809,6 @@ test("status bar shows 'waiting' while an approval card is up, then clears on ap
   await send(stdin, "y");                              // approve
   await waitFor(lastFrame, "Created scout");
   await waitForGone(lastFrame, "waiting");             // bar clears after the run completes
-});
-
-test("waterfall: ↓↑ navigate, ← collapses a run's subtree, → re-expands, Esc closes", async () => {
-  const { props } = await setup({ model: mockModel("collapse me") });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "go", ENTER);
-  await waitFor(lastFrame, "collapse me");
-  await send(stdin, "/trace", ENTER);
-  await waitFor(lastFrame, "llm #1");                 // the run's subtree is visible
-  await send(stdin, DOWN);                            // move down…
-  await send(stdin, UP);                              // …and back to the root run (selection index 0)
-  await send(stdin, LEFT);                            // collapse the root run
-  await waitForGone(lastFrame, "llm #1");             // its subtree is hidden
-  await send(stdin, RIGHT);                           // expand again
-  await waitFor(lastFrame, "llm #1");
-  await send(stdin, ESC);                             // Esc closes the inspector
-  await waitForGone(lastFrame, "TRACE");
 });
 
 // ── Plan 10 Phase 4: the split-pane view (Layer-1, through the real App) ──

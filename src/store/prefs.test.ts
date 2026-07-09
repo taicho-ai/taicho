@@ -25,7 +25,7 @@ test("isViewMode guards the known modes", () => {
   expect(isViewMode("both")).toBe(true);
   expect(isViewMode("panes")).toBe(true);
   expect(isViewMode("bar")).toBe(true);
-  expect(isViewMode("waterfall")).toBe(true);
+  expect(isViewMode("waterfall")).toBe(false); // retired with the /trace waterfall (Plan 17)
   expect(isViewMode("nope")).toBe(false);
 });
 

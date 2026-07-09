@@ -29,12 +29,11 @@ issues tsc won't).
   model/resolver/pricer (`buildFromAuth`), renders the Ink `App`. Boot failures (e.g. a
   misconfigured provider) print a `taicho: …` line and `process.exit(1)`.
 - **`src/ui/`** — `App.tsx` is the REPL (chat, `@agent` direct messages, `/slash` commands,
-  Esc-to-cancel/steer, approval cards). `slash.ts`, `input.ts`, `ProposalCard.tsx`,
-  `TraceInspector.tsx` (the `/trace` waterfall — see **Observability** below). `StatusBar.tsx` +
+  Esc-to-cancel/steer, approval cards). `slash.ts`, `input.ts`, `ProposalCard.tsx`. `StatusBar.tsx` +
   `SquadPanes.tsx` (Plan 10) are the **live squad view**: the bar is a one-line summary of every live
   agent; the panes are one-per-agent detail (status line + recent tool lines with `argsPreview`).
   Both render from `core/agent-status.ts` (the reducer over the `onStep` event stream); `/view
-  bar|panes|both|waterfall|stream` (default `both`) switches surfaces and persists via `store/prefs.ts`.
+  bar|panes|both` (default `both`) switches surfaces and persists via `store/prefs.ts`.
   Panes are display-only — the REPL always owns the keyboard. Layer-4 recorded proof (Plan 10 Phase 5):
   `bun scripts/e2e-evidence.ts squad-panes` shows both panes + bar live during a delegation, driven by
   a **slow-mode e2e model** (`e2e-model.ts` `squad-panes` mode) that holds the child's model call
@@ -106,8 +105,9 @@ issues tsc won't).
   - `providers/openai-codex.ts` — ChatGPT-subscription (Codex backend) provider: a `createOpenAI`
     instance with a custom `fetch` that injects the OAuth bearer + Codex headers and refreshes on 401.
   - `auth/` — OAuth PKCE login, token refresh, profile store, constants, status.
-  - `trace-tree.ts` / `trace-layout.ts` — the pure derivation + layout behind the `/trace` waterfall
-    (see **Observability** below); `TraceInspector.tsx` is the view.
+  - `otel.ts` — OpenTelemetry export (Plan 16); the ONLY trace visualization path now (see
+    **Observability** + **OpenTelemetry** below). `conversation-artifacts.ts` — the Plan 15 artifact
+    browser's run-tree walker (extracted from the retired trace-tree.ts).
   - `prompt.ts`, `tools.ts`, `registry.ts`, `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
 - **`src/store/`** — persistence: `config.ts` (provider/model/auth resolution + `taicho.yaml`),
   `db.ts` (SQLite), `roster.ts` (agent.md canon + registry index; `createAgent` **baseline-merges**
@@ -127,53 +127,28 @@ issues tsc won't).
 - **`src/coaching/`** — corrections → durable, conditional, approval-gated policy notes.
 - **`src/schemas/`** — zod schemas (`agent`, `brief`, `policy`, `trace`, `artifact`, `annotation`).
 
-## Observability — the `/trace` waterfall (Plan 02)
+## Observability — OpenTelemetry only (Plan 16 + Plan 17)
 
-taicho already produces rich per-run evidence (traces, `transcript.jsonl`, the coaching ledger,
-verification verdicts, `failure.md`) — but it was **write-only**. The **`/trace` inspector is the
-reader** for it: a LangSmith-style waterfall (a span tree with absolute-time bars, drill-into-span),
-native to the terminal, **no external service**.
+**Trace visualization is OpenTelemetry's job — taicho ships no bespoke trace UI.** The in-terminal
+`/trace` waterfall (Plan 02: `trace-tree.ts`/`trace-layout.ts`/`live-trace.ts` + `TraceInspector.tsx`/
+`LiveWaterfall.tsx`, the `/trace` + `/runs` commands, the `/view waterfall` mode) was **retired in
+Plan 17** — it duplicated what OTel + any backend (Jaeger, Grafana Tempo, Honeycomb, LangSmith)
+already do better, and an external backend gives the AGENTS a queryable API to self-diagnose that a
+terminal reader never could. See **OpenTelemetry** below for the export (`src/core/otel.ts`).
 
-- **Command surface.** `/trace` (no arg) opens the **latest** `triggeredBy:"user"` run; `/trace <id>`
-  opens that run. `/runs` is the picker (rows carry duration). A trace = **one root user run plus its
-  delegation subtree** — exactly like one LangSmith trace. Wired in `App.tsx` (`setInspect`); the
-  post-run `trace: <id>` breadcrumb carries a `· /trace to inspect` hint.
-- **`deriveTrace(ws, rootRunId): Span[]`** (`src/core/trace-tree.ts`) — **pure** (files in → `Span[]`
-  out, no Ink; unit-tested over real-engine fixtures in `trace-tree.test.ts`). Walks `delegatedOut`
-  recursively into **run** spans; reads each run's `transcript.jsonl` into **llm** spans (pair
-  `model_request`→`model_response`/`model_error` by `iteration`), **tool** spans (`tool_start`→
-  `tool_end` by `callId`), and **approval** spans (`approval_start`→`approval_end`); a `delegate_task`
-  tool span **adopts** its child run span via the captured `childRunId` (a verification retry's failed
-  first attempt nests under the same tool span). Tokens/cost roll up onto run spans (reuses
-  `aggregate`).
-- **The `Span` model** — `kind: run|llm|tool|approval`, `parentId`, `startMs`/`endMs`, `tokens`,
-  `costUsd`, `status`, `detail` — is the single unit everything renders from. `trace-layout.ts` (pure)
-  maps `[traceStart, traceEnd]` onto a fixed column budget with a **≥1-cell min-width floor** (so
-  sub-second llm/tool spans never vanish) and a duration-adaptive scale; expand/collapse is a set of
-  collapsed span ids → visible-rows.
-- **`TraceInspector.tsx`** — the Ink view. Keys: `↑↓` move · `→/←` expand/collapse · `⏎` open detail ·
-  `q`/esc close. It owns the keyboard while open via the **`cardKeyRef` pattern** (App's one
-  boot-registered `useInput` forwards keys — dodges the first-keystroke race). Detail per kind: **llm**
-  (response, tokens, finish reason, context estimate) · **tool** (args/result/error) · **run**
-  (outcome, rolled-up cost, notes, the **coaching ledger** = policies/KB/skills
-  retrieved·applied·skipped, verification verdicts).
-- **Span capture (Phase 0).** The bars' durations need `tool_start`/`tool_end` and
-  `approval_start`/`approval_end` in the transcript — emitted by the tool `execute()` wrapper and the
-  `requestApproval` wrapper (the **same seam Plan 10's live status uses**). Approval waits are **core**
-  spans, not optional: human latency dominates wall-clock here, so a waterfall without them would
-  misattribute the wait.
-- **Live mode (Phase 6).** `/view waterfall` streams spans into a **redrawing** waterfall as the run
-  executes — the live counterpart to the post-hoc inspector. `src/core/live-trace.ts` folds the
-  **same** live event stream the status bar/panes consume (`onRunStart`/`onStep`/`onRunEnd`) into a
-  partial `Span` tree, incrementally (no disk reads, no re-derive per frame); `LiveWaterfall.tsx`
-  renders it through the **same** `trace-layout`, with running bars growing to `now`. The flat `↳`
-  breadcrumbs stay in scrollback as the record. `callId` was added to the live step event so live tool
-  spans pair start↔end exactly like the persisted ones.
-- **Task-level traces (Phase 6).** `/trace task_<id>` roots the waterfall at a **Task** (Plan 04's
-  persistent task) rather than a single user-run: `deriveTaskTrace(ws, taskId)` gathers **all** of the
-  task's top-level runs (its `rootRunId` + every run whose `triggeredBy` is the task id — the grouping
-  key for a task spanning multiple turns/runs) and nests each run's subtree under one synthetic
-  task-root span, reusing the same walker + layout as `deriveTrace`.
+What REMAINS after the retirement (deliberately kept — NOT tracing UI):
+- **The run-evidence substrate** — `RunTrace` (`store/trace.ts`) and `transcript.jsonl`
+  (`store/run-transcript.ts`). It's the DATA the product logic runs on: `/costs` (`core/costs.ts`),
+  coaching (`turn-audit.ts`), tasks, `memory.ts` recent-runs digest, and crash-recovery checkpoints.
+  `gatherConversationArtifacts` (moved to `core/conversation-artifacts.ts` when trace-tree was deleted)
+  still walks the delegation tree for the Plan 15 artifact browser.
+- **The live squad view** — `StatusBar.tsx` + `SquadPanes.tsx` + `AgentBlock.tsx` + `OperationView.tsx`
+  (Plan 10/13), fed by the `onStep` event stream via `core/agent-status.ts`. This is the captain's LIVE
+  steering wheel (watch + steer agents mid-run) — post-hoc external OTel backends can't replace it, so
+  it stays.
+- **The execution log** — `taicho.log` (Plan 03, `core/logger.ts`) is the plain app log for correlation.
+  Plan 17 stamps each line with the active OTel `trace_id`/`span_id` (`format()` reads
+  `trace.getSpanContext(context.active())`) so a log line lines up with the exact span in the backend.
 
 ## OpenTelemetry — standard export (Plan 16)
 
