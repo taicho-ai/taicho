@@ -293,5 +293,27 @@ and returns them ordered by `created` desc (latest first). Resolves via `readArt
 
 `bun add <pkg>` re-resolves the whole tree and hits a broken upstream publish (`@vercel/ai-tsconfig@0.0.0`, 404). **Instead: edit `package.json` and run `bun install`**, keeping the `overrides` block intact (it pins the transitive `@ai-sdk/*` packages; never override a *direct* dep — npm's `EOVERRIDE` would then break `npx`, which launches stdio MCP servers). See the note in `package.json`.
 
+
+## Layer 4b — Real OTLP verification (`bun scripts/otel-verify.ts`)
+
+`core/otel.test.ts` proves the SPANS are shaped right, using the in-memory exporter seam. It cannot
+prove that a *shipped* taicho actually gets them onto the wire: everything between `initTelemetry` and
+the network — the `BatchSpanProcessor`, the exit-path `telemetry.shutdown()` flush, the OTLP JSON
+encoding — is untested by it.
+
+`bun scripts/otel-verify.ts` closes that gap. It stands up a real OTLP/HTTP receiver on `:4318`, drives
+the compiled `dist/taicho` headless through a plan + team delegation (`TAICHO_E2E_MODEL=plan-teams`)
+with nothing but the standard `OTEL_*` env vars, and asserts on the spans that arrive:
+
+- root's `run` span, and the child `run` span of the agent the TEAM routed to
+- both sharing one `traceId` — a delegation is ONE distributed trace
+- `taicho.plan.handle`, `taicho.plan.items.{total,done,open,failed}` on the run span
+- the `gen_ai` model-call spans and the `write_plan` / `delegate_task` tool spans
+- a metrics POST
+
+It prints the received span tree either way, and exits non-zero on the first failed assertion. Needs no
+network and no backend — the receiver is a ~40-line Bun server. Run it after any change to `otel.ts`,
+`loop.ts`'s telemetry wiring, or the boot/exit paths in `index.tsx`.
+
 ## Before claiming done
 `bun run typecheck` **and** `bun test` must be green. For changes to model/provider/MCP wiring, also `bun run build` (the single-binary bundle catches import issues `tsc` won't), and consider `bun run test:e2e`.
