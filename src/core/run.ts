@@ -4,7 +4,8 @@ import type { Database } from "bun:sqlite";
 import { generateText, type ModelMessage } from "ai";
 import type { AgentDef } from "../schemas/agent";
 import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schemas/trace";
-import { assemble } from "./prompt";
+import { assemble, type RosterTeam } from "./prompt";
+import { listTeams, loadTeam, membersOf } from "../store/teams";
 import { runLoop } from "./loop";
 import { runChecker } from "./verification";
 import { canDelegate, visibleToRows, acl } from "./registry";
@@ -479,7 +480,21 @@ export async function executeRun(
   };
 
   // Visibility from the registry index only — never load every agent's identity (unbounded roster).
-  const visible = visibleToRows(opts.agent, loadIndex(deps.db));
+  const visibleRows = visibleToRows(opts.agent, loadIndex(deps.db));
+
+  // Plan 19: the roster shows TEAMS this agent may address, plus the agents no shown team accounts
+  // for. Root therefore reads five team lines instead of sixty agent lines, and is pointed at the
+  // address it should be using. A squad with no teams/ directory takes the `[]` path and renders
+  // exactly as it did before this plan. The scan is a handful of files (teams are captain-owned).
+  const rosterTeams: RosterTeam[] = listTeams(deps.ws)
+    .filter((t) => canDelegate(opts.agent, { id: t.id, isTeam: true }))
+    .map((t) => ({ id: t.id, charter: t.charter, lead: t.lead, memberCount: membersOf(deps.db, t.id).length }))
+    .filter((t) => t.memberCount > 0); // an empty team is an address that goes nowhere — don't advertise it
+  const shown = new Set(rosterTeams.map((t) => t.id));
+  const visible = visibleRows.filter((r) => !r.team || !shown.has(r.team));
+
+  // The agent's own team charter — a standing instruction for everyone who sits on it.
+  const ownTeam = opts.agent.team ? loadTeam(deps.ws, opts.agent.team) : null;
 
   let applied: PolicyNote[] = [];
   try {
@@ -568,6 +583,8 @@ export async function executeRun(
 
   const { system } = assemble(opts.agent, {
     visibleAgents: visible,
+    teams: rosterTeams,
+    teamCharter: ownTeam?.charterBody || undefined,
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
     policies: applied,
     memoryBlock,
