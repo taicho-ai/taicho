@@ -60,6 +60,11 @@ export const RunTrace = z.object({
   verifierCostUsd: z.number().default(0),
   model: z.string().optional(),           // resolved model id — the /costs "by provider" dimension (default keeps old traces parseable)
   aggregate: z.object({ tokens: z.number(), costUsd: z.number().nullable() }).optional(),
+  // Plan 18: the agent's plan handle at run end, and how many transitions this run wrote. Both OPTIONAL
+  // (not .default(0)) so every trace written before this plan parses AND so the hand-built RunTrace
+  // fixtures across the suite need no edit — absent simply means "this run had no plan".
+  plan: z.string().optional(),
+  planEvents: z.number().optional(),
   notes: z.array(z.string()).default([]),
   durationMs: z.number().default(0),
   started: z.string().datetime(),

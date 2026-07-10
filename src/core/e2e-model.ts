@@ -276,8 +276,36 @@ function artifactViewerModel(): Model {
   }) as unknown as Model;
 }
 
+
+/** plan-teams (Plan 18 + Plan 19): root opens a plan, delegates one item to a leadless TEAM (which the
+ *  engine routes to the best-ranked member), the child works, and root finishes. Exercises, in one real
+ *  binary run: the plan store, the tail-slot injection, team resolution, engine-owned correlation, and
+ *  every OTel span the run emits. Used by scripts/otel-verify.ts against a real OTLP endpoint. */
+function planTeamsModel(): Model {
+  let n = 0;
+  return new MockLanguageModelV3({
+    provider: "taicho-e2e",
+    modelId: "plan-teams",
+    doStream: async () => {
+      n += 1;
+      if (n === 1) return call("write_plan", {
+        goal: "ship the notifier",
+        items: [
+          { id: "it_survey", text: "survey the existing code" },
+          { id: "it_story", text: "file the announcement", assignee: "news" },
+        ],
+      });
+      if (n === 2) return call("update_plan_item", { itemId: "it_survey", status: "done" });
+      if (n === 3) return call("delegate_task", { to: "news", goal: "files stories on deadline", itemId: "it_story" });
+      if (n === 4) return text("Filed the announcement."); // the routed team member
+      return text("Plan complete: surveyed the code and filed the announcement.");
+    },
+  }) as unknown as Model;
+}
+
 export function createE2eModel(mode: string | undefined): Model | null {
   if (mode === "agent-flow") return agentFlowModel();
+  if (mode === "plan-teams") return planTeamsModel();
   if (mode === "conversation-audit") return conversationAuditModel();
   if (mode === "artifact-handoff") return artifactHandoffModel();
   if (mode === "squad-panes") return squadPanesModel();

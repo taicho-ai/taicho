@@ -39,7 +39,7 @@ provider, no network, zero overhead. Setting the endpoint is the on-switch.
 | `OTEL_EXPORTER_OTLP_HEADERS` | Auth + routing headers, `k=v,k=v` (e.g. an API key). |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json`. |
 | `OTEL_SERVICE_NAME` | The base/namespace service name. Defaults to `taicho`. |
-| `OTEL_TAICHO_CAPTURE_CONTENT` | Opt in to shipping **prompt/completion + tool args/results** onto spans. **Off by default** (see Privacy). |
+| `OTEL_TAICHO_CAPTURE_CONTENT` | Set to `0`/`false`/`no`/`off` to STRIP **prompt/completion + tool args/results** from spans. **On by default** (see Privacy). |
 
 > **Secrets stay in the environment**, never in `taicho.yaml`. Put API keys in your shell env, a `.env`
 > file, or your secret manager — the same rule taicho uses for model credentials.
@@ -120,16 +120,25 @@ Route from the collector to as many backends as you like — that's the collecto
 
 ## Privacy — content capture
 
-By default taicho exports span **structure** (names, timings, token/cost, model, finish reason) but **not**
-the prompt/completion text or tool arguments/results. To include that content — e.g. to see the actual
-messages in LangSmith/Langfuse — opt in:
+taicho exports span **structure** (names, timings, tokens, cost, model, finish reason) *and* the
+**content**: prompt/completion text, tool arguments and results, and each run's input/output. Content
+capture is **on by default**, and you turn it off explicitly:
 
 ```bash
-export OTEL_TAICHO_CAPTURE_CONTENT=1
+export OTEL_TAICHO_CAPTURE_CONTENT=0     # also: false | no | off
 ```
 
-Only enable this when you're comfortable with your prompts and tool I/O leaving the process for your
-backend. It's all-or-nothing across llm/tool/run spans, and gated behind this single flag.
+**Why on by default.** Telemetry is *already* off unless you set `OTEL_EXPORTER_OTLP_ENDPOINT`. By the
+time this flag is read, you have deliberately pointed taicho at a backend you chose. Handing that person
+span skeletons — no prompts, no completions, no tool I/O — makes the trace unable to answer the first
+question anyone asks of it: *what did the user say, and what did the agent say back?* The privacy default
+that actually matters is "export nothing, anywhere", and that one is untouched.
+
+Anything unrecognized leaves capture **on**. An opt-out switch must fail toward the useful behaviour, or a
+typo (`OTEL_TAICHO_CAPTURE_CONTENT=treu`) silently guts your observability and nothing tells you.
+
+Turn it off when your prompts carry data you are not willing to send to your backend — regulated content,
+customer PII, secrets pasted into a conversation. It is all-or-nothing across run/llm/tool spans.
 
 ---
 
@@ -143,6 +152,6 @@ OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318" OTEL_SERVICE_NAME="taicho" \
 ```
 
 A trace named `<agent> · user turn` should appear within a few seconds, with the `chat <model>` span
-nested under it. Turn on `OTEL_TAICHO_CAPTURE_CONTENT=1` to see the messages. No trace showing up? Confirm
+nested under it, and the messages readable on both. No trace showing up? Confirm
 the endpoint is reachable and any required auth header is set — export failures are swallowed (they never
 crash a run), so a wrong endpoint fails silently.

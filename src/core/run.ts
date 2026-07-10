@@ -7,6 +7,8 @@ import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schem
 import { assemble, type RosterTeam } from "./prompt";
 import { listTeams, loadTeam, membersOf } from "../store/teams";
 import { routeToTeam } from "./team-routing";
+import { writePlan, foldPlan, appendPlanEvent, indexPlan, currentPlanId, renderPlan } from "../store/plans";
+import { planIdForGoal, TERMINAL_ITEM_STATUS, type PlanState, type PlanItemStatus } from "../schemas/plan";
 import { effectiveTools } from "../schemas/team";
 import { runLoop } from "./loop";
 import { runChecker } from "./verification";
@@ -128,13 +130,26 @@ export interface RunContext {
     to: string,
     goal: string,
   ) => { ok: true; agentId: string; team?: string; note?: string } | { ok: false; error: string };
+  /** Plan 18: the agent's live plan. `write` mints a version only when the item SET changes; `tick`
+   *  appends a transition. `tick` returns `rejected` when the model tries to set a TERMINAL status on an
+   *  item bound to a child run — those are engine-owned, and the attempt is still recorded (by:"model")
+   *  because a model marking a failed delegation `done` is exactly what you want visible in a trace. */
+  plan?: {
+    write: (p: { goal: string; items: { id: string; text: string; assignee?: string }[] }) => { handle: string; minted: boolean };
+    read: (handle?: string) => PlanState | null;
+    tick: (p: { itemId: string; status: PlanItemStatus; note?: string; by: "model" | "engine"; boundRunId?: string }) =>
+      { ok: true } | { ok: false; rejected: string; boundRunId?: string };
+    /** The live plan's handle, or null. Used by the tail-slot injector and the trace. */
+    handle: () => string | null;
+  };
   /** Criteria→verdict records for this run's delegations; written to trace.verification + transcript. */
   verifications: VerificationRecord[];
   /** The independent delegation checker: child output + criteria → verdict, via the delegating
    *  agent's own resolved model (same plumbing the loop uses). */
   checkCriteria: (p: { goal: string; criteria: string; output: string }) => Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string }>;
-  /** Surface a one-line breadcrumb to the captain (e.g. a failed verification), routed via onStep. */
-  emit?: (info: { note: string }) => void;
+  /** Surface a breadcrumb to the captain (a failed verification, a team routing decision) or a plan
+   *  snapshot (Plan 18), routed via onStep. Phase-less by construction, so the status reducer ignores it. */
+  emit?: (info: { note?: string; plan?: PlanState }) => void;
   /** Plan 04: fire-and-forget a goal onto another agent in the BACKGROUND. Returns a taskId
    *  immediately (the cascade runs off-turn via the same executeRun). Present only when the host
    *  wired a scheduler (the REPL); undefined in headless/unit contexts. */
@@ -362,6 +377,9 @@ export async function executeRun(
   // pushed by the execute() wrapper in tools.ts; approval spans by the wrapped requestApproval below.
   // Both are merged (by ts) into transcript.jsonl at run end and streamed live via emitStep.
   const spanEvents: RunTranscriptEvent[] = [];
+  // Plan 18: how many plan transitions THIS run wrote (including refused attempts, which are real
+  // events). Recorded on the trace so /costs-style rollups and the OTel span can see plan activity.
+  const planEvents = { n: 0 };
   const emitStep = deps.onStep
     ? (info: StepInfo) => deps.onStep!({ ...info, agent: opts.agent.id, runId })
     : undefined;
@@ -413,6 +431,52 @@ export async function executeRun(
       });
     },
     verifications: [],
+    // Plan 18: the plan seam. One plan per agent (id derived from the goal, so re-stating a goal
+    // continues it rather than forking a second one). Always present on ctx — tools.ts decides whether
+    // the AGENT can reach it, and the tail-slot injector reads it regardless.
+    plan: {
+      write: ({ goal, items }) => {
+        const { plan, minted } = writePlan(deps.ws, { id: planIdForGoal(goal), owner: opts.agent.id, goal, items, producer: opts.agent.id, runId });
+        const s = foldPlan(deps.ws, plan.id)!;
+        indexPlan(deps.db, s);
+        return { handle: s.handle, minted };
+      },
+      read: (handle) => {
+        const h = handle ?? currentPlanId(deps.db, opts.agent.id);
+        return h ? foldPlan(deps.ws, h) : null;
+      },
+      handle: () => {
+        const id = currentPlanId(deps.db, opts.agent.id);
+        return id ? (foldPlan(deps.ws, id)?.handle ?? null) : null;
+      },
+      tick: ({ itemId, status, note, by, boundRunId }) => {
+        const id = currentPlanId(deps.db, opts.agent.id);
+        if (!id) return { ok: false, rejected: "no live plan — call write_plan first" };
+        const before = foldPlan(deps.ws, id);
+        const item = before?.items.find((i) => i.id === itemId);
+        if (!item) return { ok: false, rejected: `no item "${itemId}" in plan ${id}` };
+
+        // ENGINE OWNS a bound item's terminal status. The model may still narrate progress
+        // (in_progress), but it may not declare a delegated item done or failed — the child's real
+        // outcome decides that. Record the attempt so it is visible, flagged so it cannot win the fold.
+        if (by === "model" && item.boundRunId && TERMINAL_ITEM_STATUS.has(status)) {
+          appendPlanEvent(deps.ws, id, {
+            item: itemId, status, by: "model", runId, boundRunId: item.boundRunId, rejected: true,
+            note: `refused: ${itemId} is owned by run ${item.boundRunId}`,
+          });
+          planEvents.n += 1;
+          return { ok: false, rejected: "engine-owned", boundRunId: item.boundRunId };
+        }
+        if (by === "model" && status === "dropped" && !note?.trim())
+          return { ok: false, rejected: "dropping an item requires a note saying why" };
+
+        appendPlanEvent(deps.ws, id, { item: itemId, status, by, runId, boundRunId: boundRunId ?? item.boundRunId, note });
+        planEvents.n += 1;
+        const after = foldPlan(deps.ws, id);
+        if (after) indexPlan(deps.db, after);
+        return { ok: true };
+      },
+    },
     checkCriteria: async (p) => {
       const run = () => runChecker({
         model, agent: opts.agent, subscription, priceUsd,
@@ -443,7 +507,9 @@ export async function executeRun(
         span.end();
       }
     },
-    emit: emitStep ? (info) => emitStep({ note: info.note }) : undefined,
+    // Forward the WHOLE info, not just `note` — Plan 18's plan snapshot rides this seam too. Both
+    // fields are phase-less, so statusReducer's guard drops them and the live status map is untouched.
+    emit: emitStep ? (info) => emitStep(info) : undefined,
     // Plan 04: dispatch resolves the child agent (like runChild) then hands it to the host scheduler,
     // which starts a detached run and returns the taskId immediately. Undefined when unwired.
     // parentAncestry threads the dispatching run's ancestry so the cross-agent cycle guard spans
@@ -619,6 +685,7 @@ export async function executeRun(
     visibleAgents: visible,
     teams: rosterTeams,
     teamCharter: ownTeam?.charterBody || undefined,
+    canPlan: agentTools.includes("write_plan"),
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
     policies: applied,
     memoryBlock,
@@ -656,6 +723,11 @@ export async function executeRun(
     // independently. A delegated child is metered against ITS team, not its parent's — the spend is
     // the child's to answer for.
     spendScopes: scopesFor(opts.agent.team),
+    // Plan 18: render the live plan fresh before EVERY model call. Only for agents that hold the tools,
+    // so an agent without a plan pays nothing. The slot never enters `messages` — see plan-inject.ts.
+    pollPlan: agentTools.includes("write_plan")
+      ? () => { const s = ctx.plan?.read(); return s ? renderPlan(s) : null; }
+      : undefined,
     // Plan 12 (reopened): per-request transport deadline for the model fetch. Also bounds consumeStream()
     // in case the underlying stream ignores the abort signal. Config-disposed via defaults.modelRequestTimeoutMs.
     modelRequestTimeoutMs: deps.configDefaults?.modelRequestTimeoutMs,
@@ -677,6 +749,8 @@ export async function executeRun(
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";
   if (result.error) log.error(`run ${runId} failed`, result.error);
 
+  // Plan 18: one fold, reused by the trace and the OTel run span below.
+  const planAtEnd = ctx.plan?.read();
   const trace: RunTrace = {
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,
     ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [], knowledge: knowledgeIds, skills: skillIds },
@@ -697,6 +771,9 @@ export async function executeRun(
       tokens: result.tokens + ctx.childSpend.tokens + ctx.verifierSpend.tokens,
       costUsd: subscription ? null : result.costUsd + ctx.childSpend.costUsd + ctx.verifierSpend.costUsd,
     },
+    // Plan 18: the plan handle + how many transitions this run wrote. A run with no plan records neither.
+    plan: planAtEnd?.handle,
+    planEvents: planEvents.n || undefined,
     notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };
@@ -723,12 +800,23 @@ export async function executeRun(
     });
   }
   // Plan 16: close the run span with the final rollups (tokens, cost, context) + outcome/status.
+  // Plan 18: plan attributes ride along, so an agent can ask its OWN backend "which of my plan items
+  // failed verification more than once this week" — the question a terminal waterfall could never answer.
   finishRunSpan(outcome, {
     "taicho.tokens": result.tokens,
     "gen_ai.usage.input_tokens": result.inputTokens,
     "gen_ai.usage.output_tokens": result.outputTokens,
     "taicho.context.tokens": result.contextTokens,
     ...(subscription ? {} : { "taicho.cost.usd": result.costUsd }),
+    ...(planAtEnd
+      ? {
+          "taicho.plan.handle": planAtEnd.handle,
+          "taicho.plan.items.total": planAtEnd.counts.total,
+          "taicho.plan.items.done": planAtEnd.counts.done,
+          "taicho.plan.items.open": planAtEnd.counts.open,
+          "taicho.plan.items.failed": planAtEnd.counts.failed,
+        }
+      : {}),
   }, result.error, finalText);
   deps.onRunEnd?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, outcome });
   return { runId, text: finalText, trace };

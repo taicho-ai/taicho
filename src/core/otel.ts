@@ -71,7 +71,20 @@ export interface InitTelemetryOpts {
   env?: Record<string, string | undefined>;
 }
 
-const truthy = (v: string | undefined): boolean => v === "1" || v === "true" || v === "yes";
+const falsey = (v: string | undefined): boolean => v === "0" || v === "false" || v === "no" || v === "off";
+
+/** An OPT-OUT switch: on unless the operator explicitly turns it off.
+ *
+ *  The reasoning for content capture specifically. Telemetry is ALREADY off unless you set
+ *  OTEL_EXPORTER_OTLP_ENDPOINT — so by the time this flag matters, you have deliberately pointed taicho
+ *  at a backend you chose. Handing that person span skeletons with no prompts, no completions, and no
+ *  tool I/O makes the trace unreadable and the feature nearly pointless: you cannot answer "what did the
+ *  user say, what did the agent say" from structure alone. The privacy default that mattered was
+ *  "export nothing anywhere", and that one is intact.
+ *
+ *  Anything unrecognized (a typo like `OTEL_TAICHO_CAPTURE_CONTENT=maybe`) leaves it ON. An opt-out
+ *  switch must fail toward the useful behaviour, or a typo silently guts your observability. */
+const optOut = (v: string | undefined): boolean => !falsey(v);
 
 /** Build the telemetry pipeline, or return undefined when disabled.
  *
@@ -135,7 +148,9 @@ export function initTelemetry(opts: InitTelemetryOpts = {}): Telemetry | undefin
   const activeRuns: UpDownCounter = meter.createUpDownCounter("taicho.run.active", { description: "Runs currently in flight" });
   const runDuration: Histogram = meter.createHistogram("taicho.run.duration", { unit: "s", description: "Agent run wall-clock" });
 
-  const captureContent = truthy(env.OTEL_TAICHO_CAPTURE_CONTENT);
+  // Plan 18 follow-up: opt-OUT (was opt-in). Set OTEL_TAICHO_CAPTURE_CONTENT=0|false|no|off to strip
+  // prompt/completion/tool content from spans; anything else (including unset) keeps it.
+  const captureContent = optOut(env.OTEL_TAICHO_CAPTURE_CONTENT);
   log.info("opentelemetry enabled", { service: baseService, perAgentServices: true, endpoint: endpoint ?? "(test exporter)", captureContent });
 
   return {

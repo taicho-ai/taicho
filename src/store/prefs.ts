@@ -18,7 +18,8 @@ export function isViewMode(s: string): s is ViewMode {
   return (VIEW_MODES as readonly string[]).includes(s);
 }
 
-const PrefsSchema = z.object({ viewMode: z.enum(VIEW_MODES).optional() }).passthrough();
+// Plan 18: whether the pinned plan panel renders. `.passthrough()` means a new key needs no migration.
+const PrefsSchema = z.object({ viewMode: z.enum(VIEW_MODES).optional(), planPanel: z.boolean().optional() }).passthrough();
 export type Prefs = z.infer<typeof PrefsSchema>;
 
 function prefsPath(ws: string): string { return join(ws, "agents", ".prefs.json"); }
@@ -48,5 +49,16 @@ export function getViewMode(ws: string): ViewMode {
 export function setViewMode(ws: string, mode: ViewMode): void {
   const prefs = readPrefs(ws);
   prefs.viewMode = mode;
+  write(ws, prefs);
+}
+
+/** Plan 18: is the pinned plan panel shown? Default on — a plan you cannot see is a plan you cannot steer. */
+export function getPlanPanel(ws: string): boolean {
+  return readPrefs(ws).planPanel ?? true;
+}
+
+export function setPlanPanel(ws: string, on: boolean): void {
+  const prefs = readPrefs(ws);
+  prefs.planPanel = on;
   write(ws, prefs);
 }

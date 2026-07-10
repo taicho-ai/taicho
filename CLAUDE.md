@@ -116,6 +116,13 @@ issues tsc won't).
     not address its own team; ancestors are never routing candidates. The pick is never silent — it
     rides `ctx.emit` as a note and lands on `trace.notes`, because `rankAgents` is a keyword match and
     will sometimes choose badly. `run.ts`'s `ctx.resolveDelegation` is the seam.
+  - `plan-inject.ts` — Plan 18. The live plan NEVER enters the system prompt (`assemble()` runs once, so
+    a plan there is stale after iteration one and would contradict the tail slot) and NEVER enters
+    `messages`. `withPlanSlot` builds `[...messages, slot]` for the model CALL only. Consequences that
+    fall out for free: context cost is FLAT, the prefix cache is untouched, the checkpoint/transcript
+    record the real conversation, and **compaction is orthogonal by construction** — `compactMessages`
+    never sees the slot, so no future tuning of `keepHead`/`compactKeepRecent` can eat the plan. The
+    system prompt carries only the STATIC `PLAN_OPERATING_NOTE` (stable tier, cacheable).
   - `prompt.ts`, `tools.ts`, `registry.ts` (the ACL grammar: an entry in `canSee`/`canDelegateTo` is
     `"*"`, an exact agent id, or Plan 19's `team:<id>` — additive, since no agent id contains a colon),
     `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
@@ -129,6 +136,15 @@ issues tsc won't).
   chat turns + background dispatches, `reconcileTasks`/`reindexTasks` on boot),
   `schedules.ts` (Plan 04 Ph6 durable schedules: `schedules/<id>.json` canon — a small captain-owned
   set, so a file scan is the whole query surface, no DB index; a bad cron is rejected at CREATE time),
+  `plans.ts` (Plan 18 **agent-owned plans**: `plans/<id>/v<N>.json` (immutable item SET — the intent)
+  + `plans/<id>/events.jsonl` (append-only transitions). **Structure vs state**: a VERSION is minted only
+  when the shape changes (a replan — `writePlan` deep-equality-dedups, so a model re-stating its plan
+  every iteration mints nothing); a TICK is an appended event. Current state is `fold(events)` over the
+  latest version — the ledger-is-truth / cache-is-derived discipline. `PlanEvent.rejected` marks a
+  refused model attempt: the fold SKIPS it, or the attempt would be the last line for that item and
+  would WIN, which is exactly the lie the engine-owns rule prevents. `reconcilePlans` appends
+  `interrupted` for in-flight items at boot and never touches the intent — PENDING items survive a
+  reboot, unlike a task),
   `teams.ts` (Plan 19 **teams**: `teams/<id>/team.md` canon — charter, optional `lead`, tool policy.
   A file scan like `schedules.ts`, no teams table. MEMBERSHIP IS NOT HERE — the agent declares
   `team: <id>` in its own frontmatter, one source of truth, and a team's roster is derived by grouping
@@ -196,8 +212,7 @@ Design/rationale: `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`.
   themselves (endpoint/headers/protocol) — nothing bespoke.
 - **`loop.ts`** — every `streamText` gets `experimental_telemetry: { isEnabled, tracer, … }`, so the AI
   SDK emits the gen_ai spans (`ai.streamText` → `ai.streamText.doStream`). `recordInputs`/`recordOutputs`
-  are gated by `OTEL_TAICHO_CAPTURE_CONTENT` — **off by default**, so prompt/completion text never leaves
-  the process unless opted in. Per call, `onModelCall` feeds the token/duration/cost metrics.
+  are gated by `OTEL_TAICHO_CAPTURE_CONTENT` — **on by default; opt OUT with `0|false|no|off`**. Per call, `onModelCall` feeds the token/duration/cost metrics.
 - **`run.ts`** — `executeRun` opens a `run <agent>` span BEFORE the try (so a pre-loop throw still closes
   it) and makes it ACTIVE around `runLoop` via `context.with`, so the gen_ai spans AND delegated child
   runs nest under it — a delegation is ONE distributed trace. `finishRunSpan` is idempotent (finalize +
@@ -281,6 +296,14 @@ resolution).
   NOT in the baseline; the model requests it explicitly. `reconcileWorkerTools` (boot, in `index.tsx`)
   backfills the baseline onto any EXISTING worker persisted with `tools: []`, leaving deliberate
   non-empty grants (and root/librarian) untouched.
+- **The checkbox cannot lie (Plan 18):** `delegate_task`/`dispatch_task` take an optional `itemId`. The
+  engine binds the item `in_progress` BEFORE the child runs, then settles it from the child's REAL
+  outcome — and, when `criteria` is set, only when the INDEPENDENT Plan 06 checker agrees. Once an item
+  carries a `boundRunId`, only the engine may set its terminal status; a model that tries is refused, and
+  the attempt is appended with `rejected: true` because a model marking a failed delegation done is a
+  fact worth having. Plan tools are NOT in `DEFAULT_WORKER_TOOLS` (a plan is not needed to produce an
+  artifact); root holds them, a lead asks. `StepInfo.plan` is deliberately **phase-less** — a `"plan"`
+  StepPhase would fall through `statusReducer`'s switch and corrupt the live status map.
 - **Teams are a legibility boundary, not a security one (Plan 19):** root keeps `canDelegateTo: ["*"]`,
   so it CAN name a member directly — it won't, because its roster shows teams, not their members. That
   is what makes the old `INLINE_ROSTER_MAX = 30` cliff unreachable: a sixty-agent squad renders as five
@@ -295,6 +318,16 @@ resolution).
   DB**, not a fresh `openDb()` — `migrate.test.ts`'s `rewindToV6` rebuilds the old shape on purpose.
   Note `migrate()` also runs standalone over a bare `Database` in `spend-ledger.test.ts`, so a migration
   must not assume a baseline table exists.
+- **Switch defaults — a boolean switch is OPT-OUT unless enabling it can hurt someone.** A feature you
+  had to deliberately turn on (OTel needs `OTEL_EXPORTER_OTLP_ENDPOINT`) must not then hand you a gutted
+  version of itself behind a second flag. `OTEL_TAICHO_CAPTURE_CONTENT` was opt-in and shipped traces with
+  no prompts, no completions, no tool I/O — structure that answers no question anyone actually asks. It is
+  now opt-out (`0|false|no|off`), and **unrecognized values leave it ON**: an opt-out switch has to fail
+  toward the useful behaviour, or a typo silently guts the feature and nothing says so.
+  The rest of the env surface is *not* miscategorized, having audited it: `TAICHO_E2E_MODEL` (a test
+  double — must stay opt-in), `TAICHO_VERBOSE`/`TAICHO_LOG_LEVEL`/`TAICHO_DEBUG` (verbosity, where quiet
+  is the right default), and `TAICHO_PROVIDER`/`TAICHO_MODEL`/`TAICHO_MODELS_DIR`/`TAICHO_EMBED_MODEL`
+  (selectors, not booleans). `mcp.enabled` already defaults on. Apply the rule to any new switch.
 - **Logging (Plan 03):** never `console.error/warn` from engine/store code — a stray write corrupts
   the Ink TUI. Use the leveled `log` from `src/core/logger.ts`; it writes to `taicho.log` in the
   workspace and redacts auth material centrally (so no call site can leak a token). Raise to debug

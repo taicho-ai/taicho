@@ -47,13 +47,14 @@ test("v5 creates the tasks index table", () => {
   expect(() => db.query("SELECT id, agent, goal, status, kind, root_run_id, result_ref, summary, created, updated FROM tasks").all()).not.toThrow();
 });
 
-test("a fresh DB lands at the current schema: squad_spend (v7) and registry.team (v8)", () => {
+test("a fresh DB lands at the current schema: squad_spend (v7), registry.team (v8), plans (v10)", () => {
   const db = openDb(ws());
-  expect(SCHEMA_VERSION).toBe(9);
-  expect(getMeta(db, "schema_version")).toBe("9");
+  expect(SCHEMA_VERSION).toBe(10);
+  expect(getMeta(db, "schema_version")).toBe("10");
   expect(() => db.query("SELECT scope, period_kind, period_key, tokens, cost_usd, updated FROM squad_spend").all()).not.toThrow();
   expect(() => db.query("SELECT * FROM deck_spend").all()).toThrow(); // v6's name is gone
   expect(() => db.query("SELECT id, role, is_root, team FROM registry").all()).not.toThrow();
+  expect(() => db.query("SELECT id, version, owner, goal, total, done, open, failed FROM plans").all()).not.toThrow();
 });
 
 /** Rewind a current DB to look exactly like one written by a pre-Plan-19 taicho: the counter table under
@@ -86,14 +87,14 @@ function rewindToV6(db: ReturnType<typeof openDb>) {
   db.query("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run();
 }
 
-test("v7-v9 migrate a legacy v6 DB: kb scope, the spend table, and the registry.team column", () => {
+test("v7-v10 migrate a legacy v6 DB: kb scope, the spend table, registry.team, and plans", () => {
   const db = openDb(ws());
   rewindToV6(db);
   expect(() => db.query("SELECT team FROM registry").all()).toThrow(); // precondition: genuinely absent
 
   migrate(db);
 
-  expect(getMeta(db, "schema_version")).toBe("9");
+  expect(getMeta(db, "schema_version")).toBe("10");
   // v7 — the scope value moved, and the row survived.
   expect((db.query("SELECT scope FROM kb_nodes WHERE id = 'kb_legacy'").get() as { scope: string }).scope).toBe("squad");
   // v7 renamed the table, v9 rebuilt it to widen the primary key — through BOTH, the counter carried
@@ -107,8 +108,11 @@ test("v7-v9 migrate a legacy v6 DB: kb scope, the spend table, and the registry.
   expect(() => db.query("SELECT team FROM registry").all()).not.toThrow();
   expect((db.query("SELECT team FROM registry WHERE id = 'root'").get() as { team: string | null }).team).toBeNull();
 
+  // v10 — the plan index exists on an upgraded DB too.
+  expect(() => db.query("SELECT id, owner FROM plans").all()).not.toThrow();
+
   migrate(db); // idempotent — a second boot must re-run neither the rename, the ALTER, nor the rebuild
-  expect(getMeta(db, "schema_version")).toBe("9");
+  expect(getMeta(db, "schema_version")).toBe("10");
 });
 
 test("migrate() is safe standalone on a bare DB with no baseline tables (registry absent)", () => {

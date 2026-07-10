@@ -128,13 +128,12 @@ test("a delegated child run nests under its parent — one trace across the dele
   await telemetry.shutdown();
 });
 
-test("prompt content is NOT exported unless OTEL_TAICHO_CAPTURE_CONTENT opts in", async () => {
+test("content capture is OPT-OUT: an explicit 0/false/no/off strips prompts from the spans", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
   const spans = new InMemorySpanExporter();
   const metricReader = new PeriodicExportingMetricReader({ exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE), exportIntervalMillis: 60_000 });
-  // No OTEL_TAICHO_CAPTURE_CONTENT ⇒ captureContent is false ⇒ recordInputs/recordOutputs off.
-  const telemetry = initTelemetry({ spanExporter: spans, metricReader, env: { OTEL_EXPORTER_OTLP_ENDPOINT: "x" } })!;
+  const telemetry = initTelemetry({ spanExporter: spans, metricReader, env: { OTEL_EXPORTER_OTLP_ENDPOINT: "x", OTEL_TAICHO_CAPTURE_CONTENT: "0" } })!;
   expect(telemetry.captureContent).toBe(false);
 
   const SECRET = "SECRET_MARKER_DO_NOT_EXPORT";
@@ -148,12 +147,28 @@ test("prompt content is NOT exported unless OTEL_TAICHO_CAPTURE_CONTENT opts in"
   await telemetry.shutdown();
 });
 
-test("the run span carries input + output when content capture IS opted in", async () => {
+test("every documented falsey spelling turns content capture off; everything else leaves it ON", () => {
+  const base = { OTEL_EXPORTER_OTLP_ENDPOINT: "x" };
+  const cap = (v?: string) => initTelemetry({ spanExporter: new InMemorySpanExporter(), env: v === undefined ? base : { ...base, OTEL_TAICHO_CAPTURE_CONTENT: v } })!.captureContent;
+
+  for (const off of ["0", "false", "no", "off"]) expect(cap(off)).toBe(false);
+  // unset ⇒ ON. This is the flip: telemetry is already off unless you configured an endpoint, so by the
+  // time this flag is read you deliberately pointed taicho at a backend. Skeletons help nobody.
+  expect(cap(undefined)).toBe(true);
+  for (const on of ["1", "true", "yes"]) expect(cap(on)).toBe(true);
+  // An opt-out switch must FAIL TOWARD THE USEFUL BEHAVIOUR: a typo cannot silently gut observability.
+  expect(cap("maybe")).toBe(true);
+  expect(cap("")).toBe(true);
+  expect(cap("FALSE")).toBe(true); // case-sensitive by design — only the documented spellings disable it
+});
+
+test("the run span carries input + output BY DEFAULT (no env flag needed)", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
   const spans = new InMemorySpanExporter();
   const metricReader = new PeriodicExportingMetricReader({ exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE), exportIntervalMillis: 60_000 });
-  const telemetry = initTelemetry({ spanExporter: spans, metricReader, env: { OTEL_EXPORTER_OTLP_ENDPOINT: "x", OTEL_TAICHO_CAPTURE_CONTENT: "1" } })!;
+  // NO OTEL_TAICHO_CAPTURE_CONTENT — the point is that you get the conversation without asking.
+  const telemetry = initTelemetry({ spanExporter: spans, metricReader, env: { OTEL_EXPORTER_OTLP_ENDPOINT: "x" } })!;
   expect(telemetry.captureContent).toBe(true);
 
   const model = new MockLanguageModelV3({ doGenerate: mockValues(text("here is the answer")) as any });
@@ -180,4 +195,55 @@ test("the run span carries input + output when content capture IS opted in", asy
   // ...and NOT a JSON blob under a single key.
   expect(chat.attributes["gen_ai.prompt"]).toBeUndefined();
   await telemetry.shutdown();
+});
+
+// --- Plan 18/19: the attributes that let an agent self-diagnose from a queryable backend -----------
+
+test("a run span carries the plan attributes, so 'which items failed' is a backend query", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "worker", role: "does the thing", identity: "You work." }, "root");
+  await reindex(ws, db);
+  const { spans, telemetry } = testTelemetry();
+
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("write_plan", { goal: "ship it", items: [{ id: "it_a", text: "mine" }, { id: "it_b", text: "theirs" }] }),
+      call("update_plan_item", { itemId: "it_a", status: "done" }),
+      call("delegate_task", { to: "worker", goal: "do it", criteria: "must mention Y", itemId: "it_b" }),
+      text("worker output, no Y"),                            // worker
+      text('{"pass": false, "reasons": ["missing Y"]}'),      // checker
+      text("worker retry, still no Y"),                       // worker retry
+      text('{"pass": false, "reasons": ["still missing Y"]}'),// checker 2
+      text("done"),                                            // root final
+    ) as any,
+  });
+  const res = await executeRun(makeDeps({ ws, db, model, telemetry }), {
+    agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "go" }], triggeredBy: "user",
+  });
+
+  const runSpan = spans.getFinishedSpans().find((s) => s.name === "root · user turn")!;
+  expect(runSpan).toBeDefined();
+  expect(runSpan.attributes["taicho.plan.handle"]).toBe("p_ship-it@v1");
+  expect(runSpan.attributes["taicho.plan.items.total"]).toBe(2);
+  expect(runSpan.attributes["taicho.plan.items.done"]).toBe(1);   // the model's own item
+  expect(runSpan.attributes["taicho.plan.items.failed"]).toBe(1); // the delegated one, failed by the checker
+  expect(runSpan.attributes["taicho.plan.items.open"]).toBe(0);
+
+  // and the same truth is on the trace, for /costs-style rollups and crash forensics
+  expect(res.trace.plan).toBe("p_ship-it@v1");
+  expect(res.trace.planEvents).toBeGreaterThan(0);
+});
+
+test("a run with no plan records no plan attributes at all (zero overhead)", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const { spans, telemetry } = testTelemetry();
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(text("done")) as any });
+  const res = await executeRun(makeDeps({ ws, db, model, telemetry }), {
+    agent: await loadAgent(ws, "writer"), messages: [{ role: "user", content: "go" }], triggeredBy: "user",
+  });
+  const runSpan = spans.getFinishedSpans().find((s) => s.name === "writer · user turn")!;
+  expect(runSpan.attributes["taicho.plan.handle"]).toBeUndefined();
+  expect(res.trace.plan).toBeUndefined();
+  expect(res.trace.planEvents).toBeUndefined();
 });

@@ -24,6 +24,7 @@ import { makeSpendLedger, hasAnyCeilings } from "./store/spend-ledger";
 import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
 import { reindexTasks, reconcileTasks } from "./store/task-state";
+import { reindexPlans, reconcilePlans } from "./store/plans";
 import { createE2eModel } from "./core/e2e-model";
 import { parseCli, runHeadless, runTail, scheduleFireOptions } from "./core/headless";
 import { runScheduleCli } from "./core/schedule-cli";
@@ -74,6 +75,12 @@ const kbDrift = diffSources(ws, db);
 // auto-resume is deferred). The captain can inspect/cancel via /tasks.
 reindexTasks(ws, db);
 const interruptedTasks = reconcileTasks(ws, db);
+// Plan 18: rebuild the plan index from files, then reconcile — an item left `in_progress` means the
+// process died while its bound run was in flight. Appends `interrupted` (never rewrites the intent),
+// exactly as reconcileTasks does for a task. PENDING items survive a reboot untouched: a plan models
+// intent, not work in flight.
+reindexPlans(ws, db);
+const interruptedItems = reconcilePlans(ws, db);
 // Plan 19: a team whose `lead` is missing, or sits on a DIFFERENT team, would route work out of the
 // team it is supposed to run. Report it — one bad team.md must not block boot, and the fix is an edit.
 const teamProblems = validateTeams(ws, db);
@@ -87,6 +94,8 @@ if (teamProblems.length)
   notices.push(`teams: ${teamProblems.map((p) => `${p.team} (${p.problem})`).join("; ")} — /teams to review`);
 if (kbDrift.changed.length || kbDrift.deleted.length)
   notices.push(`kb: ${kbDrift.changed.length} changed / ${kbDrift.deleted.length} removed source(s) — run /kb sync`);
+if (interruptedItems.length)
+  notices.push(`plans: ${interruptedItems.length} item(s) interrupted last session (${interruptedItems.slice(0, 3).map((i) => `${i.planId}/${i.item}`).join(", ")}${interruptedItems.length > 3 ? "…" : ""}) — /plan to review`);
 if (interruptedTasks.length)
   notices.push(`tasks: ${interruptedTasks.length} interrupted last session (${interruptedTasks.slice(0, 3).map((t) => t.taskId).join(", ")}${interruptedTasks.length > 3 ? "…" : ""}) — /tasks to review`);
 if (backfilledWorkers.length)

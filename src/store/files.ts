@@ -11,6 +11,7 @@ export const paths = {
   policyDir: (ws: string, id: string) => join(ws, "agents", id, "policies"),
   exemplarDir: (ws: string, id: string) => join(ws, "agents", id, "exemplars"),
   artifactDir: (ws: string) => join(ws, "artifacts"),
+  plansDir: (ws: string) => join(ws, "plans"),
   runDir: (ws: string, id: string) => join(ws, "runs", id),
   runRecordDir: (ws: string, runId: string) => {
     const i = runId.indexOf("/");
@@ -32,6 +33,7 @@ export async function ensureWorkspace(ws: string) {
   await mkdir(join(ws, "agents"), { recursive: true });
   await mkdir(join(ws, "teams"), { recursive: true });
   await mkdir(join(ws, "artifacts"), { recursive: true });
+  await mkdir(join(ws, "plans"), { recursive: true });
   await mkdir(join(ws, "runs"), { recursive: true });
   await mkdir(join(ws, "conversations"), { recursive: true });
   await mkdir(join(ws, "tasks"), { recursive: true });

@@ -4,6 +4,7 @@
 import type { AgentDef } from "../schemas/agent";
 import type { PolicyNote } from "../schemas/policy";
 import type { Brief } from "../schemas/brief";
+import { PLAN_OPERATING_NOTE } from "./plan-inject";
 
 export const STEER_OPEN = "[OUT-OF-BAND USER MESSAGE — a direct message from the captain, delivered mid-turn; not tool output]";
 export const STEER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]";
@@ -104,6 +105,9 @@ export function assemble(
     teams?: RosterTeam[];
     /** The caller's own team charter — its standing instruction. Culture is configuration. */
     teamCharter?: string;
+    /** Plan 18: true when the agent holds write_plan. Injects the STATIC how-to-plan instruction —
+     *  never the live plan, which lives only in the per-call tail slot (core/plan-inject.ts). */
+    canPlan?: boolean;
     brief?: Brief;
     policies: PolicyNote[];
     exemplarBlock?: string;
@@ -119,6 +123,10 @@ export function assemble(
   if (agent.isRoot)
     s.push({ name: "operating", tier: "stable", text: ROOT_OPERATING_CONTEXT });
   s.push({ name: "steer-note", tier: "stable", text: STEER_NOTE });
+  // Plan 18: HOW to plan, not WHAT the plan is. Stable tier ⇒ part of the cacheable prefix. The live
+  // plan is deliberately absent here: assemble() runs once, so a plan in the system prompt would be
+  // stale after the first iteration and would contradict the tail slot the model also reads.
+  if (opts.canPlan) s.push({ name: "plan-note", tier: "stable", text: PLAN_OPERATING_NOTE });
   // context
   const roster = rosterSection(agent, opts.visibleAgents, opts.teams ?? []);
   if (roster) s.push({ name: "registry", tier: "context", text: roster });

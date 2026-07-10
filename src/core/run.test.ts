@@ -24,6 +24,7 @@ import { Skill } from "../schemas/skill";
 import { saveArtifact, readArtifact } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
 import { createTeam, loadTeam } from "../store/teams";
+import { foldPlan, latestVersion, readPlanEvents, writePlan, appendPlanEvent } from "../store/plans";
 import { toolsForAgent } from "./tools";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
@@ -1343,4 +1344,160 @@ test("Plan 19 Ph5: a team's tool policy reaches the member's real toolset (deny 
   expect(Object.keys(built)).not.toContain("run_command"); // agent asked for it; the team said no
   expect(Object.keys(built)).toContain("recall");          // agent never asked; the team granted it
   expect(Object.keys(built)).toContain("save_artifact");   // the Plan 14 floor survives untouched
+});
+
+// --- Plan 18: plans, and the checkbox that cannot lie ----------------------------------------------
+
+async function bootPlanner() {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "worker", role: "does the thing", identity: "You work." }, "root");
+  await reindex(ws, db);
+  return { ws, db };
+}
+const PLAN = { goal: "ship the notifier", items: [{ id: "it_survey", text: "survey" }, { id: "it_ship", text: "ship" }] };
+
+test("Plan 18: write_plan mints v1; an identical rewrite mints nothing", async () => {
+  const { ws, db } = await bootPlanner();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("write_plan", PLAN), call("write_plan", PLAN), text("done")) as any,
+  });
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("completed");
+  expect(latestVersion(ws, "p_ship-the-notifier")).toBe(1);
+  expect(res.trace.notes.filter((n) => n.includes("unchanged"))).toHaveLength(1);
+});
+
+test("Plan 18: the model ticks its OWN item, and the fold reflects it", async () => {
+  const { ws, db } = await bootPlanner();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("write_plan", PLAN),
+      call("update_plan_item", { itemId: "it_survey", status: "done" }),
+      text("done"),
+    ) as any,
+  });
+  await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  const s = foldPlan(ws, "p_ship-the-notifier")!;
+  expect(s.items.find((i) => i.id === "it_survey")!.status).toBe("done");
+  expect(s.counts).toEqual({ total: 2, done: 1, open: 1, failed: 0 });
+});
+
+test("Plan 18: delegate_task(itemId) — the ENGINE ticks the item from the child's real outcome", async () => {
+  const { ws, db } = await bootPlanner();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("write_plan", PLAN),
+      call("delegate_task", { to: "worker", goal: "ship it", itemId: "it_ship" }),
+      text("done"),
+      text("shipped"), // the child's reply
+    ) as any,
+  });
+  await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+
+  const s = foldPlan(ws, "p_ship-the-notifier")!;
+  const ship = s.items.find((i) => i.id === "it_ship")!;
+  expect(ship.status).toBe("done");
+  expect(ship.boundRunId!.startsWith("worker/")).toBe(true); // bound to the run that actually did it
+  // the whole transition history is legible: in_progress (bind) then done (settle)
+  const evs = readPlanEvents(ws, "p_ship-the-notifier").filter((e) => e.item === "it_ship");
+  expect(evs.map((e) => e.status)).toEqual(["in_progress", "done"]);
+  expect(evs.every((e) => e.by === "engine")).toBe(true);
+});
+
+test("Plan 18: a model may NOT mark a delegated item done — the attempt is refused AND recorded", async () => {
+  const { ws, db } = await bootPlanner();
+  // The mock's script is shared by parent AND child, so the child's reply must sit immediately after
+  // the delegate_task call that spawns it.
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("write_plan", PLAN),                                        // root
+      call("delegate_task", { to: "worker", goal: "ship it", itemId: "it_ship" }), // root
+      text("worker shipped it"),                                       // worker
+      call("update_plan_item", { itemId: "it_ship", status: "done" }), // root claims the item itself
+      text("done"),                                                    // root final
+    ) as any,
+  });
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("completed");
+
+  const evs = readPlanEvents(ws, "p_ship-the-notifier").filter((e) => e.item === "it_ship");
+  const attempt = evs.find((e) => e.by === "model");
+  expect(attempt).toBeDefined();
+  expect(attempt!.rejected).toBe(true);                     // recorded — a model claiming a delegated
+  expect(attempt!.note).toContain("refused");               // item is a fact worth having
+  expect(res.trace.notes.some((n) => n.includes("engine-owned"))).toBe(true);
+  // ...and it did not change the state, which the engine had already set from the child's real outcome
+  expect(foldPlan(ws, "p_ship-the-notifier")!.items.find((i) => i.id === "it_ship")!.status).toBe("done");
+});
+
+test("Plan 18: a rejected attempt cannot win the fold even when it is the LAST event", async () => {
+  const w = mkdtempSync(join(tmpdir(), "taicho-fold-"));
+  const { plan } = writePlan(w, { owner: "root", goal: "g", items: [{ id: "it_0", text: "x" }], producer: "root", runId: "r" });
+  appendPlanEvent(w, plan.id, { item: "it_0", status: "failed", by: "engine", runId: "r", boundRunId: "w/r1", note: "verdict failed" });
+  appendPlanEvent(w, plan.id, { item: "it_0", status: "done", by: "model", runId: "r", rejected: true });
+  // The model's `done` is chronologically last. If the fold honoured it, the engine-owns rule would be
+  // decoration. It must lose.
+  expect(foldPlan(w, plan.id)!.items[0]!.status).toBe("failed");
+});
+
+test("Plan 18 x Plan 06: with criteria, the box goes green only when an INDEPENDENT check agrees", async () => {
+  const { ws, db } = await bootPlanner();
+  // The checker fails twice, so after the one bounded retry the item must be FAILED, carrying the reasons.
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("write_plan", PLAN),                                                                  // root
+      call("delegate_task", { to: "worker", goal: "ship", criteria: "must mention Y", itemId: "it_ship" }),
+      text("attempt one, no Y"),                          // worker
+      text('{"pass": false, "reasons": ["missing Y"]}'),  // checker
+      text("attempt two, still no Y"),                    // worker (retry)
+      text('{"pass": false, "reasons": ["still missing Y"]}'), // checker (2nd)
+      text("done"),                                        // root final
+    ) as any,
+  });
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.verification).toHaveLength(2);
+  expect(res.trace.verification.every((v) => !v.verdict.pass)).toBe(true);
+
+  const ship = foldPlan(ws, "p_ship-the-notifier")!.items.find((i) => i.id === "it_ship")!;
+  expect(ship.status).toBe("failed");            // the child RAN and returned; the CHECK is what failed
+  expect(ship.note).toContain("still missing Y"); // the verdict's reasons land on the item
+  expect(foldPlan(ws, "p_ship-the-notifier")!.counts.failed).toBe(1);
+});
+
+test("Plan 18 x Plan 06: a PASSING check is what turns the box green", async () => {
+  const { ws, db } = await bootPlanner();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("write_plan", PLAN),
+      call("delegate_task", { to: "worker", goal: "ship", criteria: "must mention Y", itemId: "it_ship" }),
+      text("attempt one, mentions Y"),
+      text('{"pass": true, "reasons": []}'),
+      text("done"),
+    ) as any,
+  });
+  await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(foldPlan(ws, "p_ship-the-notifier")!.items.find((i) => i.id === "it_ship")!.status).toBe("done");
+});
+
+test("Plan 18: `dropped` requires a note", async () => {
+  const { ws, db } = await bootPlanner();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("write_plan", PLAN),
+      call("update_plan_item", { itemId: "it_survey", status: "dropped" }),
+      text("done"),
+    ) as any,
+  });
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.notes.some((n) => n.includes("requires a note"))).toBe(true);
+  expect(foldPlan(ws, "p_ship-the-notifier")!.items[0]!.status).toBe("pending");
+});
+
+test("Plan 18: an agent WITHOUT write_plan gets no plan tools and no prompt note (zero overhead)", async () => {
+  const { ws, db } = await bootPlanner();
+  const worker = await loadAgent(ws, "worker");
+  expect(worker.tools).not.toContain("write_plan"); // not in DEFAULT_WORKER_TOOLS
+  const built = toolsForAgent(worker, {} as never, undefined);
+  expect(Object.keys(built)).not.toContain("write_plan");
+  expect(Object.keys(built)).not.toContain("update_plan_item");
 });

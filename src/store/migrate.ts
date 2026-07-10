@@ -191,6 +191,30 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  // v10: Plan 18 — the plan index. Files are canon (plans/<id>/v<N>.json + events.jsonl); this table
+  // stores only the FOLDED counters, so the panel and /plan never walk the event log to answer "how many
+  // are open". reindexPlans() rebuilds it from the files, which is what makes the DB throwaway.
+  {
+    version: 10,
+    up: (db) =>
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plans (
+          id          TEXT PRIMARY KEY,
+          version     INTEGER NOT NULL,
+          owner       TEXT NOT NULL,
+          goal        TEXT,
+          total       INTEGER NOT NULL DEFAULT 0,
+          done        INTEGER NOT NULL DEFAULT 0,
+          open        INTEGER NOT NULL DEFAULT 0,
+          failed      INTEGER NOT NULL DEFAULT 0,
+          root_run_id TEXT,
+          created     TEXT,
+          updated     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS plans_owner ON plans(owner);
+        CREATE INDEX IF NOT EXISTS plans_open  ON plans(open);
+      `),
+  },
 ];
 
 function tableExists(db: Database, table: string): boolean {

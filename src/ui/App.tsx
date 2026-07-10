@@ -16,6 +16,9 @@ import { gatherConversationArtifacts } from "../core/conversation-artifacts";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTeams } from "../store/teams";
+import { PlanPanel } from "./PlanPanel";
+import type { PlanState } from "../schemas/plan";
+import { currentPlanId, foldPlan } from "../store/plans";
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy, approvePolicy } from "../store/policy";
 import { updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
@@ -46,7 +49,7 @@ import { artifactHandle } from "../schemas/artifact";
 import { syncKnowledgeSources } from "../knowledge/sync";
 import { listNodeRows, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { listSkills, readSkill, deleteSkill, reindexSkills } from "../store/skills";
-import { getViewMode, setViewMode as persistViewMode, isViewMode, VIEW_MODES, type ViewMode } from "../store/prefs";
+import { getViewMode, setViewMode as persistViewMode, isViewMode, VIEW_MODES, getPlanPanel, setPlanPanel as persistPlanPanel, type ViewMode } from "../store/prefs";
 
 /** One pending approval request in the queue: a stable id (the card's React key — stays fixed while
  *  this request is the head, so queuing a sibling behind it never remounts the visible card), the
@@ -157,6 +160,15 @@ export function App(props: {
   const mdWidth = termSize.columns - 2; // small margin so wrapping never hugs the edge
   // Plan 10: the live view mode (bar/panes/both), seeded from the persisted pref. /view switches it.
   const [viewMode, setViewMode] = useState<ViewMode>(() => props.viewMode ?? getViewMode(props.ws));
+  // Plan 18: the live plan, fed by the phase-less `plan` step event. Null ⇒ the panel collapses to
+  // nothing. Seeded from the store so a plan SURVIVES A RESTART visibly — it is on disk, and a plan
+  // you cannot see is a plan you cannot steer. (reconcilePlans has already marked in-flight items
+  // interrupted by the time this runs.)
+  const [plan, setPlan] = useState<PlanState | null>(() => {
+    const id = currentPlanId(props.db, "root");
+    return id ? foldPlan(props.ws, id) : null;
+  });
+  const [planPanelOn, setPlanPanelOn] = useState<boolean>(() => getPlanPanel(props.ws));
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
   const [input, setInput] = useState("");
   // @inkjs/ui TextInput is uncontrolled (defaultValue only, no `value`). To set its text
@@ -539,6 +551,10 @@ export function App(props: {
     requestApproval,
     onStep: (ev) => {
       const { phase, tool, agent, delta, note, argsPreview } = ev;
+      // Plan 18: a plan snapshot. Phase-less by construction, so statusReducer never sees it and the live
+      // status map cannot be corrupted by a "plan" AgentState that does not exist. Handled exactly the
+      // way `note` is: an early return, before any phase branch.
+      if (ev.plan) { setPlan(ev.plan); return; }
       // Plan 10: fold every phase-tagged event into the live status map (drives the StatusBar) and
       // the per-run pane feed (drives SquadPanes). Both read the one event stream; nothing invented.
       if (phase && ev.runId) {
@@ -736,6 +752,16 @@ export function App(props: {
       setViewMode(mode);
       persistViewMode(props.ws, mode);
       say({ kind: "system", text: `  live view → ${mode}` });
+      return;
+    }
+    if (cmd === "plan") {
+      const a = arg.trim().toLowerCase();
+      if (a && a !== "on" && a !== "off") { say({ kind: "system", text: '  usage: /plan [on|off]' }); return; }
+      const next = a ? a === "on" : !planPanelOn;
+      setPlanPanelOn(next);
+      persistPlanPanel(props.ws, next);
+      const summary = plan ? ` (${plan.handle}: ${plan.counts.done}/${plan.counts.total} done)` : " (no live plan)";
+      say({ kind: "system", text: `  plan panel → ${next ? "on" : "off"}${next ? summary : ""}` });
       return;
     }
     if (cmd === "status") { say({ kind: "system", text: `  ${formatAuthStatus(authSource)}` }); return; }
@@ -1146,6 +1172,7 @@ export function App(props: {
       )}
       {!pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
+      {planPanelOn && plan && !operationRunId && <PlanPanel plan={plan} width={termSize.columns} />}
       {layout.showBar && statuses.length > 0 && <StatusBar statuses={statuses} width={termSize.columns} />}
       {!pending && !operationRunId && (
         <>
