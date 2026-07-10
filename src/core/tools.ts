@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import type { AgentDef } from "../schemas/agent";
 import { effectiveTools, type TeamTools } from "../schemas/team";
+import type { PlanItemStatus } from "../schemas/plan";
 import type { RunContext, RunResult } from "./run";
 import type { McpManager } from "./mcp/manager";
 import type { VerificationVerdict } from "../schemas/trace";
@@ -220,6 +221,82 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
+  // ---- Plan 18: the agent's live plan -------------------------------------------------------------
+  // NOT in DEFAULT_WORKER_TOOLS. A plan is not needed to produce an artifact, so it stays an opt-in
+  // grant under Plan 08 least privilege. Root holds all three; a worker or team lead asks for them.
+
+  if (has("write_plan"))
+    set.write_plan = tool({
+      description:
+        "Write (or REVISE) your plan: the checklist you work from and the captain watches. Call this ONCE " +
+        "up front for any multi-step goal, then again only when you genuinely change your mind about the " +
+        "SHAPE of the work — an identical list mints nothing. Item ids are stable across revisions, so a " +
+        "ticked item stays ticked. Items you hand to another agent via delegate_task(itemId:…) are ticked " +
+        "by the ENGINE from the child's real outcome; do not tick those yourself.",
+      inputSchema: z.object({
+        goal: z.string().describe("one line: what finishing this plan means"),
+        items: z.array(z.object({
+          id: z.string().describe("stable, lowercase, e.g. it_survey — reuse the id to keep an item's state across a revision"),
+          text: z.string(),
+          assignee: z.string().optional().describe("the agent or team you intend to hand this to"),
+        })).min(1),
+      }),
+      execute: async ({ goal, items }) => {
+        if (!ctx.plan) return { error: "plans are not available in this context" };
+        try {
+          const { handle, minted } = ctx.plan.write({ goal, items });
+          ctx.notes.push(minted ? `wrote plan ${handle}` : `plan ${handle} unchanged`);
+          ctx.emit?.({ plan: ctx.plan.read() ?? undefined });
+          return { handle, minted, note: minted ? undefined : "identical to the current version — no new version minted" };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    });
+
+  if (has("update_plan_item"))
+    set.update_plan_item = tool({
+      description:
+        "Tick an item on your plan. Use it for work YOU did. An item bound to a delegated run is owned by " +
+        "the engine: it goes done/failed from the child's real outcome (and, if you set criteria, only when " +
+        "an independent check agrees), and an attempt to mark it yourself is refused and recorded. " +
+        "`dropped` means you decided not to do it and requires a note saying why.",
+      inputSchema: z.object({
+        itemId: z.string(),
+        status: z.enum(["pending", "in_progress", "done", "failed", "blocked", "dropped"]),
+        note: z.string().optional(),
+      }),
+      execute: async ({ itemId, status, note }) => {
+        if (!ctx.plan) return { error: "plans are not available in this context" };
+        const r = ctx.plan.tick({ itemId, status, note, by: "model" });
+        if (!r.ok) {
+          ctx.notes.push(`plan tick refused (${itemId}): ${r.rejected}`);
+          return { rejected: r.rejected, boundRunId: r.boundRunId };
+        }
+        ctx.emit?.({ plan: ctx.plan.read() ?? undefined });
+        return { ok: true, plan: ctx.plan.read()?.counts };
+      },
+    });
+
+  if (has("read_plan"))
+    set.read_plan = tool({
+      description:
+        "Read a plan's current state — yours by default, or another agent's by handle ('p_x' for the latest " +
+        "version, 'p_x@v2' for a specific one). Returns the goal, the items with their statuses, and the counts.",
+      inputSchema: z.object({
+        handle: z.string().optional().describe("omit for your own live plan"),
+      }),
+      execute: async ({ handle }) => {
+        if (!ctx.plan) return { error: "plans are not available in this context" };
+        const s = ctx.plan.read(handle);
+        if (!s) return { error: handle ? `no plan "${handle}"` : "you have no plan yet — call write_plan" };
+        return {
+          handle: s.handle, goal: s.plan.goal, counts: s.counts,
+          items: s.items.map((i) => ({ id: i.id, text: i.text, status: i.status, assignee: i.assignee, engineOwned: !!i.boundRunId, note: i.note })),
+        };
+      },
+    });
+
   if (has("delegate_task"))
     set.delegate_task = tool({
       description:
@@ -239,8 +316,9 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         context: z.string().optional(),
         criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
         inputArtifacts: z.array(z.string()).optional().describe("artifact handles ('id' or 'id@vN') to hand to the child by reference"),
+        itemId: z.string().optional().describe("an item on your plan this delegation fulfils; the ENGINE then ticks it from the child's real outcome (and only when the criteria check passes)"),
       }),
-      execute: async ({ to, goal, context, criteria, inputArtifacts }, options) => {
+      execute: async ({ to, goal, context, criteria, inputArtifacts, itemId }, options) => {
         // The AI SDK's toolCallId is the SAME id the instrument() wrapper stamps on this call's
         // tool_start/tool_end span (Plan 02), so threading it into runChild lets the LIVE waterfall nest
         // each child under the EXACT delegate_task span that spawned it — deterministic for concurrent
@@ -266,6 +344,17 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           ctx.notes.push(guard.note);
           ctx.emit?.({ note: guard.note });
         }
+
+        // Plan 18: bind the plan item to this delegation. From here the ENGINE owns its terminal status —
+        // the model may narrate, but it may not declare a delegated item done. Bind BEFORE the child runs
+        // so a crash mid-delegation leaves an `in_progress` item for reconcilePlans to mark interrupted.
+        const bind = (status: PlanItemStatus, note?: string, boundRunId?: string) => {
+          if (!itemId || !ctx.plan) return;
+          const r = ctx.plan.tick({ itemId, status, note, by: "engine", boundRunId });
+          if (!r.ok) ctx.notes.push(`plan bind failed (${itemId}): ${r.rejected}`);
+          else ctx.emit?.({ plan: ctx.plan.read() ?? undefined });
+        };
+        bind("in_progress", `delegated to ${target}`, `pending:${spawnCallId ?? target}`);
 
         // resolve input handles; drop (and note) any that don't exist rather than passing a dead ref.
         const resolved: string[] = [], dropped: string[] = [];
@@ -309,7 +398,13 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
 
           // No criteria ⇒ no check ⇒ today's trust-everything behavior, zero extra cost.
           // Parent context gets handles + a summary, NOT the child's full body (the pollution vector).
-          if (!criteria) return { to: target, team: guard.team, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
+          if (!criteria) {
+            // No criteria ⇒ the checkbox follows the child's OUTCOME, which is still the truth about
+            // whether the run finished, not the model's claim about it.
+            bind(child.trace.outcome === "completed" ? "done" : child.trace.outcome === "blocked" ? "blocked" : "failed",
+                 child.trace.outcome === "completed" ? undefined : `child run ${child.trace.outcome}`, child.runId);
+            return { to: target, team: guard.team, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
+          }
           const criteriaText = criteria; // narrowed to string past the guard (kept for the surface closure)
 
           // Plan 06 Phase 3 — surface a FAILED verdict two ways, then hand the caveat to the parent:
@@ -356,6 +451,14 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
                 ctx.notes.push(`coaching proposal skipped: ${e instanceof Error ? e.message : String(e)}`);
               }
             }
+            // Plan 18 × Plan 06: with criteria set, the box goes GREEN only when an INDEPENDENT model
+            // call agrees the child met them. The checkbox stops being a progress bar and becomes an
+            // assertion. A failed verdict carries its reasons onto the item.
+            bind(
+              v.pass ? "done" : c.trace.outcome === "blocked" ? "blocked" : "failed",
+              v.pass ? undefined : v.reasons.length ? v.reasons.join("; ") : "did not meet the acceptance criteria",
+              c.runId,
+            );
             return { to: target, team: guard.team, runId: c.runId, outputArtifacts: c.trace.artifacts, summary: c.text, verification: v };
           };
 
@@ -403,6 +506,10 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           ctx.notes.push(`delegate failed: ${msg}`);
+          // The item was bound `in_progress` before the spawn. Settle it here rather than stranding it
+          // until the next boot's reconcilePlans finds it and calls it "interrupted" — it isn't; the
+          // delegation genuinely failed, and this run is still alive to say so.
+          bind("failed", `delegation threw: ${msg}`);
           return { error: msg };
         }
       },
@@ -428,8 +535,9 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         context: z.string().optional(),
         criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
         inputArtifacts: z.array(z.string()).optional().describe("artifact handles ('id' or 'id@vN') to hand to the task by reference"),
+        itemId: z.string().optional().describe("an item on your plan this task fulfils; the ENGINE ticks it when the task settles, possibly turns later"),
       }),
-      execute: async ({ to, goal, context, criteria, inputArtifacts }) => {
+      execute: async ({ to, goal, context, criteria, inputArtifacts, itemId }) => {
         if (!ctx.dispatchTask) return { error: "background dispatch is not available in this context — use delegate_task instead" };
         const budgetMsg = () => `work item budget (${agent.budgets.maxWorkItemsPerRequest}) exhausted`;
         // A dispatch consumes a work item like a delegation — config disposes fan-out either way.
@@ -452,6 +560,14 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         const r = await ctx.dispatchTask({ to: target, goal, context, criteria, inputArtifacts: resolved });
         if ("error" in r) { ctx.notes.push(`dispatch failed: ${r.error}`); return r; }
         ctx.notes.push(`dispatched ${r.taskId} → ${target}`);
+        // Plan 18: bind the item to the TASK id. The dispatch returns immediately and the task settles
+        // off-turn — possibly several conversation turns later — so the settle path (REPL) is what ticks
+        // this item, via findPlanItemByBoundRun. The binding is what lets it find the item at all.
+        if (itemId && ctx.plan) {
+          const tick = ctx.plan.tick({ itemId, status: "in_progress", note: `dispatched to ${target}`, by: "engine", boundRunId: r.taskId });
+          if (!tick.ok) ctx.notes.push(`plan bind failed (${itemId}): ${tick.rejected}`);
+          else ctx.emit?.({ plan: ctx.plan.read() ?? undefined });
+        }
         return { taskId: r.taskId, status: "queued", to: target, team: guard.team, note: `running in background — check_task("${r.taskId}") for status, or await_task to block on it` };
       },
     });

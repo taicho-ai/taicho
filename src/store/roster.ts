@@ -38,7 +38,7 @@ Your job is to TURN THE CAPTAIN'S INTENT INTO ACTION, never to do the domain wor
 
 /** Root's built-in capabilities. Kept in one place so existing roots get reconciled to the current
  *  set on boot (older roots drift — e.g. predate ask_human / the MCP tools). */
-export const ROOT_TOOLS = ["create_agent", "delegate_task", "dispatch_task", "check_task", "await_task", "find_agents", "ask_human", "read_url", "add_mcp_server", "remember", "recall", "propose_skill", "run_command", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations"];
+export const ROOT_TOOLS = ["create_agent", "delegate_task", "dispatch_task", "check_task", "await_task", "find_agents", "ask_human", "read_url", "add_mcp_server", "remember", "recall", "propose_skill", "run_command", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations", "write_plan", "update_plan_item", "read_plan"];
 
 export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]): Promise<void> {
   const file = paths.agentFile(ws, "root");
@@ -118,8 +118,11 @@ export interface NewAgentDraft {
  *  feedback that drives a revision (annotate_artifact / list_annotations). This is the squad's FLOOR:
  *  a worker without it can only hand work back as loose `final.md` text — the root/2026-07-04-run6 gap.
  *  Privileged / opt-in capabilities (delegate_task, run_command, create_agent, ask_human, the KB tools,
- *  and any mcp:<server> ref — Plan 08 least privilege) are deliberately NOT here: a model requests those
- *  explicitly via create_agent's `tools`, which ADDS to this baseline, never REPLACES it. */
+ *  the Plan 18 plan tools, and any mcp:<server> ref — Plan 08 least privilege) are deliberately NOT here:
+ *  a model requests those explicitly via create_agent's `tools`, which ADDS to this baseline, never
+ *  REPLACES it. A plan is not needed to produce an artifact, so write_plan/update_plan_item/read_plan
+ *  stay an opt-in grant — otherwise every worker on a squad would own one and the panel would be a
+ *  forest. Root holds them by default; a team lead asks. */
 export const DEFAULT_WORKER_TOOLS = ["write_artifact", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations"];
 
 /** Merge a model-proposed tool list onto the worker baseline (Plan 14 T1 — baseline-merge, the robust

@@ -9,6 +9,7 @@ import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
 import { ceilingHit, exhaustionMessage, SQUAD_SCOPE, type SpendLedger, type SpendScope } from "../store/spend-ledger";
 import { compactMessages, estimateContextTokens, type CompactionSummary } from "./compaction";
+import { withPlanSlot } from "./plan-inject";
 import { DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from "./providers/request-timeout";
 
 /** Plan 05: how many recent tool round-trips the compaction fold keeps VERBATIM (the system prompt +
@@ -85,6 +86,11 @@ export async function runLoop(opts: {
    *  or just the squad's for an unaffiliated agent. A team ceiling can therefore stop a run the squad
    *  ceiling would have allowed. Defaults to the squad alone. */
   spendScopes?: SpendScope[];
+  /** Plan 18: the agent's live plan, rendered fresh before EACH model call. Returns null when the agent
+   *  has no plan (zero tokens, zero store reads, zero overhead). The returned text is appended as a slot
+   *  for the CALL ONLY — it never enters `messages`, so context cost is flat, compaction is orthogonal by
+   *  construction, and the prefix cache is untouched. See core/plan-inject.ts. */
+  pollPlan?: () => string | null;
   /** Plan 12 (reopened): per-request transport deadline (ms) for the model fetch. A genuinely hung
    *  request (open socket, zero tokens) becomes a retryable error routed through the AI SDK's maxRetries,
    *  instead of the deleted loop-level idle watchdog. Config-disposed; defaults to 120s. Also used to
@@ -197,6 +203,10 @@ export async function runLoop(opts: {
       // drives the live "thinking" status. Keep both.
       emit({ ts: new Date().toISOString(), kind: "model_request", iteration: iterations + 1, data: { messageCount: messages.length, contextTokens: ctxTokens, compacted: compactedThisIter != null } });
       opts.onStep?.({ phase: "model_start" }); // → "thinking" until a delta or the response arrives
+      // Plan 18: the plan is the LAST thing the model reads before it acts — which is the property that
+      // makes it steer behaviour rather than decorate it. Built per call, never stored in `messages`.
+      const planText = opts.pollPlan?.();
+      const callMessages = withPlanSlot(messages, planText);
       // Plan 07: ONE streaming path for EVERY provider. streamText streams deltas so the live markdown
       // UI lights up for all providers (previously only the Codex subscription path streamed;
       // Anthropic/OpenAI/OpenRouter went through generateText and rendered nothing live). We drain the
@@ -254,7 +264,7 @@ export async function runLoop(opts: {
             // The prompt as a proper GenAI message list (system + conversation), rendered by backends
             // as a conversation — NOT a JSON dump. System is message 0 so the instructions are visible.
             ...(tel.captureContent
-              ? chatMessageAttrs("gen_ai.prompt", [{ role: "system", content: opts.system }, ...(messages as { role: string; content: unknown }[])])
+              ? chatMessageAttrs("gen_ai.prompt", [{ role: "system", content: opts.system }, ...(callMessages as { role: string; content: unknown }[])])
               : {}),
           },
         });
@@ -262,7 +272,7 @@ export async function runLoop(opts: {
       callStart = performance.now();
       const s = streamText({
         model: opts.model,
-        messages,
+        messages: callMessages, // Plan 18: conversation + the plan slot (slot never enters `messages`)
         tools: opts.tools,
         abortSignal: opts.signal,
         // Codex backend (subscription) requires the system prompt in the top-level `instructions`

@@ -132,7 +132,9 @@ export function foldPlan(ws: string, handle: string): PlanState | null {
   const plan = readPlan(ws, handle);
   if (!plan) return null;
   const byItem = new Map<string, PlanEvent>();
-  for (const e of readPlanEvents(ws, plan.id)) byItem.set(e.item, e); // later lines overwrite earlier
+  // Later lines overwrite earlier. A `rejected` attempt is recorded but must NOT win the fold — that
+  // would hand the model exactly the lie the engine-owns rule refuses it.
+  for (const e of readPlanEvents(ws, plan.id)) if (!e.rejected) byItem.set(e.item, e);
 
   const items: FoldedItem[] = plan.items.map((i) => {
     const e = byItem.get(i.id);
@@ -152,6 +154,24 @@ export function findPlanItemByBoundRun(ws: string, boundRunId: string): { planId
     for (const e of readPlanEvents(ws, id)) if (e.boundRunId === boundRunId) return { planId: id, item: e.item };
   }
   return null;
+}
+
+/** Settle whatever plan item a background task was bound to. Called from the REPL's off-turn settle
+ *  path, which knows only a taskId — the run that dispatched it is long gone, which is exactly why
+ *  appendPlanEvent is a free function and not a RunContext method. No-op when nothing is bound. */
+export function settlePlanItemForTask(
+  ws: string,
+  db: Database,
+  taskId: string,
+  status: PlanItemStatus,
+  note?: string,
+): { planId: string; item: string } | null {
+  const found = findPlanItemByBoundRun(ws, taskId);
+  if (!found) return null;
+  appendPlanEvent(ws, found.planId, { item: found.item, status, by: "engine", runId: taskId, boundRunId: taskId, note });
+  const after = foldPlan(ws, found.planId);
+  if (after) indexPlan(db, after);
+  return found;
 }
 
 export function listPlanIds(ws: string): string[] {

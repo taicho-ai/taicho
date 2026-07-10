@@ -65,6 +65,11 @@ export const PlanEvent = z.object({
    *  item's terminal status: the checkbox reflects what happened, not what the model claims. */
   boundRunId: z.string().optional(),
   note: z.string().optional(),                 // e.g. a failed verdict's reasons
+  /** A recorded-but-refused attempt: the model tried to set a terminal status on an engine-owned item.
+   *  The fold SKIPS these — otherwise the attempt would be the last line for that item and would win,
+   *  which is precisely the lie the engine-owns rule exists to prevent. It stays in the log because a
+   *  model marking a failed delegation `done` is a fact worth having. */
+  rejected: z.boolean().optional(),
   ts: z.string().datetime(),
 });
 export type PlanEvent = z.infer<typeof PlanEvent>;
