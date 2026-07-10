@@ -128,13 +128,12 @@ test("a delegated child run nests under its parent — one trace across the dele
   await telemetry.shutdown();
 });
 
-test("prompt content is NOT exported unless OTEL_TAICHO_CAPTURE_CONTENT opts in", async () => {
+test("content capture is OPT-OUT: an explicit 0/false/no/off strips prompts from the spans", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
   const spans = new InMemorySpanExporter();
   const metricReader = new PeriodicExportingMetricReader({ exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE), exportIntervalMillis: 60_000 });
-  // No OTEL_TAICHO_CAPTURE_CONTENT ⇒ captureContent is false ⇒ recordInputs/recordOutputs off.
-  const telemetry = initTelemetry({ spanExporter: spans, metricReader, env: { OTEL_EXPORTER_OTLP_ENDPOINT: "x" } })!;
+  const telemetry = initTelemetry({ spanExporter: spans, metricReader, env: { OTEL_EXPORTER_OTLP_ENDPOINT: "x", OTEL_TAICHO_CAPTURE_CONTENT: "0" } })!;
   expect(telemetry.captureContent).toBe(false);
 
   const SECRET = "SECRET_MARKER_DO_NOT_EXPORT";
@@ -148,12 +147,28 @@ test("prompt content is NOT exported unless OTEL_TAICHO_CAPTURE_CONTENT opts in"
   await telemetry.shutdown();
 });
 
-test("the run span carries input + output when content capture IS opted in", async () => {
+test("every documented falsey spelling turns content capture off; everything else leaves it ON", () => {
+  const base = { OTEL_EXPORTER_OTLP_ENDPOINT: "x" };
+  const cap = (v?: string) => initTelemetry({ spanExporter: new InMemorySpanExporter(), env: v === undefined ? base : { ...base, OTEL_TAICHO_CAPTURE_CONTENT: v } })!.captureContent;
+
+  for (const off of ["0", "false", "no", "off"]) expect(cap(off)).toBe(false);
+  // unset ⇒ ON. This is the flip: telemetry is already off unless you configured an endpoint, so by the
+  // time this flag is read you deliberately pointed taicho at a backend. Skeletons help nobody.
+  expect(cap(undefined)).toBe(true);
+  for (const on of ["1", "true", "yes"]) expect(cap(on)).toBe(true);
+  // An opt-out switch must FAIL TOWARD THE USEFUL BEHAVIOUR: a typo cannot silently gut observability.
+  expect(cap("maybe")).toBe(true);
+  expect(cap("")).toBe(true);
+  expect(cap("FALSE")).toBe(true); // case-sensitive by design — only the documented spellings disable it
+});
+
+test("the run span carries input + output BY DEFAULT (no env flag needed)", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
   const spans = new InMemorySpanExporter();
   const metricReader = new PeriodicExportingMetricReader({ exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE), exportIntervalMillis: 60_000 });
-  const telemetry = initTelemetry({ spanExporter: spans, metricReader, env: { OTEL_EXPORTER_OTLP_ENDPOINT: "x", OTEL_TAICHO_CAPTURE_CONTENT: "1" } })!;
+  // NO OTEL_TAICHO_CAPTURE_CONTENT — the point is that you get the conversation without asking.
+  const telemetry = initTelemetry({ spanExporter: spans, metricReader, env: { OTEL_EXPORTER_OTLP_ENDPOINT: "x" } })!;
   expect(telemetry.captureContent).toBe(true);
 
   const model = new MockLanguageModelV3({ doGenerate: mockValues(text("here is the answer")) as any });

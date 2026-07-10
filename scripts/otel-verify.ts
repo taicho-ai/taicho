@@ -90,8 +90,9 @@ const proc = Bun.spawn([binary, "run", "ship the notifier"], {
     ...process.env,
     TAICHO_E2E_MODEL: "plan-teams",
     OTEL_EXPORTER_OTLP_ENDPOINT: `http://localhost:${PORT}`,
-    OTEL_SERVICE_NAME: "taicho-verify",
     OTEL_BSP_SCHEDULE_DELAY: "200",
+    // Deliberately NOT setting OTEL_TAICHO_CAPTURE_CONTENT: content capture is opt-OUT now, and the
+    // assertions below prove the conversation shows up without anyone asking for it.
   },
   stdout: "pipe",
   stderr: "pipe",
@@ -148,6 +149,39 @@ check("gen_ai model-call spans nest under the runs", spans.some((s) => s.name.st
 check("the delegate_task tool span was exported", spans.some((s) => s.name.startsWith("delegate_task")));
 check("the write_plan tool span was exported", spans.some((s) => s.name.startsWith("write_plan")));
 check("metrics were exported too", metricPosts > 0);
+
+// A trace you cannot read the conversation out of is a trace that answers no question anyone asks. This
+// was missed once: the harness passed on a run whose spans carried structure and no content at all.
+if (rootRun) {
+  check("the run span records WHAT THE USER SAID", String(rootRun.attributes["gen_ai.prompt"] ?? "").includes("ship the notifier"),
+    String(rootRun.attributes["gen_ai.prompt"]).slice(0, 60));
+  check("the run span records WHAT THE AGENT ANSWERED", String(rootRun.attributes["gen_ai.completion"] ?? "").includes("Plan complete"),
+    String(rootRun.attributes["gen_ai.completion"]).slice(0, 60));
+}
+if (childRun)
+  check("the delegated child records its own brief and reply",
+    String(childRun.attributes["gen_ai.prompt"] ?? "").length > 0 && String(childRun.attributes["gen_ai.completion"] ?? "").includes("Filed the announcement"));
+
+const firstChat = spans.find((s) => s.name.includes("iter 1") && s.name.startsWith("chat "));
+if (firstChat) {
+  check("the model-call span carries the chat messages as a role/content list",
+    firstChat.attributes["gen_ai.prompt.0.role"] === "system" && firstChat.attributes["gen_ai.prompt.1.role"] === "user");
+  check("iteration 1 carries NO plan slot (no plan yet ⇒ zero overhead)",
+    !Object.values(firstChat.attributes).some((v) => String(v).includes("CURRENT PLAN")));
+}
+
+const lastChat = [...spans].filter((s) => s.name.startsWith("chat ") && s.name.includes("iter 4")).pop();
+if (lastChat) {
+  const msgs = Object.entries(lastChat.attributes).filter(([k]) => /^gen_ai\.prompt\.\d+\.content$/.test(k));
+  const planSlots = msgs.filter(([, v]) => String(v).includes("CURRENT PLAN"));
+  check("the plan slot is injected exactly ONCE per call (flat context, never cumulative)", planSlots.length === 1,
+    `${planSlots.length} slots`);
+  const lastIdx = Math.max(...msgs.map(([k]) => Number(k.split(".")[2])));
+  check("the plan slot is the LAST message the model reads before it acts",
+    String(lastChat.attributes[`gen_ai.prompt.${lastIdx}.content`]).includes("CURRENT PLAN"));
+  check("the plan slot marks the delegated item (engine-owned) and already ticked",
+    planSlots.some(([, v]) => String(v).includes("(engine-owned)") && String(v).includes("2/2 done")));
+}
 
 rmSync(ws, { recursive: true, force: true });
 

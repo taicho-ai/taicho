@@ -212,8 +212,7 @@ Design/rationale: `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`.
   themselves (endpoint/headers/protocol) — nothing bespoke.
 - **`loop.ts`** — every `streamText` gets `experimental_telemetry: { isEnabled, tracer, … }`, so the AI
   SDK emits the gen_ai spans (`ai.streamText` → `ai.streamText.doStream`). `recordInputs`/`recordOutputs`
-  are gated by `OTEL_TAICHO_CAPTURE_CONTENT` — **off by default**, so prompt/completion text never leaves
-  the process unless opted in. Per call, `onModelCall` feeds the token/duration/cost metrics.
+  are gated by `OTEL_TAICHO_CAPTURE_CONTENT` — **on by default; opt OUT with `0|false|no|off`**. Per call, `onModelCall` feeds the token/duration/cost metrics.
 - **`run.ts`** — `executeRun` opens a `run <agent>` span BEFORE the try (so a pre-loop throw still closes
   it) and makes it ACTIVE around `runLoop` via `context.with`, so the gen_ai spans AND delegated child
   runs nest under it — a delegation is ONE distributed trace. `finishRunSpan` is idempotent (finalize +
@@ -319,6 +318,16 @@ resolution).
   DB**, not a fresh `openDb()` — `migrate.test.ts`'s `rewindToV6` rebuilds the old shape on purpose.
   Note `migrate()` also runs standalone over a bare `Database` in `spend-ledger.test.ts`, so a migration
   must not assume a baseline table exists.
+- **Switch defaults — a boolean switch is OPT-OUT unless enabling it can hurt someone.** A feature you
+  had to deliberately turn on (OTel needs `OTEL_EXPORTER_OTLP_ENDPOINT`) must not then hand you a gutted
+  version of itself behind a second flag. `OTEL_TAICHO_CAPTURE_CONTENT` was opt-in and shipped traces with
+  no prompts, no completions, no tool I/O — structure that answers no question anyone actually asks. It is
+  now opt-out (`0|false|no|off`), and **unrecognized values leave it ON**: an opt-out switch has to fail
+  toward the useful behaviour, or a typo silently guts the feature and nothing says so.
+  The rest of the env surface is *not* miscategorized, having audited it: `TAICHO_E2E_MODEL` (a test
+  double — must stay opt-in), `TAICHO_VERBOSE`/`TAICHO_LOG_LEVEL`/`TAICHO_DEBUG` (verbosity, where quiet
+  is the right default), and `TAICHO_PROVIDER`/`TAICHO_MODEL`/`TAICHO_MODELS_DIR`/`TAICHO_EMBED_MODEL`
+  (selectors, not booleans). `mcp.enabled` already defaults on. Apply the rule to any new switch.
 - **Logging (Plan 03):** never `console.error/warn` from engine/store code — a stray write corrupts
   the Ink TUI. Use the leveled `log` from `src/core/logger.ts`; it writes to `taicho.log` in the
   workspace and redacts auth material centrally (so no call site can leak a token). Raise to debug
