@@ -19,7 +19,8 @@ export const ROOT_OPERATING_CONTEXT =
   `You are root — the captain's standing assistant — running inside a taicho workspace. Know the ground you stand on.\n` +
   `\n` +
   `**Workspace layout** (the files are canon; taicho.db is a rebuildable index of them):\n` +
-  `- agents/<id>/agent.md — each agent's persona + frontmatter (tools, visibility, budgets). root and librarian are seeded from code; other agents are created by you or the captain.\n` +
+  `- agents/<id>/agent.md — each agent's persona + frontmatter (tools, visibility, budgets, team). root and librarian are seeded from code; other agents are created by you or the captain.\n` +
+  `- teams/<id>/team.md — a functional group of agents (news, trading, …): its charter, an optional lead, and a tool policy. The captain owns these files; you cannot create a team. delegate_task to a team id and the team decides who takes the work.\n` +
   `- kb/sources/*.md — the captain's source documents (canon). kb/nodes/*.md — the derived knowledge graph. The librarian re-derives nodes from sources when the captain runs \`/kb sync\`.\n` +
   `- skills/*.md — reusable procedure docs agents can load. runs/ — run traces. artifacts/ — the addressable, versioned artifact store: agents hand work products to each other (and to you) BY REFERENCE via save_artifact / read_artifact / list_artifacts, so heavy content stays out of the conversation.\n` +
   `- **Feedback & revision:** annotate_artifact leaves feedback ON an artifact version; the captain does the same via /artifacts annotate. To get an artifact revised, delegate_task with inputArtifacts:[the handle] — the open feedback rides along and the child saves a NEW version (same id, parents:[old handle]). A revision is a new version, never an overwrite; the whole lineage stays inspectable.\n` +
@@ -31,7 +32,7 @@ export const ROOT_OPERATING_CONTEXT =
   `- dispatch_task is FIRE-AND-FORGET: it returns a taskId immediately and the work runs in the background. Use it for long jobs the captain shouldn't wait behind — then check_task(taskId) for status, or await_task(taskId) when you finally need the result. Either way results come back BY REFERENCE (a summary + artifact handles), never dumped into the conversation.\n` +
   `\n` +
   `**The captain drives via slash commands** — point them to the right one when it helps:\n` +
-  `- /agents (list the squad), /runs [agent], /trace [id|task_<id>] (waterfall inspector; no arg = latest run, task_<id> = a whole task), /view [bar|panes|both|waterfall] (waterfall = the live span tree), /tasks (background tasks; /tasks cancel <id>), /artifacts view (browse this conversation's artifacts)\n` +
+  `- /agents (list the squad), /teams (list teams and their members), /costs [agent] (spend rollup), /view [bar|panes|both], /tasks (background tasks; /tasks cancel <id>), /artifacts view (browse this conversation's artifacts)\n` +
   `- /teach <agent> <correction>, /policies <agent>, /forget <agent> <pol_id> (standing instructions)\n` +
   `- /kb sync|list|forget|reindex (knowledgebase), /skills list|show|remove|reindex\n` +
   `- /mcp (MCP servers), /status, /login openai, /logout openai, /help\n` +
@@ -49,10 +50,60 @@ const STEER_NOTE =
 
 export interface PromptSection { name: string; tier: "stable" | "context" | "volatile"; text: string; }
 
+/** A team as the roster renders it: an address, not a list of people. */
+export interface RosterTeam { id: string; charter: string; lead?: string; memberCount: number }
+
+/** Plan 19: render the roster as TEAMS plus whatever agents no shown team accounts for.
+ *
+ *  This is the fix for a wart that predates teams. The old roster inlined up to 30 agents and, past
+ *  that, printed "too many to list" and threw the map away. Both branches are bad: thirty flat lines is
+ *  a lot of prompt spent on agents root will never call, and the fallback tells the model nothing. A
+ *  sixty-agent squad organized into five teams now renders as five lines, and root is nudged toward the
+ *  address it should be using anyway.
+ *
+ *  A squad with no teams renders EXACTLY as before — same heading, same bullets, same overflow hint.
+ *  That is deliberate: nothing changes for anyone who never creates a team. */
+function rosterSection(
+  agent: AgentDef,
+  agents: { id: string; role: string }[],
+  teams: RosterTeam[],
+): string | null {
+  if (!agents.length && !teams.length) return null;
+
+  const heading = agent.isRoot ? "## Your squad (delegate with delegate_task)" : "## Your team (delegate with delegate_task)";
+
+  const teamLines = teams.map((t) => {
+    const how = t.lead ? `lead: ${t.lead} · ${t.memberCount} agents` : `${t.memberCount} agents · routed by capability`;
+    return `- ${t.id}: ${t.charter}\n  ${how}`;
+  });
+
+  // Without teams, keep the historical shape byte-for-byte (heading, bullets, and the >30 hint).
+  if (!teams.length) {
+    if (agents.length > INLINE_ROSTER_MAX)
+      return `${heading.split(" (")[0]}\nThere are ${agents.length} agents you can reach — too many to list. ` +
+        `Use find_agents(query) to locate the right one by capability, then delegate_task to it.`;
+    return `${heading}\n${agents.map((a) => `- ${a.id}: ${a.role}`).join("\n")}`;
+  }
+
+  const parts = [heading, "\n### Teams — address the team, not its members\n" + teamLines.join("\n")];
+  if (agents.length)
+    parts.push(
+      agents.length > INLINE_ROSTER_MAX
+        ? `\n### Direct reports\n${agents.length} unaffiliated agents — use find_agents(query) to locate one by capability.`
+        : `\n### Direct reports\n${agents.map((a) => `- ${a.id}: ${a.role}`).join("\n")}`,
+    );
+  return parts.join("\n");
+}
+
 export function assemble(
   agent: AgentDef,
   opts: {
+    /** Agents this caller may see that no SHOWN team already accounts for — teams stand in for members. */
     visibleAgents: { id: string; role: string }[];
+    /** Teams this caller may address. Empty ⇒ the pre-Plan-19 flat roster. */
+    teams?: RosterTeam[];
+    /** The caller's own team charter — its standing instruction. Culture is configuration. */
+    teamCharter?: string;
     brief?: Brief;
     policies: PolicyNote[];
     exemplarBlock?: string;
@@ -69,18 +120,10 @@ export function assemble(
     s.push({ name: "operating", tier: "stable", text: ROOT_OPERATING_CONTEXT });
   s.push({ name: "steer-note", tier: "stable", text: STEER_NOTE });
   // context
-  if (opts.visibleAgents.length && opts.visibleAgents.length <= INLINE_ROSTER_MAX)
-    s.push({
-      name: "registry", tier: "context",
-      text: "## Your team (delegate with delegate_task)\n" +
-        opts.visibleAgents.map((a) => `- ${a.id}: ${a.role}`).join("\n"),
-    });
-  else if (opts.visibleAgents.length > INLINE_ROSTER_MAX)
-    s.push({
-      name: "registry", tier: "context",
-      text: `## Your team\nThere are ${opts.visibleAgents.length} agents you can reach — too many to list. ` +
-        `Use find_agents(query) to locate the right one by capability, then delegate_task to it.`,
-    });
+  const roster = rosterSection(agent, opts.visibleAgents, opts.teams ?? []);
+  if (roster) s.push({ name: "registry", tier: "context", text: roster });
+  if (opts.teamCharter)
+    s.push({ name: "team-charter", tier: "context", text: `## Your team's charter\n${opts.teamCharter}` });
   if (opts.brief)
     s.push({
       name: "brief", tier: "context",

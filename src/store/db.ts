@@ -8,8 +8,12 @@ export function openDb(workspace: string): Database {
   const db = new Database(join(workspace, "taicho.db"), { create: true });
   db.exec(`
     PRAGMA journal_mode = WAL;
+    -- team (Plan 19) is declared here for a FRESH workspace only. CREATE TABLE IF NOT EXISTS cannot add
+    -- a column to a table that already exists, so every pre-Plan-19 database gets it from migration v8's
+    -- guarded ALTER instead. Both must be present and both idempotent: baseline alone would silently
+    -- skip existing workspaces, ALTER alone would throw "duplicate column" on new ones.
     CREATE TABLE IF NOT EXISTS registry (
-      id TEXT PRIMARY KEY, role TEXT NOT NULL, is_root INTEGER DEFAULT 0
+      id TEXT PRIMARY KEY, role TEXT NOT NULL, is_root INTEGER DEFAULT 0, team TEXT
     );
     CREATE TABLE IF NOT EXISTS embeddings (
       ref TEXT PRIMARY KEY,            -- policy/exemplar id or expansion key

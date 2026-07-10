@@ -102,7 +102,7 @@ test("createAgent merges the baseline UNDER model-requested extras (delegate_tas
 test("reconcileWorkerTools backfills a worker born toolless; leaves explicit grants + built-ins alone", async () => {
   const { ws, db } = await freshWs();
   await seedLibrarian(ws);
-  // A synthetic worker persisted with tools:[] — exactly the 9 broken squad agents in the live deck.
+  // A synthetic worker persisted with tools:[] — exactly the 9 broken squad agents in the live squad.
   const toolless = AgentDef.parse({ id: "content-strategist", role: "x", identity: "y", tools: [], canSee: ["*"], canDelegateTo: [], isRoot: false, created: "2026-07-04T00:00:00.000Z" });
   await mkdir(join(ws, "agents", "content-strategist"), { recursive: true });
   await writeFile(join(ws, "agents", "content-strategist", "agent.md"), serializeAgent(toolless));

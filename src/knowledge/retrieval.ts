@@ -1,4 +1,4 @@
-/** Hybrid deck-knowledge recall: a semantic (or keyword) seed, then a typed-edge graph expansion.
+/** Hybrid squad-knowledge recall: a semantic (or keyword) seed, then a typed-edge graph expansion.
  *  Mirrors coaching/retrieval.ts. Degrades to keyword+graph when no embedder is available, so the
  *  KB is fully usable under any provider (incl. subscription/Anthropic with no embeddings endpoint). */
 import type { Database } from "bun:sqlite";

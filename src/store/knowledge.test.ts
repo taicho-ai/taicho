@@ -1,12 +1,12 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "./db";
 import { paths } from "./files";
 import { putVector } from "./vectors";
 import { KbNode } from "../schemas/knowledge";
-import { serializeNode, parseNode, writeNode, readNode, nodeExists, neighbors, reindexKnowledge, mkKbId, resolveNodeIds, forgetNodes, reembedAll, listNodeRows } from "./knowledge";
+import { serializeNode, parseNode, writeNode, readNode, nodeExists, neighbors, reindexKnowledge, mkKbId, resolveNodeIds, forgetNodes, reembedAll, listNodeRows, reconcileKbScope } from "./knowledge";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-kb-"));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -104,4 +104,52 @@ test("reembedAll writes a vector per node from a stubbed embedder", async () => 
   const n = await reembedAll(db, embed);
   expect(n).toBe(2);
   expect(count(db, "SELECT COUNT(*) c FROM embeddings WHERE kind='kb'")).toBe(2);
+});
+
+// --- Plan 19 Ph1b: the "deck" -> "squad" scope retirement ------------------------------------------
+// The scope is a PERSISTED value: it lives in kb/nodes/*.md frontmatter (canon) and in kb_nodes.scope
+// (derived). A workspace written by a pre-Plan-19 taicho must still load, and must end up saying
+// "squad" on disk. These three tests cover read, backfill, and idempotence respectively.
+
+/** A node file exactly as a pre-Plan-19 taicho wrote it. */
+function writeLegacyNode(ws: string, id: string): string {
+  mkdirSync(paths.kbNodeDir(ws), { recursive: true });
+  const file = paths.kbNodeFile(ws, id);
+  writeFileSync(
+    file,
+    `---\nid: ${id}\nkind: fact\ntitle: legacy\nscope: deck\nedges: []\ncreated: 2026-07-01T00:00:00.000Z\n---\nlegacy body\n`,
+  );
+  return file;
+}
+
+test("KbScope normalizes the legacy on-disk value: parsing `scope: deck` yields squad", () => {
+  const n = parseNode(`---\nid: kb_a\nkind: fact\ntitle: t\nscope: deck\nedges: []\ncreated: 2026-07-01T00:00:00.000Z\n---\nbody\n`);
+  expect(n.scope).toBe("squad");
+  // and an absent scope still defaults
+  const d = parseNode(`---\nid: kb_b\nkind: fact\ntitle: t\nedges: []\ncreated: 2026-07-01T00:00:00.000Z\n---\nbody\n`);
+  expect(d.scope).toBe("squad");
+});
+
+test("reconcileKbScope rewrites legacy node FILES (files are canon) and reindexes them", () => {
+  const w = ws();
+  const db = openDb(w);
+  const file = writeLegacyNode(w, "kb_legacy");
+  expect(readFileSync(file, "utf8")).toContain("scope: deck");
+
+  expect(reconcileKbScope(w, db)).toBe(1);
+
+  const after = readFileSync(file, "utf8");
+  expect(after).toContain("scope: squad");
+  expect(after).not.toContain("scope: deck");
+  expect(after).toContain("legacy body"); // content preserved, not just the frontmatter
+  expect((db.query("SELECT scope FROM kb_nodes WHERE id = 'kb_legacy'").get() as { scope: string }).scope).toBe("squad");
+});
+
+test("reconcileKbScope is idempotent and a no-op on a workspace with no legacy nodes", () => {
+  const w = ws();
+  const db = openDb(w);
+  writeLegacyNode(w, "kb_legacy");
+  expect(reconcileKbScope(w, db)).toBe(1);
+  expect(reconcileKbScope(w, db)).toBe(0); // second boot rewrites nothing
+  expect(reconcileKbScope(ws(), openDb(ws()))).toBe(0); // empty workspace: no kb dir at all
 });

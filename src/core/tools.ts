@@ -6,6 +6,7 @@ import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import type { AgentDef } from "../schemas/agent";
+import { effectiveTools, type TeamTools } from "../schemas/team";
 import type { RunContext, RunResult } from "./run";
 import type { McpManager } from "./mcp/manager";
 import type { VerificationVerdict } from "../schemas/trace";
@@ -50,12 +51,18 @@ function latestHandlePerId(handles: string[]): string[] {
   return [...best.values()].map((b) => b.handle);
 }
 
-export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
+export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager, teamPolicy?: TeamTools): ToolSet {
   const set: ToolSet = {};
+  // Plan 19: a team's tool policy layers over the member's own grant — `grant` ADDS, `deny` REMOVES and
+  // wins. Every gate below reads `has()` rather than agent.tools directly, so the policy applies
+  // uniformly (built-ins, KB tools, and the `mcp:<server>` refs resolved further down). The
+  // DEFAULT_WORKER_TOOLS floor is protected when the team file loads, not here.
+  const granted = new Set(effectiveTools(agent.tools, teamPolicy));
+  const has = (t: string) => granted.has(t);
 
   // Legacy simple-markdown write, kept as a back-compat wrapper over the structured store (per the
   // plan: save_artifact "replaces/wraps" it). Prefer save_artifact for provenance + hand-off.
-  if (agent.tools.includes("write_artifact"))
+  if (has("write_artifact"))
     set.write_artifact = tool({
       description: "Write a simple markdown artifact and return its path. Prefer save_artifact for structured, versioned, provenance-tracked outputs you hand off by reference.",
       inputSchema: z.object({
@@ -73,7 +80,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("save_artifact"))
+  if (has("save_artifact"))
     set.save_artifact = tool({
       description: "Save a work product to the shared artifact store as a structured, versioned, addressable artifact — the way to hand work to other agents (and the human) BY REFERENCE instead of dumping it into the conversation. Your identity + this run are recorded as provenance automatically. Give a `body` (local content) OR an `external` locator (a URI/ref into a system an MCP server fronts). Reusing an existing `id` saves a NEW immutable version. Returns the handle (id@vN) — pass it in delegate_task's inputArtifacts to hand it off.",
       inputSchema: z.object({
@@ -101,7 +108,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("read_artifact"))
+  if (has("read_artifact"))
     set.read_artifact = tool({
       description: "Fetch an artifact by handle ('id' for the latest version, or 'id@vN'). Returns metadata + summary by DEFAULT (cheap — keeps context thin). Pass includeBody:true to pull the body, which is size-capped and truncated with a marker; never dump a whole large artifact into context.",
       inputSchema: z.object({
@@ -134,7 +141,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("list_artifacts"))
+  if (has("list_artifacts"))
     set.list_artifacts = tool({
       description: "Discover artifacts in the shared store (the latest version of each). Filter by producer (agent id), type (free-form tag), role (output|input|resource), or q (substring over id/title/summary). Returns handles + summaries — read one with read_artifact.",
       inputSchema: z.object({
@@ -152,7 +159,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       }),
     });
 
-  if (agent.tools.includes("annotate_artifact"))
+  if (has("annotate_artifact"))
     set.annotate_artifact = tool({
       description: "Leave feedback ON an artifact version (by handle 'id' for the latest, or 'id@vN'). An OPEN annotation becomes the input to a REVISION run: when the artifact is later handed to an agent by reference, your feedback rides along, that agent reads the artifact, addresses your points, and saves a NEW version. Use this to request changes, flag a problem, or sign off (kind:'approval'). Your identity is recorded as the author. Pin your feedback to the exact version you reviewed.",
       inputSchema: z.object({
@@ -171,7 +178,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("list_annotations"))
+  if (has("list_annotations"))
     set.list_annotations = tool({
       description: "List the feedback/annotations on an artifact (by handle 'id' for all versions, or 'id@vN' for one). Call this BEFORE you revise an artifact so you address every open point. Returns each annotation's author, body, kind, verdict (if it's a verification), and status (open/addressed/dismissed).",
       inputSchema: z.object({
@@ -186,7 +193,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       }),
     });
 
-  if (agent.tools.includes("create_agent"))
+  if (has("create_agent"))
     set.create_agent = tool({
       description: "Propose a NEW worker agent for the captain to approve. Give it a clear id, a one-line role, and an identity that defines its point of view.",
       inputSchema: z.object({
@@ -213,10 +220,12 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("delegate_task"))
+  if (has("delegate_task"))
     set.delegate_task = tool({
       description:
-        "Delegate a goal to another agent by id. Hand work over BY REFERENCE via `inputArtifacts` " +
+        "Delegate a goal to another agent by id, or to a TEAM by its id — a team routes the goal to its " +
+        "lead, or to whichever member best fits the goal. Prefer addressing the team when one covers the " +
+        "work; you are not expected to know who sits on it. Hand work over BY REFERENCE via `inputArtifacts` " +
         "(artifact handles the child reads with read_artifact) rather than pasting content into `context`; " +
         "you get back the child's output artifact handles + a short summary — not its full text. " +
         "Optionally pass `criteria` — a plain-language contract for what 'done' means (e.g. \"a markdown " +
@@ -225,7 +234,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         "and a still-failing result comes back with its failed verdict attached so you can see the caveat. " +
         "Set criteria whenever the output has concrete requirements you'd otherwise have to re-check by hand.",
       inputSchema: z.object({
-        to: z.string(),
+        to: z.string().describe("an agent id, or a team id (ids share one namespace, so a bare name is unambiguous)"),
         goal: z.string(),
         context: z.string().optional(),
         criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
@@ -245,8 +254,18 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           ctx.notes.push(`delegate refused: ${budgetMsg()}`);
           return { error: budgetMsg() };
         }
-        const guard = ctx.delegationGuard(to);
+        // Plan 19: `to` may be a team. Resolve it to the agent that will actually run BEFORE any guard
+        // fires, so the cycle/depth checks apply to that agent rather than to a team id that is never
+        // in the ancestry chain. Everything downstream — runChild, the checker, the retry — sees a
+        // plain agent id and does not know a team was involved.
+        const guard = ctx.resolveDelegation(to, goal);
         if (!guard.ok) { ctx.notes.push(`delegate refused: ${guard.error}`); return { error: guard.error }; }
+        const target = guard.agentId;
+        if (guard.note) {
+          // Never a silent pick: rankAgents is a keyword match and will sometimes choose badly.
+          ctx.notes.push(guard.note);
+          ctx.emit?.({ note: guard.note });
+        }
 
         // resolve input handles; drop (and note) any that don't exist rather than passing a dead ref.
         const resolved: string[] = [], dropped: string[] = [];
@@ -256,7 +275,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         // Spawn one child run (initial OR the verification retry). Both get the SAME input handles BY
         // REFERENCE, and each spawn folds its spend + produced handles into this run's aggregate/graph.
         const spawn = async (childContext?: string) => {
-          const child = await ctx.runChild({ to, goal, context: childContext, criteria, inputArtifacts: resolved, callId: spawnCallId });
+          const child = await ctx.runChild({ to: target, goal, context: childContext, criteria, inputArtifacts: resolved, callId: spawnCallId });
           ctx.delegatedOut.push(child.runId);
           ctx.childTraces.push(child.trace);
           ctx.outputArtifacts.push(...child.trace.artifacts); // hand-off graph: handles the child produced
@@ -290,7 +309,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
 
           // No criteria ⇒ no check ⇒ today's trust-everything behavior, zero extra cost.
           // Parent context gets handles + a summary, NOT the child's full body (the pollution vector).
-          if (!criteria) return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
+          if (!criteria) return { to: target, team: guard.team, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
           const criteriaText = criteria; // narrowed to string past the guard (kept for the surface closure)
 
           // Plan 06 Phase 3 — surface a FAILED verdict two ways, then hand the caveat to the parent:
@@ -331,13 +350,13 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
                 }
               }
               try {
-                const { proposed } = recordVerificationFailure(ctx.ws, { targetAgent: to, criteria: criteriaText, runId: c.runId, reasons: v.reasons });
-                if (proposed) ctx.emit?.({ note: `⚑ ${to} keeps failing this check — proposed a coaching note (${proposed.id}) for your approval` });
+                const { proposed } = recordVerificationFailure(ctx.ws, { targetAgent: target, criteria: criteriaText, runId: c.runId, reasons: v.reasons });
+                if (proposed) ctx.emit?.({ note: `⚑ ${target} keeps failing this check — proposed a coaching note (${proposed.id}) for your approval` });
               } catch (e) {
                 ctx.notes.push(`coaching proposal skipped: ${e instanceof Error ? e.message : String(e)}`);
               }
             }
-            return { to, runId: c.runId, outputArtifacts: c.trace.artifacts, summary: c.text, verification: v };
+            return { to: target, team: guard.team, runId: c.runId, outputArtifacts: c.trace.artifacts, summary: c.text, verification: v };
           };
 
           // Independent checker call, BEFORE the result reaches the parent's context. Its spend is
@@ -349,15 +368,18 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           let verdict = first.verdict;
 
           if (!verdict.pass) {
-            ctx.emit?.({ note: `↻ ${to} output failed verification: ${verdict.reasons.join("; ")} — retrying once` });
+            ctx.emit?.({ note: `↻ ${target} output failed verification: ${verdict.reasons.join("; ")} — retrying once` });
             // Exactly ONE bounded retry — consumes a work item like any delegation.
             ctx.workItems.n += 1;
             const overBudget = ctx.workItems.n > agent.budgets.maxWorkItemsPerRequest;
-            const retryGuard = ctx.delegationGuard(to);
+            // Re-guard against the RESOLVED agent, never the original `to`. Passing a team id here would
+            // re-run the ranker, and a leadless team could hand the retry — carrying feedback about the
+            // FIRST agent's mistakes — to a different member entirely.
+            const retryGuard = ctx.resolveDelegation(target, goal);
             if (overBudget || !retryGuard.ok) {
               const why = overBudget ? budgetMsg() : !retryGuard.ok ? retryGuard.error : "retry blocked";
               ctx.notes.push(`verification retry refused: ${why}`);
-              ctx.emit?.({ note: `⚠ ${to} result surfaced WITHOUT a passing verification (retry blocked: ${why})` });
+              ctx.emit?.({ note: `⚠ ${target} result surfaced WITHOUT a passing verification (retry blocked: ${why})` });
               return surface(verdict, child);
             }
             const feedback = "Your previous attempt did NOT meet the acceptance criteria. Fix these before returning:\n" +
@@ -371,8 +393,8 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
             ctx.verifications.push({ criteria, verdict: second.verdict, runId: retry.runId, retried: true, tokens: second.tokens, costUsd: second.costUsd, costNote: second.costNote });
             child = retry;
             verdict = second.verdict;
-            if (verdict.pass) ctx.emit?.({ note: `✓ ${to} passed verification after one retry` });
-            else ctx.emit?.({ note: `⚠ ${to} still failed verification after retry: ${verdict.reasons.join("; ")} — surfacing result with the failed verdict` });
+            if (verdict.pass) ctx.emit?.({ note: `✓ ${target} passed verification after one retry` });
+            else ctx.emit?.({ note: `⚠ ${target} still failed verification after retry: ${verdict.reasons.join("; ")} — surfacing result with the failed verdict` });
           }
 
           // Criteria was set: always attach the verdict so the parent (and captain) sees the caveat.
@@ -390,7 +412,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   // check_task / await_task follow up. Results come back BY REFERENCE (summary + handles), never the
   // inlined payload. Requires a host scheduler (the REPL wires ctx.dispatchTask); when unwired the
   // tool cleanly reports it (a headless/unit context has no background runner).
-  if (agent.tools.includes("dispatch_task"))
+  if (has("dispatch_task"))
     set.dispatch_task = tool({
       description:
         "Kick a goal off to another agent in the BACKGROUND and keep working — fire-and-forget. Returns " +
@@ -398,9 +420,10 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         "until the child returns) when you don't need the result right now — e.g. long research you'll " +
         "check on later. Follow up with check_task(taskId) for status or await_task(taskId) to block on " +
         "it when you finally need it. Results come back BY REFERENCE (a summary + artifact handles), never " +
-        "inlined. Hand inputs over with `inputArtifacts` and set `criteria` exactly as for delegate_task.",
+        "inlined. Hand inputs over with `inputArtifacts` and set `criteria` exactly as for delegate_task. " +
+        "`to` may be an agent id or a team id, resolved the same way delegate_task resolves it.",
       inputSchema: z.object({
-        to: z.string(),
+        to: z.string().describe("an agent id, or a team id (ids share one namespace)"),
         goal: z.string(),
         context: z.string().optional(),
         criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
@@ -415,20 +438,25 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           ctx.notes.push(`dispatch refused: ${budgetMsg()}`);
           return { error: budgetMsg() };
         }
-        const guard = ctx.delegationGuard(to);
+        // Plan 19: a team is resolved to a concrete agent HERE, on the dispatching turn — not later when
+        // the background run starts. The task record then names the agent that actually ran, and a
+        // membership change between dispatch and settle cannot silently move the work.
+        const guard = ctx.resolveDelegation(to, goal);
         if (!guard.ok) { ctx.notes.push(`dispatch refused: ${guard.error}`); return { error: guard.error }; }
+        const target = guard.agentId;
+        if (guard.note) { ctx.notes.push(guard.note); ctx.emit?.({ note: guard.note }); }
         // Resolve input handles up front; drop (and note) dead refs rather than dispatch a broken brief.
         const resolved: string[] = [], dropped: string[] = [];
         for (const h of inputArtifacts ?? []) (readArtifact(ctx.ws, h) ? resolved : dropped).push(h);
         if (dropped.length) ctx.notes.push(`dispatch: dropped unknown input artifact(s) ${dropped.join(", ")}`);
-        const r = await ctx.dispatchTask({ to, goal, context, criteria, inputArtifacts: resolved });
+        const r = await ctx.dispatchTask({ to: target, goal, context, criteria, inputArtifacts: resolved });
         if ("error" in r) { ctx.notes.push(`dispatch failed: ${r.error}`); return r; }
-        ctx.notes.push(`dispatched ${r.taskId} → ${to}`);
-        return { taskId: r.taskId, status: "queued", to, note: `running in background — check_task("${r.taskId}") for status, or await_task to block on it` };
+        ctx.notes.push(`dispatched ${r.taskId} → ${target}`);
+        return { taskId: r.taskId, status: "queued", to: target, team: guard.team, note: `running in background — check_task("${r.taskId}") for status, or await_task to block on it` };
       },
     });
 
-  if (agent.tools.includes("check_task"))
+  if (has("check_task"))
     set.check_task = tool({
       description: "Check a background task (from dispatch_task) WITHOUT blocking: returns its status (queued/running/completed/failed/interrupted/cancelled) plus a short summary and result handle when done. Reference-only — never the full payload; pull artifacts with read_artifact.",
       inputSchema: z.object({ taskId: z.string() }),
@@ -439,7 +467,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("await_task"))
+  if (has("await_task"))
     set.await_task = tool({
       description: "BLOCK until a background task settles (bounded by a timeout), then return its final status + summary + result handle. Use when you dispatched work earlier and now genuinely need it before continuing. Reference-only — never the inlined payload.",
       inputSchema: z.object({
@@ -457,14 +485,14 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("find_agents"))
+  if (has("find_agents"))
     set.find_agents = tool({
       description: "Search the squad for agents whose role matches a capability. Returns top matches.",
       inputSchema: z.object({ query: z.string(), k: z.number().int().positive().max(20).default(8) }),
       execute: async ({ query, k }) => ({ matches: ctx.findAgents(query, k) }),
     });
 
-  if (agent.tools.includes("read_url"))
+  if (has("read_url"))
     set.read_url = tool({
       description: "Fetch a web page (e.g. an MCP server's setup docs) and return it as clean markdown. Requires FIRECRAWL_API_KEY in the environment.",
       inputSchema: z.object({ url: z.string().url() }),
@@ -474,7 +502,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (mcp && agent.tools.includes("add_mcp_server"))
+  if (mcp && has("add_mcp_server"))
     set.add_mcp_server = tool({
       description: "Connect a NEW MCP server for the captain to approve. Provide a `url` for a remote/hosted server (with auth:'oauth' or headers), or a `command`/`args` for a local stdio server. Put secrets as ${ENV_VAR} refs (ask_human for the var name first). Returns the connection status + tool count; on error, fix the config and call again.",
       inputSchema: z.object({
@@ -504,7 +532,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("ask_human"))
+  if (has("ask_human"))
     set.ask_human = tool({
       description: "Ask the human captain a clarifying question with 2-4 options when intent is ambiguous. The captain picks an option or types their own answer; you receive { answer } and continue.",
       inputSchema: z.object({
@@ -517,7 +545,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("remember"))
+  if (has("remember"))
     set.remember = tool({
       description: "Save a durable fact / decision / entity to the squad's shared knowledgebase, optionally linking it to existing nodes with typed edges (rel e.g. relates_to, depends_on, contradicts). Returns the node id — recall first to get ids to link to.",
       inputSchema: z.object({
@@ -531,7 +559,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         const requested = edges ?? [];
         const valid = requested.filter((e) => nodeExists(ctx.db, e.to)); // drop dangling edge targets
         const node = KbNode.parse({
-          id: mkKbId(), title, content, kind, summary, scope: "deck",
+          id: mkKbId(), title, content, kind, summary, scope: "squad",
           source: ctx.ingestSource ?? `${ctx.agentId}:${ctx.runId}`, edges: valid, created: new Date().toISOString(),
         });
         writeNode(ctx.ws, ctx.db, node);
@@ -544,7 +572,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("recall"))
+  if (has("recall"))
     set.recall = tool({
       description: "Search the squad's shared knowledgebase and its typed-edge graph. Returns matching nodes plus their linked neighbors — by meaning (semantic when available) and by relationship.",
       inputSchema: z.object({
@@ -559,7 +587,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("read_source"))
+  if (has("read_source"))
     set.read_source = tool({
       description: "Read an admin-authored source document from kb/sources/ so you can extract entities from it. `path` is like \"sources/architecture.md\" or \"architecture.md\".",
       inputSchema: z.object({ path: z.string() }),
@@ -573,7 +601,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("forget"))
+  if (has("forget"))
     set.forget = tool({
       description: "Prune the knowledgebase: cascade-delete nodes matching a filter, plus their edges and vectors. Filter by `kind` (e.g. decision), `sourcePrefix` (e.g. \"worker-x:\" for one assistant's memory, or \"sources/foo.md@\" for a doc), and/or explicit `ids`. At least one clause is required.",
       inputSchema: z.object({
@@ -589,7 +617,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("reindex_knowledge"))
+  if (has("reindex_knowledge"))
     set.reindex_knowledge = tool({
       description: "Rebuild the knowledge graph index from the canonical node files and refresh semantic vectors. Use after bulk hand-edits.",
       inputSchema: z.object({}),
@@ -600,7 +628,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("propose_skill"))
+  if (has("propose_skill"))
     set.propose_skill = tool({
       description: "Propose a reusable skill (a reviewed step-by-step procedure for a repeatable operation) for the captain to approve. On approval it's saved and every agent can use it via use_skill.",
       inputSchema: z.object({
@@ -620,7 +648,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("run_command"))
+  if (has("run_command"))
     set.run_command = tool({
       description: "Run a shell command in the workspace. It runs in a restricted SANDBOX first (no network; writes confined to the workspace) — a command the sandbox completes returns straight away. The safety guard clears benign commands; anything it flags — OR any command proposed after UNTRUSTED content (a fetched web page or an MCP tool result) has entered this run — needs the captain's approval first. A command the sandbox can't complete escalates to a captain-approved unsandboxed run. Returns { exitCode, stdout, stderr, sandbox }.",
       inputSchema: z.object({ command: z.string(), cwd: z.string().optional().describe("working directory (defaults to the workspace); a cwd outside the workspace can't be sandbox-confined, so it needs the captain's approval") }),
@@ -684,7 +712,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   // Skills are a universal agent capability (like the MCP-tools grant): every agent can discover and
   // load reviewed procedures. Not gated by agent.tools; built-ins still win over MCP tools below.
   set.find_skills = tool({
-    description: "Search the deck's reusable skills (reviewed procedures for repeatable operations) by what you're trying to do. Returns matching skill names + when to use them; call use_skill to load the full procedure.",
+    description: "Search the squad's reusable skills (reviewed procedures for repeatable operations) by what you're trying to do. Returns matching skill names + when to use them; call use_skill to load the full procedure.",
     inputSchema: z.object({ query: z.string(), k: z.number().int().positive().max(20).default(6) }),
     execute: async ({ query, k }) => ({ matches: rankSkills(getActiveSkills(ctx.db), query, k).map((h) => ({ id: h.id, name: h.name, description: h.description })) }),
   });
@@ -707,7 +735,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   // can't shadow a privileged built-in (e.g. a server tool namespacing to create_agent).
   const mcpToolNames = new Set<string>();
   if (mcp)
-    for (const ref of agent.tools) {
+    for (const ref of granted) {
       if (!ref.startsWith("mcp:")) continue;
       for (const [k, v] of Object.entries(mcp.toolsForRef(ref.slice("mcp:".length))))
         if (!(k in set)) { set[k] = v; mcpToolNames.add(k); }

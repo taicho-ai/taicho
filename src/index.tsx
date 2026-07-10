@@ -4,7 +4,8 @@ import { App } from "./ui/App";
 import { ensureWorkspace } from "./store/files";
 import { openDb } from "./store/db";
 import { seedRoot, seedLibrarian, reindex, loadIndex, reconcileWorkerTools, LIBRARIAN_ID } from "./store/roster";
-import { reindexKnowledge } from "./store/knowledge";
+import { reindexKnowledge, reconcileKbScope } from "./store/knowledge";
+import { validateTeams } from "./store/teams";
 import { diffSources } from "./store/sources";
 import { createEmbedder } from "./core/embed";
 import { ensureEmbedSpace } from "./store/migrate";
@@ -19,7 +20,7 @@ import { createCodexProvider } from "./core/providers/openai-codex";
 import { OPENAI_CODEX_AUTH } from "./core/auth/constants";
 import { createMcpManager, type McpManager } from "./core/mcp/manager";
 import { readMcpStore } from "./store/mcp-store";
-import { makeDeckLedger, hasCeilings } from "./store/deck-budget";
+import { makeSpendLedger, hasAnyCeilings } from "./store/spend-ledger";
 import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
 import { reindexTasks, reconcileTasks } from "./store/task-state";
@@ -57,12 +58,14 @@ if (cli.command?.kind === "schedule" && cli.command.args[0] !== "run") {
 await seedRoot(ws, config.defaults);
 await seedLibrarian(ws, config.defaults);
 // Plan 14 T3: rescue any worker born toolless (`tools: []`) — grant it the default artifact baseline so
-// a live deck (root/2026-07-04-run6's 9 empty-tools agents) becomes usable without hand-editing each file.
+// a live squad (root/2026-07-04-run6's 9 empty-tools agents) becomes usable without hand-editing each file.
 const backfilledWorkers = await reconcileWorkerTools(ws);
 await seedSkills(ws);
 const db = openDb(ws);
 const idx = loadIndex(db);
 if (idx.length === 0 || !idx.some((r) => r.id === LIBRARIAN_ID)) await reindex(ws, db);
+// Plan 19 Ph1b: rewrite any kb node file still saying `scope: deck` BEFORE the reindex below reads them.
+reconcileKbScope(ws, db);
 reindexKnowledge(ws, db); // rebuild the KB graph index from kb/nodes/*.md (files are canon)
 reindexSkills(ws, db); // rebuild the skills index from skills/*.md (files are canon)
 const kbDrift = diffSources(ws, db);
@@ -71,7 +74,17 @@ const kbDrift = diffSources(ws, db);
 // auto-resume is deferred). The captain can inspect/cancel via /tasks.
 reindexTasks(ws, db);
 const interruptedTasks = reconcileTasks(ws, db);
+// Plan 19: a team whose `lead` is missing, or sits on a DIFFERENT team, would route work out of the
+// team it is supposed to run. Report it — one bad team.md must not block boot, and the fix is an edit.
+const teamProblems = validateTeams(ws, db);
+// Plan 19: an agent's team, read from the derived registry index. Injected into the model resolver so
+// it can walk agent → team → defaults without importing the DB. A prepared statement: resolveModel runs
+// once per run, and per delegated child.
+const teamOfStmt = db.query<{ team: string | null }, [string]>("SELECT team FROM registry WHERE id = ?");
+const teamOf = (agentId: string): string | undefined => teamOfStmt.get(agentId)?.team ?? undefined;
 const notices: string[] = [];
+if (teamProblems.length)
+  notices.push(`teams: ${teamProblems.map((p) => `${p.team} (${p.problem})`).join("; ")} — /teams to review`);
 if (kbDrift.changed.length || kbDrift.deleted.length)
   notices.push(`kb: ${kbDrift.changed.length} changed / ${kbDrift.deleted.length} removed source(s) — run /kb sync`);
 if (interruptedTasks.length)
@@ -93,7 +106,7 @@ const mcp: McpManager | undefined = config.mcp?.enabled === false
   ? undefined
   : await createMcpManager({
       ws,
-      // Firecrawl is a built-in default MCP server on every deck (scrape/crawl/search/map/extract)
+      // Firecrawl is a built-in default MCP server on every squad (scrape/crawl/search/map/extract)
       // whenever FIRECRAWL_API_KEY is set — lowest precedence, so a workspace's store/yaml can override
       // or replace it. Then layer the /mcp-added store, then taicho.yaml (yaml wins on a name clash).
       servers: {
@@ -110,10 +123,15 @@ const mcp: McpManager | undefined = config.mcp?.enabled === false
 // foreground process group. Async cleanup can't run in a process "exit" handler, so we don't use one.)
 if (mcp) process.on("SIGTERM", () => { void mcp.closeAll().finally(() => process.exit(0)); });
 
-// Plan 09: one deck-wide spend ledger, shared by every run this session. DB-backed rolling counters
+// Plan 09: one squad-wide spend ledger, shared by every run this session. DB-backed rolling counters
 // keyed by UTC day / ISO week persist across sessions. Built only when a ceiling is configured, so
 // with no `budgets` in taicho.yaml the loop does zero extra DB work (pre-Plan-09 behavior).
-const deckLedger = hasCeilings(config.budgets) ? makeDeckLedger(db, config.budgets) : undefined;
+// Plan 19: the same ledger meters the squad ceiling and every configured team ceiling.
+const ceilingConfig = {
+  squad: config.budgets,
+  teams: Object.fromEntries(Object.entries(config.teams ?? {}).map(([id, t]) => [id, t.ceilings])),
+};
+const spendLedger = hasAnyCeilings(ceilingConfig) ? makeSpendLedger(db, ceilingConfig) : undefined;
 
 // Plan 16: OpenTelemetry. Enabled only when an OTLP endpoint is configured (OTEL_EXPORTER_OTLP_ENDPOINT)
 // — otherwise undefined and every seam skips it (zero overhead). Shared by every run this session. Must
@@ -156,7 +174,7 @@ function buildFromAuth(src: AuthSource): BuiltAuth {
     const cfg = { provider: src.provider, model: config.defaults?.model ?? src.model };
     return {
       model: buildModel(cfg, modelRequestTimeoutMs),
-      resolveModel: createModelResolver({ config, fallback: cfg, timeoutMs: modelRequestTimeoutMs }).resolveModel,
+      resolveModel: createModelResolver({ config, fallback: cfg, timeoutMs: modelRequestTimeoutMs, teamOf }).resolveModel,
       priceUsd: pricerFor(cfg.model),
     };
   }
@@ -169,7 +187,9 @@ function buildFromAuth(src: AuthSource): BuiltAuth {
     // Subscription calls are not metered in USD; mark subscription:true so the run trace reports
     // "subscription" instead of a (meaningless) dollar cost.
     const pick = (id: string) => {
-      const m = config.agents?.[id]?.model ?? config.defaults?.model ?? OPENAI_CODEX_AUTH.defaultModelId;
+      // agent → team → defaults, the same walk createModelResolver makes for the env-key providers.
+      const t = teamOf(id);
+      const m = config.agents?.[id]?.model ?? (t ? config.teams?.[t]?.model : undefined) ?? config.defaults?.model ?? OPENAI_CODEX_AUTH.defaultModelId;
       return { model: codex(m), modelId: m, subscription: true };
     };
     return { model: codex(config.defaults?.model ?? OPENAI_CODEX_AUTH.defaultModelId), resolveModel: pick };
@@ -202,7 +222,7 @@ if (cli.command?.kind === "run") {
       ws, db, model: initial.model,
       resolveModel: initial.resolveModel, priceUsd: initial.priceUsd,
       configDefaults: config.defaults, mcp, embed: embedder?.embed,
-      deckLedger, telemetry,
+      spendLedger, telemetry,
     },
     { goal: cli.command.goal, agent: cli.command.agent, approve: cli.command.approve },
   );
@@ -215,7 +235,7 @@ if (cli.command?.kind === "run") {
 // scheduled run uses — the schedule's own approval mode (default reject) applies (no captain, so no
 // unsupervised privileged exec). add/list/remove already exited above; only `run` reaches here.
 if (cli.command?.kind === "schedule") {
-  const hd = { ws, db, model: initial.model, resolveModel: initial.resolveModel, priceUsd: initial.priceUsd, configDefaults: config.defaults, mcp, embed: embedder?.embed, deckLedger, telemetry };
+  const hd = { ws, db, model: initial.model, resolveModel: initial.resolveModel, priceUsd: initial.priceUsd, configDefaults: config.defaults, mcp, embed: embedder?.embed, spendLedger, telemetry };
   const r = await runScheduleCli(
     // `schedule run` is the same UNATTENDED path a live scheduled fire uses — mark it schedule:<id> so it
     // is EXCLUDED from the target agent's conversation ledger + boot-replay cache (still gets run evidence).
@@ -242,7 +262,7 @@ render(
     mcp={mcp}
     mcpYamlServers={Object.keys(config.mcp?.servers ?? {})}
     embed={embedder?.embed}
-    deckLedger={deckLedger}
+    spendLedger={spendLedger}
     telemetry={telemetry}
     startupNotice={startupNotice}
     {...initial}

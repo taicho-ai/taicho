@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,9 +47,74 @@ test("v5 creates the tasks index table", () => {
   expect(() => db.query("SELECT id, agent, goal, status, kind, root_run_id, result_ref, summary, created, updated FROM tasks").all()).not.toThrow();
 });
 
-test("v6 creates the deck_spend counter table and bumps SCHEMA_VERSION to 6", () => {
+test("a fresh DB lands at the current schema: squad_spend (v7) and registry.team (v8)", () => {
   const db = openDb(ws());
-  expect(SCHEMA_VERSION).toBe(6);
-  expect(getMeta(db, "schema_version")).toBe("6");
-  expect(() => db.query("SELECT period_kind, period_key, tokens, cost_usd, updated FROM deck_spend").all()).not.toThrow();
+  expect(SCHEMA_VERSION).toBe(9);
+  expect(getMeta(db, "schema_version")).toBe("9");
+  expect(() => db.query("SELECT scope, period_kind, period_key, tokens, cost_usd, updated FROM squad_spend").all()).not.toThrow();
+  expect(() => db.query("SELECT * FROM deck_spend").all()).toThrow(); // v6's name is gone
+  expect(() => db.query("SELECT id, role, is_root, team FROM registry").all()).not.toThrow();
+});
+
+/** Rewind a current DB to look exactly like one written by a pre-Plan-19 taicho: the counter table under
+ *  its old name, kb rows scoped 'deck', a registry with NO team column, schema_version pinned at 6.
+ *
+ *  This is the ONLY shape that exercises v7/v8. A fresh openDb() has no legacy rows and already carries
+ *  registry.team from the baseline DDL, so a test written against it would pass while every existing
+ *  workspace broke on upgrade. */
+function rewindToV6(db: ReturnType<typeof openDb>) {
+  // Rebuild the counter as v6 actually wrote it: named deck_spend, and with NO scope column. Renaming
+  // the current table would keep v9's shape and quietly under-test the rebuild.
+  db.exec("DROP TABLE squad_spend");
+  db.exec(`
+    CREATE TABLE deck_spend (
+      period_kind TEXT NOT NULL,
+      period_key  TEXT NOT NULL,
+      tokens      INTEGER NOT NULL DEFAULT 0,
+      cost_usd    REAL NOT NULL DEFAULT 0,
+      updated     INTEGER DEFAULT (unixepoch()),
+      PRIMARY KEY (period_kind, period_key)
+    );
+  `);
+  db.query("INSERT INTO deck_spend (period_kind, period_key, tokens, cost_usd) VALUES ('day', '2026-07-01', 4200, 1.5)").run();
+  db.query("INSERT INTO kb_nodes (id, kind, title, content, scope) VALUES ('kb_legacy', 'fact', 'T', 'C', 'deck')").run();
+  // Rebuild registry as v1's baseline wrote it — three columns, no `team`.
+  db.exec("DROP INDEX IF EXISTS registry_team");
+  db.exec("DROP TABLE registry");
+  db.exec("CREATE TABLE registry (id TEXT PRIMARY KEY, role TEXT NOT NULL, is_root INTEGER DEFAULT 0)");
+  db.query("INSERT INTO registry (id, role, is_root) VALUES ('root', 'Orchestrator', 1)").run();
+  db.query("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run();
+}
+
+test("v7-v9 migrate a legacy v6 DB: kb scope, the spend table, and the registry.team column", () => {
+  const db = openDb(ws());
+  rewindToV6(db);
+  expect(() => db.query("SELECT team FROM registry").all()).toThrow(); // precondition: genuinely absent
+
+  migrate(db);
+
+  expect(getMeta(db, "schema_version")).toBe("9");
+  // v7 — the scope value moved, and the row survived.
+  expect((db.query("SELECT scope FROM kb_nodes WHERE id = 'kb_legacy'").get() as { scope: string }).scope).toBe("squad");
+  // v7 renamed the table, v9 rebuilt it to widen the primary key — through BOTH, the counter carried
+  // forward and landed under the 'squad' scope. Silently resetting a running weekly total would be rude.
+  const row = db.query("SELECT scope, tokens, cost_usd FROM squad_spend WHERE period_key = '2026-07-01'").get() as { scope: string; tokens: number; cost_usd: number };
+  expect(row.scope).toBe("squad");
+  expect(row.tokens).toBe(4200);
+  expect(row.cost_usd).toBeCloseTo(1.5, 6);
+  expect(() => db.query("SELECT * FROM deck_spend").all()).toThrow();
+  // v8 — the ALTER ran, and the existing agent row survived it.
+  expect(() => db.query("SELECT team FROM registry").all()).not.toThrow();
+  expect((db.query("SELECT team FROM registry WHERE id = 'root'").get() as { team: string | null }).team).toBeNull();
+
+  migrate(db); // idempotent — a second boot must re-run neither the rename, the ALTER, nor the rebuild
+  expect(getMeta(db, "schema_version")).toBe("9");
+});
+
+test("migrate() is safe standalone on a bare DB with no baseline tables (registry absent)", () => {
+  // spend-ledger.test.ts drives migrate() over a raw in-memory Database. A migration that assumes a
+  // baseline table exists would throw there — and v8 touches `registry`, which openDb owns.
+  const db = new Database(":memory:");
+  expect(() => migrate(db)).not.toThrow();
+  expect(getMeta(db, "schema_version")).toBe(String(SCHEMA_VERSION));
 });

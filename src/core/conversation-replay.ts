@@ -1,7 +1,7 @@
 /** Plan 05 Phase 3 — cross-turn (boot-replay) compaction, unblocked by Plan 01 Phase 5's seam.
  *
  *  Plan 05 Phase 2 bounds context growth WITHIN a run; this bounds it ACROSS turns. `thread.jsonl`
- *  replayed EVERY completed turn at boot, forever — a long-lived deck accumulated conversation
+ *  replayed EVERY completed turn at boot, forever — a long-lived squad accumulated conversation
  *  history until the assembled prompt no longer fit. Boot replay now becomes a rolling conversation
  *  SUMMARY (older turns, folded deterministically) + the recent-K turns kept VERBATIM.
  *

@@ -12,7 +12,7 @@ import { seedRoot, reindex, loadIndex, loadAgent, createAgent, serializeAgent } 
 import { AgentDef } from "../schemas/agent";
 import { makeDeps, executeRun } from "./run";
 import { runChecker } from "./verification";
-import { makeDeckLedger, readDeckSpend } from "../store/deck-budget";
+import { makeSpendLedger, readSpendTotals } from "../store/spend-ledger";
 import { rollupCosts } from "./costs";
 import { readTrace } from "../store/trace";
 import { writePolicy, listPolicies } from "../store/policy";
@@ -23,6 +23,8 @@ import { writeSkill } from "../store/skills";
 import { Skill } from "../schemas/skill";
 import { saveArtifact, readArtifact } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
+import { createTeam, loadTeam } from "../store/teams";
+import { toolsForAgent } from "./tools";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -70,7 +72,7 @@ test("worker run writes an immutable artifact and a completed trace", async () =
   expect(existsSync(join(ws, "runs", "writer", `${res.runId.split("/")[1]}.json`))).toBe(true);
 });
 
-test("auto-injects deck knowledge for an agent with `recall` and records it in the trace ledger", async () => {
+test("auto-injects squad knowledge for an agent with `recall` and records it in the trace ledger", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "seeker", role: "seeks", identity: "You seek.", tools: ["recall"] }, "root");
   writeNode(ws, db, KbNode.parse({ id: "kb_seed", title: "Deploy target", content: "we deploy to fly.io", created: new Date().toISOString() }));
@@ -846,19 +848,19 @@ test("aggregate folds checker spend: with criteria it equals own loop + child ru
   expect(res.trace.aggregate!.costUsd).toBeCloseTo(res.trace.costUsd! + childCost + verifierCost, 6);
 });
 
-test("Plan 09: a criteria delegation commits verifier spend to the deck ceiling AND /costs surfaces it exactly once", async () => {
+test("Plan 09: a criteria delegation commits verifier spend to the squad ceiling AND /costs surfaces it exactly once", async () => {
   const { ws, db } = await boot();
   bossAndWorker(ws, db);
-  // boss delegates WITH criteria ⇒ an independent checker call runs on the shared deck ledger.
+  // boss delegates WITH criteria ⇒ an independent checker call runs on the shared squad ledger.
   const model = new MockLanguageModelV3({ doGenerate: mockValues(
     call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // boss iter1
     text("attempt one, mentions Y"),                     // worker (1 call)
     text('{"pass": true, "reasons": []}'),               // checker (1 independent call)
     text("boss done"),                                   // boss final
   ) as any });
-  // A deck ceiling IS configured (ceiling high enough not to block) so the ledger is live and enforced.
-  const deckLedger = makeDeckLedger(db, { dailyTokens: 10_000_000 });
-  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens, deckLedger });
+  // A squad ceiling IS configured (ceiling high enough not to block) so the ledger is live and enforced.
+  const spendLedger = makeSpendLedger(db, { squad: { dailyTokens: 10_000_000 } });
+  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens, spendLedger });
   const boss = await loadAgent(ws, "boss");
   const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
 
@@ -874,17 +876,17 @@ test("Plan 09: a criteria delegation commits verifier spend to the deck ceiling 
   // (1) THE CEILING SEES THE VERIFIER: the deck_spend counter the ceiling reads = boss loop + worker
   // run + verifier call. Before the fix the verifier ran with no ledger, so this would be short by
   // verifierTokens (the under-count the finding flagged) and the daily ceiling could never bound it.
-  const deck = readDeckSpend(db);
-  expect(deck.dayTokens).toBe(res.trace.tokens + workerTrace.tokens + res.trace.verifierTokens);
-  expect(deck.dayCostUsd).toBeCloseTo(res.trace.costUsd! + workerTrace.costUsd! + res.trace.verifierCostUsd, 6);
+  const squad = readSpendTotals(db);
+  expect(squad.dayTokens).toBe(res.trace.tokens + workerTrace.tokens + res.trace.verifierTokens);
+  expect(squad.dayCostUsd).toBeCloseTo(res.trace.costUsd! + workerTrace.costUsd! + res.trace.verifierCostUsd, 6);
 
   // (2) /costs SURFACES IT ONCE: rollup sums each trace's OWN spend (loop + verifier); the verifier
   // writes no child trace, so adding verifierTokens counts it exactly once — never double.
   const rollup = rollupCosts([res.trace, workerTrace]);
   expect(rollup.totals.tokens).toBe(res.trace.tokens + res.trace.verifierTokens + workerTrace.tokens);
-  // parity: /costs and the deck ceiling report the SAME comprehensive number — verifier included, no double-count.
-  expect(rollup.totals.tokens).toBe(deck.dayTokens);
-  expect(rollup.totals.costUsd).toBeCloseTo(deck.dayCostUsd, 6);
+  // parity: /costs and the squad ceiling report the SAME comprehensive number — verifier included, no double-count.
+  expect(rollup.totals.tokens).toBe(squad.dayTokens);
+  expect(rollup.totals.costUsd).toBeCloseTo(squad.dayCostUsd, 6);
 });
 
 test("subscription checker is cost-honest: costUsd is 0 (never fabricated) even with a pricer, tokens still metered so they fold", async () => {
@@ -1210,4 +1212,135 @@ test("recovery: run.ts writes an incremental transcript AND a resume checkpoint 
   expect(cp.runId).toBe(res.runId);
   expect(Array.isArray(cp.messages)).toBe(true);
   expect(cp.iteration).toBeGreaterThan(0);
+});
+
+// --- Plan 19: delegating to a TEAM, end to end through executeRun ---------------------------------
+
+/** Root, a team, and two members. Root delegates to the TEAM id; the engine resolves it to an agent. */
+async function bootTeam(opts: { lead?: string } = {}) {
+  const { ws, db } = await boot();
+  createTeam(ws, { id: "news", charter: "covers breaking stories", lead: opts.lead });
+  await createAgent(ws, db, { id: "reporter", role: "files stories on deadline", identity: "You report.", team: "news" }, "root");
+  await createAgent(ws, db, { id: "factchecker", role: "verifies claims and sources", identity: "You verify.", team: "news" }, "root");
+  await reindex(ws, db);
+  return { ws, db };
+}
+
+test("Plan 19: root delegates to a LEADLESS team and the engine routes to the best-ranked member", async () => {
+  const { ws, db } = await bootTeam();
+  const notes: string[] = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("delegate_task", { to: "news", goal: "verify these claims and sources" }),
+      text("done"),
+      text("checked"), // the child's own reply
+    ) as any,
+  });
+  const deps = makeDeps({ ws, db, model, onStep: (i) => { if (i.note) notes.push(i.note); } });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "check the story" }], triggeredBy: "user" });
+
+  expect(res.trace.outcome).toBe("completed");
+  // the CHILD run is the resolved agent, never the team id — a team has no agent.md to load
+  expect(res.trace.delegatedOut).toHaveLength(1);
+  expect(res.trace.delegatedOut[0]!.startsWith("factchecker/")).toBe(true);
+  // the routing decision is surfaced, never silent
+  expect(notes.some((n) => n.includes("routed news → factchecker"))).toBe(true);
+  expect(res.trace.notes.some((n) => n.includes("routed news → factchecker (ranked"))).toBe(true);
+});
+
+test("Plan 19: a team WITH a lead routes to the lead, consuming one delegation level", async () => {
+  const { ws, db } = await bootTeam({ lead: "reporter" });
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("delegate_task", { to: "news", goal: "verify these claims and sources" }), // ranker would pick factchecker
+      text("done"),
+      text("filed"),
+    ) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  // the lead wins over the ranker — that is the whole point of naming one
+  expect(res.trace.delegatedOut[0]!.startsWith("reporter/")).toBe(true);
+  expect(res.trace.notes.some((n) => n === "routed news → reporter (lead)")).toBe(true);
+});
+
+test("Plan 19: `team:<id>` addresses a team explicitly, and a bare agent id still works", async () => {
+  const { ws, db } = await bootTeam();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("delegate_task", { to: "team:news", goal: "files stories deadline" }),
+      text("done"),
+      text("filed"),
+    ) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut[0]!.startsWith("reporter/")).toBe(true);
+});
+
+test("Plan 19: delegating to an unknown name reports agent-or-team, not just agent", async () => {
+  const { ws, db } = await bootTeam();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "ghost", goal: "x" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut).toHaveLength(0);
+  expect(res.trace.notes.some((n) => n.includes('no agent or team "ghost"'))).toBe(true);
+});
+
+test("Plan 19: a lead delegating to its OWN team is refused, not looped", async () => {
+  const { ws, db } = await bootTeam({ lead: "reporter" });
+  // reporter needs delegate_task + the right to address its team
+  const reporter = await loadAgent(ws, "reporter");
+  reporter.tools = [...reporter.tools, "delegate_task"];
+  reporter.canDelegateTo = ["team:news"];
+  writeFileSync(paths.agentFile(ws, "reporter"), serializeAgent(reporter));
+  await reindex(ws, db);
+
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "news", goal: "x" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const res = await executeRun(deps, { agent: await loadAgent(ws, "reporter"), messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut).toHaveLength(0);
+  expect(res.trace.notes.some((n) => n.includes("a lead cannot address its own team"))).toBe(true);
+});
+
+test("Plan 19: an empty team is refused with an actionable error, not an ENOENT", async () => {
+  const { ws, db } = await boot();
+  createTeam(ws, { id: "ops", charter: "keeps the lights on" }); // no members
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "ops", goal: "x" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut).toHaveLength(0);
+  expect(res.trace.notes.some((n) => n.includes('team "ops" has no members'))).toBe(true);
+});
+
+test("Plan 19 Ph5: a team's tool policy reaches the member's real toolset (deny strips, grant adds)", async () => {
+  const { ws, db } = await boot();
+  // ops denies run_command to its members and grants recall to all of them
+  createTeam(ws, { id: "ops", charter: "keeps the lights on", tools: { deny: ["run_command"], grant: ["recall"] } });
+  await createAgent(ws, db, { id: "sre", role: "operates", identity: "You operate.", tools: ["run_command"], team: "ops" }, "root");
+  await reindex(ws, db);
+
+  // The model tries the denied tool; the SDK never exposes it, so the loop sees an unknown tool.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(text("ok")) as any });
+  const deps = makeDeps({ ws, db, model });
+  const sre = await loadAgent(ws, "sre");
+  const res = await executeRun(deps, { agent: sre, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("completed");
+
+  // Assert on the toolset the engine actually built for this agent.
+  const built = toolsForAgent(sre, {} as never, undefined, loadTeam(ws, "ops")!.tools);
+  expect(Object.keys(built)).not.toContain("run_command"); // agent asked for it; the team said no
+  expect(Object.keys(built)).toContain("recall");          // agent never asked; the team granted it
+  expect(Object.keys(built)).toContain("save_artifact");   // the Plan 14 floor survives untouched
 });

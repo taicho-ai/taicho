@@ -68,7 +68,7 @@ export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]):
 export const LIBRARIAN_ID = "librarian";
 export const LIBRARIAN_TOOLS = ["read_source", "remember", "recall", "forget", "reindex_knowledge"];
 
-const LIBRARIAN_IDENTITY = `You are the librarian of a taicho squad — the keeper of the deck's shared knowledge graph.
+const LIBRARIAN_IDENTITY = `You are the librarian of a taicho squad — the keeper of the squad's shared knowledge graph.
 
 Your job is to turn source documents into a clean graph, and to prune memory on command:
 - To INGEST a source document: read it with read_source, then extract the ENTITIES and RELATIONSHIPS it asserts — not chunks of prose. remember each entity/fact/decision (choose a fitting kind), and link them with typed edges (relates_to, depends_on, part_of, contradicts, derived_from). recall first to reuse existing node ids when linking. Keep each node atomic and self-contained.
@@ -102,10 +102,13 @@ export async function seedLibrarian(ws: string, defaults?: TaichoConfig["default
   await writeFile(file, serializeAgent(lib));
 }
 
-export interface RegistryRow { id: string; role: string; is_root: number; }
+/** `team` is null for an unaffiliated agent (root, librarian, a floating specialist), and OPTIONAL on
+ *  the type so a caller constructing a row by hand — a test fixture, a slash-command stub — need not
+ *  spell out an absence. loadIndex always selects it. */
+export interface RegistryRow { id: string; role: string; is_root: number; team?: string | null; }
 
 export interface NewAgentDraft {
-  id: string; role: string; identity: string; tools?: string[];
+  id: string; role: string; identity: string; tools?: string[]; team?: string;
 }
 
 /** The default worker capability baseline (Plan 01 hand-off-by-reference + Plan 14 lifecycle contract).
@@ -133,7 +136,7 @@ export function workerTools(requested?: string[]): string[] {
 }
 
 export function loadIndex(db: Database): RegistryRow[] {
-  return db.query<RegistryRow, []>("SELECT id, role, is_root FROM registry").all();
+  return db.query<RegistryRow, []>("SELECT id, role, is_root, team FROM registry").all();
 }
 
 export async function loadAgent(ws: string, id: string): Promise<AgentDef> {
@@ -158,8 +161,14 @@ export async function reindex(ws: string, db: Database): Promise<void> {
 export async function createAgent(ws: string, db: Database, draft: NewAgentDraft, _taughtBy: string, defaults?: TaichoConfig["defaults"]): Promise<AgentDef> {
   const file = paths.agentFile(ws, draft.id);
   if (existsSync(file)) throw new Error(`agent "${draft.id}" already exists`);
+  // Plan 19: agent ids and team ids share ONE namespace, so `delegate_task(to: "news")` never has to
+  // guess which kind of thing it is addressing. Checked against the file directly — importing
+  // store/teams.ts here would close a cycle (teams.ts needs DEFAULT_WORKER_TOOLS from this module).
+  if (existsSync(paths.teamFile(ws, draft.id)))
+    throw new Error(`cannot create agent "${draft.id}": a team already has that id (ids are one namespace)`);
+  if (draft.team && !existsSync(paths.teamFile(ws, draft.team))) throw new Error(`no team "${draft.team}"`);
   const agent = AgentDef.parse({
-    id: draft.id, role: draft.role, identity: draft.identity,
+    id: draft.id, role: draft.role, identity: draft.identity, team: draft.team,
     // Lifecycle contract (Plan 14 T1/T2): the DEFAULT_WORKER_TOOLS artifact baseline (produce + hand
     // off + consume by reference + annotate/revise) is ALWAYS merged in. An explicit `draft.tools`
     // list ADDS extras (delegate_task, run_command, an "mcp:<server>" ref, …) — it does NOT replace
@@ -169,7 +178,11 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
     // was born unable to save/read/hand-off artifacts. NO MCP grant by default (Plan 08 least
     // privilege — MCP is opt-in via an explicit "mcp:<server>" ref passed in draft.tools).
     tools: workerTools(draft.tools),
-    canSee: ["*"], canDelegateTo: [], isRoot: false,
+    // Plan 19: a worker created ONTO a team sees its team, not all sixty strangers on the squad — which
+    // is what keeps root's 30-agent roster cliff unreachable. An unaffiliated worker keeps the old
+    // see-everyone default, so nothing changes for a squad that never creates a team.
+    canSee: draft.team ? [`team:${draft.team}`] : ["*"],
+    canDelegateTo: [], isRoot: false,
     created: new Date().toISOString(),
     budgets: defaults?.budgets,
   });
@@ -181,8 +194,8 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
 
 /** Plan 14 T3 backfill — rescue existing workers that were born TOOLLESS. A worker persisted with an
  *  EMPTY tools list ([]) can't save/read/hand-off artifacts; it can only call the unconditional baseline
- *  (find_skills/use_skill) and hand work back as loose text (the root/2026-07-04-run6 deck). On boot we
- *  grant such workers the DEFAULT_WORKER_TOOLS baseline and rewrite their agent.md, so a live deck becomes
+ *  (find_skills/use_skill) and hand work back as loose text (the root/2026-07-04-run6 squad). On boot we
+ *  grant such workers the DEFAULT_WORKER_TOOLS baseline and rewrite their agent.md, so a live squad becomes
  *  usable without hand-editing each file. This is deliberately a CODE-level migration keyed on the empty
  *  list — the definitively-broken signal — NOT on "missing some artifact tool": a NON-empty explicit grant
  *  is a deliberate curation choice (root, librarian, or a hand-restricted worker) and is left untouched.

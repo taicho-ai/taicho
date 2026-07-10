@@ -15,6 +15,7 @@ import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../
 import { gatherConversationArtifacts } from "../core/conversation-artifacts";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
+import { listTeams } from "../store/teams";
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy, approvePolicy } from "../store/policy";
 import { updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
@@ -28,7 +29,7 @@ import type { RunResult, TaskAwaitResult, RunDeps } from "../core/run";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { isStdioServer } from "../store/config";
-import type { DeckLedger } from "../store/deck-budget";
+import type { SpendLedger } from "../store/spend-ledger";
 import type { Telemetry } from "../core/otel";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
@@ -134,7 +135,7 @@ export function App(props: {
   mcpYamlServers?: string[];
   embed?: (text: string) => Promise<Float32Array>;
   startupNotice?: string;
-  deckLedger?: DeckLedger; // Plan 09: deck-wide spend ledger (undefined ⇒ no deck ceilings configured)
+  spendLedger?: SpendLedger; // Plan 09: squad-wide spend ledger (undefined ⇒ no squad ceilings configured)
   telemetry?: Telemetry;   // Plan 16: OpenTelemetry handle (undefined ⇒ OTLP export off)
   viewMode?: ViewMode;     // Plan 10: initial live-view mode (defaults to the persisted pref / `both`)
   terminalSize?: { columns: number; rows: number }; // Plan 10: authoritative size seam (tests/embeds); else live stdout
@@ -361,7 +362,7 @@ export function App(props: {
     say({ kind: "system", text: `  ⏰ schedule ${s.id} firing → ${s.agent}: ${s.goal} (approvals: ${s.approve})` });
     try {
       const res = await runHeadless(
-        { ws: props.ws, db: props.db, model: activeModel, resolveModel, priceUsd, configDefaults: props.configDefaults, mcp: props.mcp, embed: props.embed, deckLedger: props.deckLedger, telemetry: props.telemetry },
+        { ws: props.ws, db: props.db, model: activeModel, resolveModel, priceUsd, configDefaults: props.configDefaults, mcp: props.mcp, embed: props.embed, spendLedger: props.spendLedger, telemetry: props.telemetry },
         // scheduleFireOptions stamps triggeredBy: schedule:<id> — keeps this UNATTENDED fire OUT of the
         // target agent's conversation ledger + boot-replay cache (it still gets full run evidence).
         // Otherwise every cron/interval/watch fire appended a user+assistant pair and replayed as prior
@@ -600,7 +601,7 @@ export function App(props: {
     configDefaults: props.configDefaults,
     mcp: props.mcp,
     embed: props.embed,
-    deckLedger: props.deckLedger, // Plan 09: deck-wide ceilings enforced in the loop, shared by all runs
+    spendLedger: props.spendLedger, // Plan 09: squad-wide ceilings enforced in the loop, shared by all runs
     telemetry: props.telemetry,   // Plan 16: OpenTelemetry export, shared by all runs this session
     dispatch,
     awaitTask,
@@ -813,11 +814,11 @@ export function App(props: {
       setActivity(`teaching ${agentId}…`);
       try {
         // Plan 07: route the distiller through the Codex-safe streaming shape when signed in with a
-        // ChatGPT subscription (a bare non-streaming call 400s). Plan 09: meter it against the deck
+        // ChatGPT subscription (a bare non-streaming call 400s). Plan 09: meter it against the squad
         // ceiling (real model call, but no run trace ⇒ not surfaced in /costs — see coaching/teach.ts).
         const draft = await draftPolicy(activeModel, agentId, correction, {
           codexBackend: authSource.kind === "oauth-openai-codex",
-          deckLedger: props.deckLedger,
+          spendLedger: props.spendLedger,
           priceUsd,
         });
         const decision = await requestApproval({ kind: "propose_coaching", draft });
@@ -1014,7 +1015,11 @@ export function App(props: {
       return;
     }
     runSlashPure(cmd, arg, {
-      roster,
+      // Plan 19: read BOTH fresh. `teams` are captain-owned files and `roster` is the derived index of
+      // agent.md, so an edit + reindex shows up without a restart — and, crucially, /teams' member
+      // counts cannot disagree with the team list they are counted against.
+      roster: loadIndex(props.db),
+      teams: listTeams(props.ws).map((t) => ({ id: t.id, charter: t.charter, lead: t.lead })),
       listTraces: (a?: string) => listTraces(props.ws, a),
       listPolicies: (a: string) => listPolicies(props.ws, a),
       deletePolicy: (a: string, p: string) => deletePolicy(props.ws, a, p),

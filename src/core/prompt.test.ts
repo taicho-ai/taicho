@@ -51,3 +51,82 @@ test("a non-root agent does NOT carry the Operating taicho block (root-only orie
   expect(system).not.toContain("run_command");
   expect(sections.find((s) => s.name === "operating")).toBeUndefined();
 });
+
+// --- Plan 19: the roster shows teams, not their members -------------------------------------------
+
+const worker = (over: Partial<AgentDef> = {}): AgentDef => ({
+  id: "reporter", role: "files stories", identity: "I report.", tools: [],
+  canSee: ["team:news"], canDelegateTo: [], budgets: { maxIterationsPerRun: 30, maxWorkItemsPerRequest: 20 },
+  isRoot: false, created: "2026-06-11T00:00:00.000Z", ...over,
+});
+
+const NEWS = { id: "news", charter: "covers breaking stories", lead: "editor", memberCount: 4 };
+const TRADING = { id: "trading", charter: "prices and risks instruments", memberCount: 6 };
+
+test("a squad with no teams renders the pre-Plan-19 roster unchanged", () => {
+  const { system } = assemble(agent, { visibleAgents: mkVisible(3), teams: [], policies: [] });
+  expect(system).toContain("## Your squad (delegate with delegate_task)\n- a0: role 0\n- a1: role 1\n- a2: role 2");
+  expect(system).not.toContain("### Teams");
+  expect(system).not.toContain("### Direct reports");
+});
+
+test("a squad with no teams keeps the >30 find_agents hint", () => {
+  const { system } = assemble(agent, { visibleAgents: mkVisible(INLINE_ROSTER_MAX + 1), teams: [], policies: [] });
+  expect(system).toContain("too many to list");
+  expect(system).toContain("find_agents(query)");
+});
+
+test("root's roster renders TEAMS in place of their members — the 30-agent cliff becomes unreachable", () => {
+  // 60 agents on the squad, all accounted for by two teams: the caller passes zero loose agents.
+  const { system } = assemble(agent, {
+    visibleAgents: [],
+    teams: [NEWS, TRADING],
+    policies: [],
+  });
+  expect(system).toContain("## Your squad (delegate with delegate_task)");
+  expect(system).toContain("### Teams — address the team, not its members");
+  expect(system).toContain("- news: covers breaking stories\n  lead: editor · 4 agents");
+  expect(system).toContain("- trading: prices and risks instruments\n  6 agents · routed by capability");
+  expect(system).not.toContain("too many to list"); // 60 agents, and the hint never fires
+  expect(system).not.toContain("### Direct reports");
+});
+
+test("agents no team accounts for are listed as direct reports, below the teams", () => {
+  const { system } = assemble(agent, {
+    visibleAgents: [{ id: "librarian", role: "curates squad knowledge" }],
+    teams: [NEWS],
+    policies: [],
+  });
+  const teamsAt = system.indexOf("### Teams");
+  const reportsAt = system.indexOf("### Direct reports");
+  expect(teamsAt).toBeGreaterThan(-1);
+  expect(reportsAt).toBeGreaterThan(teamsAt); // teams first — that's the address root should reach for
+  expect(system).toContain("- librarian: curates squad knowledge");
+});
+
+test("a member's roster is headed 'Your team', not 'Your squad'", () => {
+  const { system } = assemble(worker(), {
+    visibleAgents: [{ id: "factchecker", role: "verifies claims" }],
+    teams: [],
+    policies: [],
+  });
+  expect(system).toContain("## Your team (delegate with delegate_task)");
+  expect(system).not.toContain("## Your squad");
+});
+
+test("the team charter is injected as its own context-tier section", () => {
+  const { system, sections } = assemble(worker(), {
+    visibleAgents: [],
+    teams: [],
+    teamCharter: "Accurate before fast. Two independent sources.",
+    policies: [],
+  });
+  expect(system).toContain("## Your team's charter\nAccurate before fast. Two independent sources.");
+  const charter = sections.find((s) => s.name === "team-charter");
+  expect(charter?.tier).toBe("context");
+});
+
+test("no charter section when the agent sits on no team", () => {
+  const { sections } = assemble(agent, { visibleAgents: [], teams: [], policies: [] });
+  expect(sections.find((s) => s.name === "team-charter")).toBeUndefined();
+});

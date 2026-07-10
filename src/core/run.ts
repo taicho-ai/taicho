@@ -4,10 +4,13 @@ import type { Database } from "bun:sqlite";
 import { generateText, type ModelMessage } from "ai";
 import type { AgentDef } from "../schemas/agent";
 import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schemas/trace";
-import { assemble } from "./prompt";
+import { assemble, type RosterTeam } from "./prompt";
+import { listTeams, loadTeam, membersOf } from "../store/teams";
+import { routeToTeam } from "./team-routing";
+import { effectiveTools } from "../schemas/team";
 import { runLoop } from "./loop";
 import { runChecker } from "./verification";
-import { canDelegate, visibleToRows } from "./registry";
+import { canDelegate, visibleToRows, acl } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
 import { readArtifact } from "../store/artifacts";
@@ -30,7 +33,7 @@ import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
-import type { DeckLedger } from "../store/deck-budget";
+import { scopesFor, type SpendLedger } from "../store/spend-ledger";
 import type { Verdict } from "./command-guard";
 import { log, redact } from "./logger";
 import { trace as otelTrace, context, SpanStatusCode, ioAttrs, type Span, type Telemetry } from "./otel";
@@ -118,7 +121,13 @@ export interface RunContext {
    *  is 0 for subscription runs (unpriced), and aggregate.costUsd is null there anyway. */
   verifierSpend: { tokens: number; costUsd: number };
   childTraces: RunTrace[];
-  delegationGuard: (to: string) => { ok: true } | { ok: false; error: string };
+  /** Plan 19: `to` may name an agent or a team. Resolves the team to the agent that will actually run
+   *  (its lead, or the best-ranked member), then applies the ACL / cycle / depth / run-count guards to
+   *  THAT agent. `note` describes a team routing decision, so a bad keyword pick is never silent. */
+  resolveDelegation: (
+    to: string,
+    goal: string,
+  ) => { ok: true; agentId: string; team?: string; note?: string } | { ok: false; error: string };
   /** Criteria→verdict records for this run's delegations; written to trace.verification + transcript. */
   verifications: VerificationRecord[];
   /** The independent delegation checker: child output + criteria → verdict, via the delegating
@@ -176,9 +185,9 @@ export interface RunDeps {
   /** Plan 04 Phase 2: back await_task — block until a background task settles (host-owned). The
    *  optional awaiterAgentId (stamped by run.ts) lets the host fail fast on a same-agent self-block. */
   awaitTask?: (taskId: string, timeoutMs?: number, awaiterAgentId?: string) => Promise<TaskAwaitResult>;
-  /** Plan 09: deck-wide spend ledger, shared by ALL runs in a session (including delegated children),
-   *  enforced in the loop and persisted across sessions. Undefined ⇒ no deck ceilings configured. */
-  deckLedger?: DeckLedger;
+  /** Plan 09: squad-wide spend ledger, shared by ALL runs in a session (including delegated children),
+   *  enforced in the loop and persisted across sessions. Undefined ⇒ no squad ceilings configured. */
+  spendLedger?: SpendLedger;
   /** Plan 16: OpenTelemetry handle, shared by ALL runs in a session. When set, executeRun opens a run
    *  span (making it active so the AI SDK's gen_ai spans + delegated child runs nest under it) and feeds
    *  run/model metrics. Undefined ⇒ telemetry disabled (no OTLP endpoint configured). */
@@ -215,7 +224,7 @@ export function makeDeps(opts: {
   onRunEnd?: RunDeps["onRunEnd"];
   dispatch?: RunDeps["dispatch"];
   awaitTask?: RunDeps["awaitTask"];
-  deckLedger?: RunDeps["deckLedger"];
+  spendLedger?: RunDeps["spendLedger"];
   telemetry?: RunDeps["telemetry"];
 }): RunDeps {
   return {
@@ -229,7 +238,7 @@ export function makeDeps(opts: {
     mcp: opts.mcp, embed: opts.embed,
     onRunStart: opts.onRunStart, onRunEnd: opts.onRunEnd,
     dispatch: opts.dispatch, awaitTask: opts.awaitTask,
-    deckLedger: opts.deckLedger,
+    spendLedger: opts.spendLedger,
     telemetry: opts.telemetry,
   };
 }
@@ -384,7 +393,7 @@ export async function executeRun(
     spanEvents, emitStep, telemetry: tel,
     requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
-    canDelegate: (toId) => canDelegate(opts.agent, toId),
+    canDelegate: (toId) => canDelegate(opts.agent, loadIndex(deps.db).find((r) => r.id === toId) ?? { id: toId }),
     runChild: async ({ to, goal, context, criteria, inputArtifacts, callId }) => {
       const child = await loadAgent(deps.ws, to);
       return executeRun(deps, {
@@ -408,9 +417,11 @@ export async function executeRun(
       const run = () => runChecker({
         model, agent: opts.agent, subscription, priceUsd,
         captureProviderCost: picked?.captureCost, signal: deps.signal,
-        // Plan 09: the checker runs on the same shared deck ledger the primary loop uses, so its tokens
-        // (and USD, when priced) count against the deck ceiling and are bounded by it — not invisible.
-        deckLedger: deps.deckLedger,
+        // Plan 09: the checker runs on the same shared ledger the primary loop uses, so its tokens
+        // (and USD, when priced) count against the ceilings and are bounded by them — not invisible.
+        // Plan 19: it is spend the DELEGATING agent caused, so it meters against ITS team, not the child's.
+        spendLedger: deps.spendLedger,
+        spendScopes: scopesFor(opts.agent.team),
         goal: p.goal, criteria: p.criteria, output: p.output,
       });
       // Plan 16: the independent verification checker as its own "VERIFY" span — nests under the active
@@ -448,11 +459,12 @@ export async function executeRun(
     awaitTask: deps.awaitTask
       ? (taskId, timeoutMs) => deps.awaitTask!(taskId, timeoutMs, opts.agent.id)
       : undefined,
-    // Discovery respects the caller's visibility ACL, consistent with the inline-roster path.
+    // Discovery respects the caller's visibility ACL, consistent with the inline-roster path. `acl`
+    // understands the Plan 19 `team:<id>` entry, so a member's find_agents is scoped to its own team.
     findAgents: (query, k) =>
       rankAgents(
         loadIndex(deps.db)
-          .filter((r) => opts.agent.canSee.includes("*") || opts.agent.canSee.includes(r.id))
+          .filter((r) => acl(opts.agent.canSee, r))
           .filter((r) => r.id !== opts.agent.id),
         query,
         k,
@@ -463,19 +475,59 @@ export async function executeRun(
     childSpend: { tokens: 0, costUsd: 0 },
     verifierSpend: { tokens: 0, costUsd: 0 },
     childTraces: [],
-    delegationGuard: (to) => {
-      if (!canDelegate(opts.agent, to)) return { ok: false, error: `not permitted to delegate to "${to}"` };
-      if (!loadIndex(deps.db).some((r) => r.id === to)) return { ok: false, error: `no agent "${to}"` };
-      if (to === opts.agent.id || ancestry.includes(to)) return { ok: false, error: `delegation cycle: "${to}" is already an ancestor` };
-      // inclusive: root is depth 0, so this allows up to MAX_DELEGATION_DEPTH levels of descendants
-      if (depth + 1 > MAX_DELEGATION_DEPTH) return { ok: false, error: `max delegation depth (${MAX_DELEGATION_DEPTH}) reached` };
+    // Plan 19: `to` may name an agent OR a team. Ids share one namespace (roster.createAgent and
+    // teams.createTeam both enforce it), so a bare "news" is unambiguous; "team:news" is accepted too.
+    // RESOLVE FIRST, then cycle-check the resolved AGENT — checking the team id would let
+    // root → news → editor → news → editor loop forever, since the team id is never in `ancestry`.
+    resolveDelegation: (to, goal) => {
+      const explicitTeam = to.startsWith("team:");
+      const bareId = explicitTeam ? to.slice(5) : to;
+      // An agent id wins a bare lookup; the shared namespace means only one of the two can exist.
+      const row = explicitTeam ? undefined : loadIndex(deps.db).find((r) => r.id === bareId);
+      const team = row ? null : loadTeam(deps.ws, bareId);
+
+      if (!team && !row) return { ok: false, error: `no agent or team "${to}"` };
+      if (!canDelegate(opts.agent, team ? { id: team.id, isTeam: true } : row!))
+        return { ok: false, error: `not permitted to delegate to "${to}"` };
+
+      let target = row?.id ?? "";
+      let note: string | undefined;
+      if (team) {
+        const route = routeToTeam(team, membersOf(deps.db, team.id), goal, [opts.agent.id, ...ancestry]);
+        if (!route.ok) return { ok: false, error: route.error };
+        target = route.agentId;
+        note = `routed ${team.id} → ${target} (${route.why})`;
+      }
+
+      if (target === opts.agent.id || ancestry.includes(target))
+        return { ok: false, error: `delegation cycle: "${target}" is already an ancestor` };
+      // inclusive: root is depth 0, so this allows up to MAX_DELEGATION_DEPTH levels of descendants.
+      // A led team consumes a level, which is why the message says so.
+      if (depth + 1 > MAX_DELEGATION_DEPTH)
+        return { ok: false, error: `max delegation depth (${MAX_DELEGATION_DEPTH}) reached (a team with a lead consumes one level)` };
       if (deps.runCounter!.n >= MAX_RUNS_PER_REQUEST) return { ok: false, error: `max runs per request (${MAX_RUNS_PER_REQUEST}) reached` };
-      return { ok: true };
+      return { ok: true, agentId: target, team: team?.id, note };
     },
   };
 
   // Visibility from the registry index only — never load every agent's identity (unbounded roster).
-  const visible = visibleToRows(opts.agent, loadIndex(deps.db));
+  const visibleRows = visibleToRows(opts.agent, loadIndex(deps.db));
+
+  // Plan 19: the roster shows TEAMS this agent may address, plus the agents no shown team accounts
+  // for. Root therefore reads five team lines instead of sixty agent lines, and is pointed at the
+  // address it should be using. A squad with no teams/ directory takes the `[]` path and renders
+  // exactly as it did before this plan. The scan is a handful of files (teams are captain-owned).
+  const rosterTeams: RosterTeam[] = listTeams(deps.ws)
+    .filter((t) => canDelegate(opts.agent, { id: t.id, isTeam: true }))
+    .map((t) => ({ id: t.id, charter: t.charter, lead: t.lead, memberCount: membersOf(deps.db, t.id).length }))
+    .filter((t) => t.memberCount > 0); // an empty team is an address that goes nowhere — don't advertise it
+  const shown = new Set(rosterTeams.map((t) => t.id));
+  const visible = visibleRows.filter((r) => !r.team || !shown.has(r.team));
+
+  // The agent's own team: its charter is a standing instruction, its tool policy layers over the
+  // member's own grant (deny wins; the DEFAULT_WORKER_TOOLS floor is protected at team load).
+  const ownTeam = opts.agent.team ? loadTeam(deps.ws, opts.agent.team) : null;
+  const agentTools = effectiveTools(opts.agent.tools, ownTeam?.tools);
 
   let applied: PolicyNote[] = [];
   try {
@@ -492,18 +544,19 @@ export async function executeRun(
     log.error(`policy load failed for ${opts.agent.id}`, e);
   }
 
-  // Auto-inject relevant deck knowledge for agents that use the KB (like coaching notes): keyword+
+  // Auto-inject relevant squad knowledge for agents that use the KB (like coaching notes): keyword+
   // graph normally, semantic when an embedder is configured. Skipped for agents without `recall`.
   let knowledgeBlock: string | undefined;
   let knowledgeIds: string[] = [];
-  if (opts.agent.tools.includes("recall")) {
+  // Plan 19: a team that grants `recall` gives every member the KB, auto-injection included.
+  if (agentTools.includes("recall")) {
     const q = opts.brief?.goal ?? lastUserText(opts.messages);
     if (q.trim()) {
       try {
         const kb = await searchKnowledge({ db: deps.db, query: q, embed: deps.embed, k: 5, hops: 1 });
         if (kb.hits.length) {
           knowledgeIds = kb.hits.map((h) => h.id);
-          knowledgeBlock = "## Relevant knowledge (shared deck memory — call recall for more)\n" +
+          knowledgeBlock = "## Relevant knowledge (shared squad memory — call recall for more)\n" +
             kb.hits.map((h) => `- [${h.id}] ${h.title}${h.summary ? " — " + h.summary : ""}`).join("\n");
         }
       } catch (e) { log.error(`kb recall failed for ${opts.agent.id}`, e); }
@@ -564,6 +617,8 @@ export async function executeRun(
 
   const { system } = assemble(opts.agent, {
     visibleAgents: visible,
+    teams: rosterTeams,
+    teamCharter: ownTeam?.charterBody || undefined,
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
     policies: applied,
     memoryBlock,
@@ -571,7 +626,7 @@ export async function executeRun(
     skillsBlock,
     inputArtifactsBlock,
   });
-  const tools = toolsForAgent(opts.agent, ctx, deps.mcp);
+  const tools = toolsForAgent(opts.agent, ctx, deps.mcp, ownTeam?.tools);
 
   const runLoopCall = () => runLoop({
     model, agent: opts.agent, system, messages: opts.messages, tools,
@@ -594,9 +649,13 @@ export async function executeRun(
     // so a crash mid-run leaves legible evidence and a resume point instead of nothing.
     onEvent: (e) => appendRunTranscript(deps.ws, runId, e),
     checkpoint: (s) => writeRunCheckpoint(deps.ws, runId, s),
-    // Plan 09: deck-wide ceilings are metered + enforced here, the same place per-run caps are. Shared
-    // across every run (parent + delegated children) so the whole deck's spend counts against them.
-    deckLedger: deps.deckLedger,
+    // Plan 09: squad-wide ceilings are metered + enforced here, the same place per-run caps are. Shared
+    // across every run (parent + delegated children) so the whole squad's spend counts against them.
+    spendLedger: deps.spendLedger,
+    // Plan 19: this run is ALSO metered against its own team's ceiling, so a team can be capped
+    // independently. A delegated child is metered against ITS team, not its parent's — the spend is
+    // the child's to answer for.
+    spendScopes: scopesFor(opts.agent.team),
     // Plan 12 (reopened): per-request transport deadline for the model fetch. Also bounds consumeStream()
     // in case the underlying stream ignores the abort signal. Config-disposed via defaults.modelRequestTimeoutMs.
     modelRequestTimeoutMs: deps.configDefaults?.modelRequestTimeoutMs,

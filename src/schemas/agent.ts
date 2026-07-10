@@ -10,6 +10,12 @@ export const AgentDef = z.object({
   // grants every tool that connected server exposes; "mcp:<server>/<tool>" grants exactly one.
   // Anything NOT listed is not exposed to the agent — MCP tools included (no blanket grant).
   tools: z.array(z.string()).default([]),
+  // Plan 19: the team this agent sits on. An agent sits on ONE team, and declares it HERE — this is the
+  // single source of truth for membership, so teams/<id>/team.md deliberately carries no member list.
+  // Absent ⇒ unaffiliated (root, librarian, a floating specialist addressed by id).
+  team: z.string().optional(),
+  // Visibility + delegation ACLs. Each entry is "*", an exact agent id, or (Plan 19) "team:<id>",
+  // which matches every member of that team. Additive: no existing agent id contains a colon.
   canSee: z.array(z.string()).default(["*"]),        // org visibility ACL
   canDelegateTo: z.array(z.string()).default(["*"]),
   budgets: z.object({

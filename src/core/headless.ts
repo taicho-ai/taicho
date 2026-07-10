@@ -154,7 +154,7 @@ export interface HeadlessDeps {
   configDefaults?: RunDeps["configDefaults"];
   mcp?: RunDeps["mcp"];
   embed?: RunDeps["embed"];
-  deckLedger?: RunDeps["deckLedger"]; // Plan 09: deck-wide ceilings enforced in the loop
+  spendLedger?: RunDeps["spendLedger"]; // Plan 09: squad-wide ceilings enforced in the loop
   telemetry?: RunDeps["telemetry"]; // Plan 16: OpenTelemetry export (undefined ⇒ off)
 }
 
@@ -225,7 +225,7 @@ export async function runHeadless(
     configDefaults: hd.configDefaults,
     mcp: hd.mcp,
     embed: hd.embed,
-    deckLedger: hd.deckLedger,
+    spendLedger: hd.spendLedger,
     telemetry: hd.telemetry,
     signal: opts.signal,
   });

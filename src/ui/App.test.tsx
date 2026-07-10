@@ -28,6 +28,7 @@ import { listSchedules, createSchedule } from "../store/schedules";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { getViewMode } from "../store/prefs";
+import { createTeam } from "../store/teams";
 import { KbNode } from "../schemas/knowledge";
 import type { AuthSource } from "../store/config";
 import type { McpManager, McpServerStatus } from "../core/mcp/manager";
@@ -210,9 +211,9 @@ test("suggester highlight STAYS put across re-renders (uncontrolled @inkjs/ui on
   await send(stdin, DOWN);
   await waitFor(lastFrame, "› /agents");           // row 1
   await send(stdin, DOWN);
-  await waitFor(lastFrame, "› /costs");            // row 2 — proves it advanced twice, not reset
+  await waitFor(lastFrame, "› /teams");            // row 2 (Plan 19 inserted /teams) — advanced twice
   await sleep(60);                                  // let any stray re-render/onChange fire
-  expect(lastFrame()).toContain("› /costs");       // still on row 2, not snapped back to /help
+  expect(lastFrame()).toContain("› /teams");       // still on row 2, not snapped back to /help
 });
 
 test("the input clears after submitting a message (uncontrolled TextInput remounts on submit)", async () => {
@@ -1175,4 +1176,25 @@ test("Plan 15: a turn with no artifacts shows no completion bar", async () => {
   // No completion bar should appear
   expect(lastFrame()).not.toContain("View artifacts");
   expect(lastFrame()).not.toContain("Continue chatting");
+});
+
+// --- Plan 19: /teams through the real REPL (Layer 1 — UI wiring never ships on typecheck alone) ----
+
+test("/teams reports an empty squad, then lists a real team read from disk", async () => {
+  const { props } = await setup();
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/teams", ENTER);
+  await waitFor(lastFrame, "(no teams)");
+
+  // A team is a captain-owned file. Write one, then ask again — App re-reads teams/ per invocation,
+  // so an edit shows up without a restart.
+  createTeam(props.ws, { id: "news", charter: "covers breaking stories", lead: "editor" });
+  await createAgent(props.ws, props.db, { id: "editor", role: "assigns copy", identity: "You edit.", team: "news" }, "root");
+  await reindex(props.ws, props.db);
+
+  await send(stdin, "/teams", ENTER);
+  await waitFor(lastFrame, "news: covers breaking stories");
+  expect(lastFrame()).toContain("lead: editor");
+  expect(lastFrame()).toContain("editor: assigns copy");
 });
