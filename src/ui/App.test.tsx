@@ -29,6 +29,9 @@ import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { getViewMode } from "../store/prefs";
 import { createTeam } from "../store/teams";
+import { writePlan, reindexPlans, currentPlanId } from "../store/plans";
+import { readPrefs } from "../store/prefs";
+import { statusReducer } from "../core/agent-status";
 import { KbNode } from "../schemas/knowledge";
 import type { AuthSource } from "../store/config";
 import type { McpManager, McpServerStatus } from "../core/mcp/manager";
@@ -47,6 +50,12 @@ const finalText = (text: string) =>
   ({ content: [{ type: "text", text }], finishReason: { unified: "stop", raw: "stop" }, usage }) as unknown as LanguageModelV3GenerateResult;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockModel = (text: string) => new MockLanguageModelV3({ doGenerate: mockValues(finalText(text)) as any });
+// Plan 18: a scripted tool-call sequence, for driving the real toolsForAgent wiring from the REPL.
+const call = (name: string, input: object) =>
+  ({ content: [{ type: "tool-call", toolCallId: `c_${name}`, toolName: name, input: JSON.stringify(input) }], finishReason: { unified: "tool-calls", raw: "tool_use" }, usage }) as unknown as LanguageModelV3GenerateResult;
+const textResult = finalText;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockCalls = (...vals: LanguageModelV3GenerateResult[]) => new MockLanguageModelV3({ doGenerate: mockValues(...vals) as any });
 
 function fakeMcp(over: Partial<McpManager> = {}): McpManager {
   const ok = (name: string): McpServerStatus => ({ name, kind: "stdio", status: "connected", toolCount: 0 });
@@ -1197,4 +1206,69 @@ test("/teams reports an empty squad, then lists a real team read from disk", asy
   await waitFor(lastFrame, "news: covers breaking stories");
   expect(lastFrame()).toContain("lead: editor");
   expect(lastFrame()).toContain("editor: assigns copy");
+});
+
+// --- Plan 18: the pinned plan panel (Layer 1 — UI wiring never ships on typecheck alone) -----------
+
+test("the plan panel appears when the model writes a plan, and ticks live", async () => {
+  const model = mockCalls(
+    call("write_plan", { goal: "ship the notifier", items: [{ id: "it_survey", text: "survey the code" }, { id: "it_ship", text: "open the PR" }] }),
+    call("update_plan_item", { itemId: "it_survey", status: "done" }),
+    textResult("all set"),
+  );
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "plan and go", ENTER);
+  // wait for the SECOND tool call to land, not just the first — the panel redraws in place
+  await waitFor(lastFrame, "1/2");
+  const frame = lastFrame()!;
+  expect(frame).toContain("p_ship-the-notifier@v1");
+  expect(frame).toContain("survey the code");
+  expect(frame).toContain("open the PR");
+  expect(frame).toContain("1/2");          // the tick landed
+  expect(frame).toContain("✓");            // done glyph
+  expect(frame).toContain("○");            // pending glyph
+});
+
+test("/plan off hides the panel and persists; /plan on brings it back", async () => {
+  const model = mockCalls(
+    call("write_plan", { goal: "ship it", items: [{ id: "it_a", text: "do the thing" }] }),
+    textResult("ok"),
+  );
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "do the thing");
+  await waitFor(lastFrame, "ok"); // the run must SETTLE first, or the slash command is read as a steer
+
+  await send(stdin, "/plan off", ENTER);
+  await waitFor(lastFrame, "plan panel → off");
+  expect(lastFrame()).not.toContain("▎plan");
+  expect(readPrefs(props.ws).planPanel).toBe(false);
+
+  await send(stdin, "/plan on", ENTER);
+  await waitFor(lastFrame, "plan panel → on");
+  expect(lastFrame()).toContain("do the thing");
+  expect(readPrefs(props.ws).planPanel).toBe(true);
+});
+
+test("a plan on disk is shown at boot — it survives a restart visibly", async () => {
+  const { props } = await setup();
+  const { plan } = writePlan(props.ws, { owner: "root", goal: "resume me", items: [{ id: "it_a", text: "left over from last session" }], producer: "root", runId: "root/r1" });
+  reindexPlans(props.ws, props.db);
+  expect(currentPlanId(props.db, "root")).toBe(plan.id);
+
+  const { lastFrame } = render(<App {...props} />);
+  await waitFor(lastFrame, "left over from last session");
+  expect(lastFrame()).toContain("▎plan");
+});
+
+test("a plan step event does NOT disturb the live status map (it is phase-less by construction)", async () => {
+  // The regression this guards: giving the plan its own StepPhase would fall through statusReducer's
+  // switch and mint a bogus AgentState for the run.
+  const before = statusReducer(new Map(), { agent: "root", runId: "r1", phase: "model_start" }, 1000);
+  const after = statusReducer(before, { agent: "root", runId: "r1", plan: undefined } as never, 2000);
+  expect(after).toBe(before); // the guard `if (!ev.phase || !ev.runId) return map` drops it, same Map
+  expect(after.get("r1")!.state).toBe("thinking");
 });

@@ -181,3 +181,54 @@ test("the run span carries input + output when content capture IS opted in", asy
   expect(chat.attributes["gen_ai.prompt"]).toBeUndefined();
   await telemetry.shutdown();
 });
+
+// --- Plan 18/19: the attributes that let an agent self-diagnose from a queryable backend -----------
+
+test("a run span carries the plan attributes, so 'which items failed' is a backend query", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "worker", role: "does the thing", identity: "You work." }, "root");
+  await reindex(ws, db);
+  const { spans, telemetry } = testTelemetry();
+
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("write_plan", { goal: "ship it", items: [{ id: "it_a", text: "mine" }, { id: "it_b", text: "theirs" }] }),
+      call("update_plan_item", { itemId: "it_a", status: "done" }),
+      call("delegate_task", { to: "worker", goal: "do it", criteria: "must mention Y", itemId: "it_b" }),
+      text("worker output, no Y"),                            // worker
+      text('{"pass": false, "reasons": ["missing Y"]}'),      // checker
+      text("worker retry, still no Y"),                       // worker retry
+      text('{"pass": false, "reasons": ["still missing Y"]}'),// checker 2
+      text("done"),                                            // root final
+    ) as any,
+  });
+  const res = await executeRun(makeDeps({ ws, db, model, telemetry }), {
+    agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "go" }], triggeredBy: "user",
+  });
+
+  const runSpan = spans.getFinishedSpans().find((s) => s.name === "root · user turn")!;
+  expect(runSpan).toBeDefined();
+  expect(runSpan.attributes["taicho.plan.handle"]).toBe("p_ship-it@v1");
+  expect(runSpan.attributes["taicho.plan.items.total"]).toBe(2);
+  expect(runSpan.attributes["taicho.plan.items.done"]).toBe(1);   // the model's own item
+  expect(runSpan.attributes["taicho.plan.items.failed"]).toBe(1); // the delegated one, failed by the checker
+  expect(runSpan.attributes["taicho.plan.items.open"]).toBe(0);
+
+  // and the same truth is on the trace, for /costs-style rollups and crash forensics
+  expect(res.trace.plan).toBe("p_ship-it@v1");
+  expect(res.trace.planEvents).toBeGreaterThan(0);
+});
+
+test("a run with no plan records no plan attributes at all (zero overhead)", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  const { spans, telemetry } = testTelemetry();
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(text("done")) as any });
+  const res = await executeRun(makeDeps({ ws, db, model, telemetry }), {
+    agent: await loadAgent(ws, "writer"), messages: [{ role: "user", content: "go" }], triggeredBy: "user",
+  });
+  const runSpan = spans.getFinishedSpans().find((s) => s.name === "writer · user turn")!;
+  expect(runSpan.attributes["taicho.plan.handle"]).toBeUndefined();
+  expect(res.trace.plan).toBeUndefined();
+  expect(res.trace.planEvents).toBeUndefined();
+});

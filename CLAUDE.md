@@ -116,6 +116,13 @@ issues tsc won't).
     not address its own team; ancestors are never routing candidates. The pick is never silent — it
     rides `ctx.emit` as a note and lands on `trace.notes`, because `rankAgents` is a keyword match and
     will sometimes choose badly. `run.ts`'s `ctx.resolveDelegation` is the seam.
+  - `plan-inject.ts` — Plan 18. The live plan NEVER enters the system prompt (`assemble()` runs once, so
+    a plan there is stale after iteration one and would contradict the tail slot) and NEVER enters
+    `messages`. `withPlanSlot` builds `[...messages, slot]` for the model CALL only. Consequences that
+    fall out for free: context cost is FLAT, the prefix cache is untouched, the checkpoint/transcript
+    record the real conversation, and **compaction is orthogonal by construction** — `compactMessages`
+    never sees the slot, so no future tuning of `keepHead`/`compactKeepRecent` can eat the plan. The
+    system prompt carries only the STATIC `PLAN_OPERATING_NOTE` (stable tier, cacheable).
   - `prompt.ts`, `tools.ts`, `registry.ts` (the ACL grammar: an entry in `canSee`/`canDelegateTo` is
     `"*"`, an exact agent id, or Plan 19's `team:<id>` — additive, since no agent id contains a colon),
     `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
@@ -129,6 +136,15 @@ issues tsc won't).
   chat turns + background dispatches, `reconcileTasks`/`reindexTasks` on boot),
   `schedules.ts` (Plan 04 Ph6 durable schedules: `schedules/<id>.json` canon — a small captain-owned
   set, so a file scan is the whole query surface, no DB index; a bad cron is rejected at CREATE time),
+  `plans.ts` (Plan 18 **agent-owned plans**: `plans/<id>/v<N>.json` (immutable item SET — the intent)
+  + `plans/<id>/events.jsonl` (append-only transitions). **Structure vs state**: a VERSION is minted only
+  when the shape changes (a replan — `writePlan` deep-equality-dedups, so a model re-stating its plan
+  every iteration mints nothing); a TICK is an appended event. Current state is `fold(events)` over the
+  latest version — the ledger-is-truth / cache-is-derived discipline. `PlanEvent.rejected` marks a
+  refused model attempt: the fold SKIPS it, or the attempt would be the last line for that item and
+  would WIN, which is exactly the lie the engine-owns rule prevents. `reconcilePlans` appends
+  `interrupted` for in-flight items at boot and never touches the intent — PENDING items survive a
+  reboot, unlike a task),
   `teams.ts` (Plan 19 **teams**: `teams/<id>/team.md` canon — charter, optional `lead`, tool policy.
   A file scan like `schedules.ts`, no teams table. MEMBERSHIP IS NOT HERE — the agent declares
   `team: <id>` in its own frontmatter, one source of truth, and a team's roster is derived by grouping
@@ -281,6 +297,14 @@ resolution).
   NOT in the baseline; the model requests it explicitly. `reconcileWorkerTools` (boot, in `index.tsx`)
   backfills the baseline onto any EXISTING worker persisted with `tools: []`, leaving deliberate
   non-empty grants (and root/librarian) untouched.
+- **The checkbox cannot lie (Plan 18):** `delegate_task`/`dispatch_task` take an optional `itemId`. The
+  engine binds the item `in_progress` BEFORE the child runs, then settles it from the child's REAL
+  outcome — and, when `criteria` is set, only when the INDEPENDENT Plan 06 checker agrees. Once an item
+  carries a `boundRunId`, only the engine may set its terminal status; a model that tries is refused, and
+  the attempt is appended with `rejected: true` because a model marking a failed delegation done is a
+  fact worth having. Plan tools are NOT in `DEFAULT_WORKER_TOOLS` (a plan is not needed to produce an
+  artifact); root holds them, a lead asks. `StepInfo.plan` is deliberately **phase-less** — a `"plan"`
+  StepPhase would fall through `statusReducer`'s switch and corrupt the live status map.
 - **Teams are a legibility boundary, not a security one (Plan 19):** root keeps `canDelegateTo: ["*"]`,
   so it CAN name a member directly — it won't, because its roster shows teams, not their members. That
   is what makes the old `INLINE_ROSTER_MAX = 30` cliff unreachable: a sixty-agent squad renders as five

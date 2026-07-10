@@ -377,6 +377,9 @@ export async function executeRun(
   // pushed by the execute() wrapper in tools.ts; approval spans by the wrapped requestApproval below.
   // Both are merged (by ts) into transcript.jsonl at run end and streamed live via emitStep.
   const spanEvents: RunTranscriptEvent[] = [];
+  // Plan 18: how many plan transitions THIS run wrote (including refused attempts, which are real
+  // events). Recorded on the trace so /costs-style rollups and the OTel span can see plan activity.
+  const planEvents = { n: 0 };
   const emitStep = deps.onStep
     ? (info: StepInfo) => deps.onStep!({ ...info, agent: opts.agent.id, runId })
     : undefined;
@@ -461,12 +464,14 @@ export async function executeRun(
             item: itemId, status, by: "model", runId, boundRunId: item.boundRunId, rejected: true,
             note: `refused: ${itemId} is owned by run ${item.boundRunId}`,
           });
+          planEvents.n += 1;
           return { ok: false, rejected: "engine-owned", boundRunId: item.boundRunId };
         }
         if (by === "model" && status === "dropped" && !note?.trim())
           return { ok: false, rejected: "dropping an item requires a note saying why" };
 
         appendPlanEvent(deps.ws, id, { item: itemId, status, by, runId, boundRunId: boundRunId ?? item.boundRunId, note });
+        planEvents.n += 1;
         const after = foldPlan(deps.ws, id);
         if (after) indexPlan(deps.db, after);
         return { ok: true };
@@ -502,7 +507,9 @@ export async function executeRun(
         span.end();
       }
     },
-    emit: emitStep ? (info) => emitStep({ note: info.note }) : undefined,
+    // Forward the WHOLE info, not just `note` — Plan 18's plan snapshot rides this seam too. Both
+    // fields are phase-less, so statusReducer's guard drops them and the live status map is untouched.
+    emit: emitStep ? (info) => emitStep(info) : undefined,
     // Plan 04: dispatch resolves the child agent (like runChild) then hands it to the host scheduler,
     // which starts a detached run and returns the taskId immediately. Undefined when unwired.
     // parentAncestry threads the dispatching run's ancestry so the cross-agent cycle guard spans
@@ -742,6 +749,8 @@ export async function executeRun(
     result.aborted ? "interrupted" : result.exhausted ? "blocked" : result.error ? "failed" : "completed";
   if (result.error) log.error(`run ${runId} failed`, result.error);
 
+  // Plan 18: one fold, reused by the trace and the OTel run span below.
+  const planAtEnd = ctx.plan?.read();
   const trace: RunTrace = {
     id: runId, agent: opts.agent.id, task: opts.brief?.goal ?? "(chat)", triggeredBy: opts.triggeredBy,
     ledger: { retrieved: applied.map((n) => n.id), applied: applied.map((n) => n.id), skipped: [], knowledge: knowledgeIds, skills: skillIds },
@@ -762,6 +771,9 @@ export async function executeRun(
       tokens: result.tokens + ctx.childSpend.tokens + ctx.verifierSpend.tokens,
       costUsd: subscription ? null : result.costUsd + ctx.childSpend.costUsd + ctx.verifierSpend.costUsd,
     },
+    // Plan 18: the plan handle + how many transitions this run wrote. A run with no plan records neither.
+    plan: planAtEnd?.handle,
+    planEvents: planEvents.n || undefined,
     notes: ctx.notes,
     durationMs: Math.round(performance.now() - t0), started,
   };
@@ -788,12 +800,23 @@ export async function executeRun(
     });
   }
   // Plan 16: close the run span with the final rollups (tokens, cost, context) + outcome/status.
+  // Plan 18: plan attributes ride along, so an agent can ask its OWN backend "which of my plan items
+  // failed verification more than once this week" — the question a terminal waterfall could never answer.
   finishRunSpan(outcome, {
     "taicho.tokens": result.tokens,
     "gen_ai.usage.input_tokens": result.inputTokens,
     "gen_ai.usage.output_tokens": result.outputTokens,
     "taicho.context.tokens": result.contextTokens,
     ...(subscription ? {} : { "taicho.cost.usd": result.costUsd }),
+    ...(planAtEnd
+      ? {
+          "taicho.plan.handle": planAtEnd.handle,
+          "taicho.plan.items.total": planAtEnd.counts.total,
+          "taicho.plan.items.done": planAtEnd.counts.done,
+          "taicho.plan.items.open": planAtEnd.counts.open,
+          "taicho.plan.items.failed": planAtEnd.counts.failed,
+        }
+      : {}),
   }, result.error, finalText);
   deps.onRunEnd?.({ runId, agent: opts.agent.id, triggeredBy: opts.triggeredBy, outcome });
   return { runId, text: finalText, trace };
