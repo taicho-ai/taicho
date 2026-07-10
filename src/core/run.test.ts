@@ -859,7 +859,7 @@ test("Plan 09: a criteria delegation commits verifier spend to the squad ceiling
     text("boss done"),                                   // boss final
   ) as any });
   // A squad ceiling IS configured (ceiling high enough not to block) so the ledger is live and enforced.
-  const spendLedger = makeSpendLedger(db, { dailyTokens: 10_000_000 });
+  const spendLedger = makeSpendLedger(db, { squad: { dailyTokens: 10_000_000 } });
   const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens, spendLedger });
   const boss = await loadAgent(ws, "boss");
   const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });

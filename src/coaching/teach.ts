@@ -4,7 +4,7 @@ import { generateText, streamText } from "ai";
 import { ProposalDraft, toPolicy } from "./proposal";
 import { writePolicy } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
-import type { SpendLedger } from "../store/spend-ledger";
+import { SQUAD_SCOPE, type SpendLedger } from "../store/spend-ledger";
 
 type Model = Parameters<typeof generateText>[0]["model"];
 type Usage = Awaited<ReturnType<typeof generateText>>["usage"];
@@ -56,7 +56,8 @@ export async function draftPolicy(model: Model, agentId: string, correction: str
     const inputTokens = usage?.inputTokens ?? 0;
     const outputTokens = usage?.outputTokens ?? 0;
     const tokens = usage?.totalTokens ?? inputTokens + outputTokens;
-    opts.spendLedger.add({ tokens, costUsd: opts.priceUsd?.({ inputTokens, outputTokens }) ?? 0 });
+    // Outside any run (no agent, no team) — the squad scope is the only honest one.
+    opts.spendLedger.add([SQUAD_SCOPE], { tokens, costUsd: opts.priceUsd?.({ inputTokens, outputTokens }) ?? 0 });
   }
 
   const trimmed = text.trim();

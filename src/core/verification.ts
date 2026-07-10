@@ -5,7 +5,7 @@
  *  (orchestrated in tools.ts); a second fail surfaces the result WITH the failed verdict attached. */
 import { runLoop } from "./loop";
 import type { AgentDef } from "../schemas/agent";
-import type { SpendLedger } from "../store/spend-ledger";
+import type { SpendLedger, SpendScope } from "../store/spend-ledger";
 import { VerificationVerdict } from "../schemas/trace";
 
 /** The checker uses the SAME model plumbing the loop uses — passed in by run.ts (the delegating
@@ -50,6 +50,8 @@ export async function runChecker(params: {
    *  the squad ceiling AND committed to the running total, exactly like a primary agent loop — an
    *  independent checker call is real squad spend, so the ceiling must see it. Undefined ⇒ no ceilings. */
   spendLedger?: SpendLedger;
+  /** Plan 19: the delegating agent's scopes — the checker is spend IT caused. */
+  spendScopes?: SpendScope[];
   goal: string;
   criteria: string;
   output: string;
@@ -69,7 +71,8 @@ export async function runChecker(params: {
     priceUsd: params.priceUsd,
     codexBackend: params.subscription,
     captureProviderCost: params.captureProviderCost,
-    spendLedger: params.spendLedger, // Plan 09: commit + bound the checker call against the squad ceiling
+    spendLedger: params.spendLedger, // Plan 09: commit + bound the checker call against the ceilings
+    spendScopes: params.spendScopes,
   });
   // We read only result.text, never result.error: a checker that NEVER RAN (transport error/cancel ⇒
   // result.text like "[error]"/"[cancelled]") parses to the SAME non-blocking advisory PASS as a

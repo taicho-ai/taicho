@@ -32,14 +32,15 @@ const draftStreamModel = () => new MockLanguageModelV3({
 });
 
 /** A minimal in-memory squad ledger that just records what was committed — no DB needed here. */
-function spyLedger(): { ledger: SpendLedger; committed: { tokens: number; costUsd: number } } {
+function spyLedger(): { ledger: SpendLedger; committed: { tokens: number; costUsd: number }; scopes: string[] } {
   const committed = { tokens: 0, costUsd: 0 };
+  const scopes: string[] = [];
   const ledger: SpendLedger = {
-    ceilings: {},
+    ceilings: () => undefined,
     current: () => ({ dayTokens: 0, weekTokens: 0, dayCostUsd: 0, weekCostUsd: 0 }),
-    add: (d) => { committed.tokens += d.tokens; committed.costUsd += d.costUsd; },
+    add: (s, d) => { scopes.push(...s); committed.tokens += d.tokens; committed.costUsd += d.costUsd; },
   };
-  return { ledger, committed };
+  return { ledger, committed, scopes };
 }
 
 test("draftPolicy parses a JSON draft from the model", async () => {

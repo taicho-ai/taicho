@@ -20,7 +20,7 @@ import { createCodexProvider } from "./core/providers/openai-codex";
 import { OPENAI_CODEX_AUTH } from "./core/auth/constants";
 import { createMcpManager, type McpManager } from "./core/mcp/manager";
 import { readMcpStore } from "./store/mcp-store";
-import { makeSpendLedger, hasCeilings } from "./store/spend-ledger";
+import { makeSpendLedger, hasAnyCeilings } from "./store/spend-ledger";
 import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
 import { reindexTasks, reconcileTasks } from "./store/task-state";
@@ -126,7 +126,12 @@ if (mcp) process.on("SIGTERM", () => { void mcp.closeAll().finally(() => process
 // Plan 09: one squad-wide spend ledger, shared by every run this session. DB-backed rolling counters
 // keyed by UTC day / ISO week persist across sessions. Built only when a ceiling is configured, so
 // with no `budgets` in taicho.yaml the loop does zero extra DB work (pre-Plan-09 behavior).
-const spendLedger = hasCeilings(config.budgets) ? makeSpendLedger(db, config.budgets) : undefined;
+// Plan 19: the same ledger meters the squad ceiling and every configured team ceiling.
+const ceilingConfig = {
+  squad: config.budgets,
+  teams: Object.fromEntries(Object.entries(config.teams ?? {}).map(([id, t]) => [id, t.ceilings])),
+};
+const spendLedger = hasAnyCeilings(ceilingConfig) ? makeSpendLedger(db, ceilingConfig) : undefined;
 
 // Plan 16: OpenTelemetry. Enabled only when an OTLP endpoint is configured (OTEL_EXPORTER_OTLP_ENDPOINT)
 // — otherwise undefined and every seam skips it (zero overhead). Shared by every run this session. Must

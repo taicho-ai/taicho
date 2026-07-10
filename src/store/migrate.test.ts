@@ -49,9 +49,9 @@ test("v5 creates the tasks index table", () => {
 
 test("a fresh DB lands at the current schema: squad_spend (v7) and registry.team (v8)", () => {
   const db = openDb(ws());
-  expect(SCHEMA_VERSION).toBe(8);
-  expect(getMeta(db, "schema_version")).toBe("8");
-  expect(() => db.query("SELECT period_kind, period_key, tokens, cost_usd, updated FROM squad_spend").all()).not.toThrow();
+  expect(SCHEMA_VERSION).toBe(9);
+  expect(getMeta(db, "schema_version")).toBe("9");
+  expect(() => db.query("SELECT scope, period_kind, period_key, tokens, cost_usd, updated FROM squad_spend").all()).not.toThrow();
   expect(() => db.query("SELECT * FROM deck_spend").all()).toThrow(); // v6's name is gone
   expect(() => db.query("SELECT id, role, is_root, team FROM registry").all()).not.toThrow();
 });
@@ -63,7 +63,19 @@ test("a fresh DB lands at the current schema: squad_spend (v7) and registry.team
  *  registry.team from the baseline DDL, so a test written against it would pass while every existing
  *  workspace broke on upgrade. */
 function rewindToV6(db: ReturnType<typeof openDb>) {
-  db.exec("ALTER TABLE squad_spend RENAME TO deck_spend");
+  // Rebuild the counter as v6 actually wrote it: named deck_spend, and with NO scope column. Renaming
+  // the current table would keep v9's shape and quietly under-test the rebuild.
+  db.exec("DROP TABLE squad_spend");
+  db.exec(`
+    CREATE TABLE deck_spend (
+      period_kind TEXT NOT NULL,
+      period_key  TEXT NOT NULL,
+      tokens      INTEGER NOT NULL DEFAULT 0,
+      cost_usd    REAL NOT NULL DEFAULT 0,
+      updated     INTEGER DEFAULT (unixepoch()),
+      PRIMARY KEY (period_kind, period_key)
+    );
+  `);
   db.query("INSERT INTO deck_spend (period_kind, period_key, tokens, cost_usd) VALUES ('day', '2026-07-01', 4200, 1.5)").run();
   db.query("INSERT INTO kb_nodes (id, kind, title, content, scope) VALUES ('kb_legacy', 'fact', 'T', 'C', 'deck')").run();
   // Rebuild registry as v1's baseline wrote it — three columns, no `team`.
@@ -74,18 +86,20 @@ function rewindToV6(db: ReturnType<typeof openDb>) {
   db.query("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run();
 }
 
-test("v7+v8 migrate a legacy v6 DB: kb scope, the spend table name, and the registry.team column", () => {
+test("v7-v9 migrate a legacy v6 DB: kb scope, the spend table, and the registry.team column", () => {
   const db = openDb(ws());
   rewindToV6(db);
   expect(() => db.query("SELECT team FROM registry").all()).toThrow(); // precondition: genuinely absent
 
   migrate(db);
 
-  expect(getMeta(db, "schema_version")).toBe("8");
+  expect(getMeta(db, "schema_version")).toBe("9");
   // v7 — the scope value moved, and the row survived.
   expect((db.query("SELECT scope FROM kb_nodes WHERE id = 'kb_legacy'").get() as { scope: string }).scope).toBe("squad");
-  // v7 — the counter carried forward; silently resetting a running weekly total would be rude.
-  const row = db.query("SELECT tokens, cost_usd FROM squad_spend WHERE period_key = '2026-07-01'").get() as { tokens: number; cost_usd: number };
+  // v7 renamed the table, v9 rebuilt it to widen the primary key — through BOTH, the counter carried
+  // forward and landed under the 'squad' scope. Silently resetting a running weekly total would be rude.
+  const row = db.query("SELECT scope, tokens, cost_usd FROM squad_spend WHERE period_key = '2026-07-01'").get() as { scope: string; tokens: number; cost_usd: number };
+  expect(row.scope).toBe("squad");
   expect(row.tokens).toBe(4200);
   expect(row.cost_usd).toBeCloseTo(1.5, 6);
   expect(() => db.query("SELECT * FROM deck_spend").all()).toThrow();
@@ -93,8 +107,8 @@ test("v7+v8 migrate a legacy v6 DB: kb scope, the spend table name, and the regi
   expect(() => db.query("SELECT team FROM registry").all()).not.toThrow();
   expect((db.query("SELECT team FROM registry WHERE id = 'root'").get() as { team: string | null }).team).toBeNull();
 
-  migrate(db); // idempotent — a second boot must re-run neither the rename nor the ALTER
-  expect(getMeta(db, "schema_version")).toBe("8");
+  migrate(db); // idempotent — a second boot must re-run neither the rename, the ALTER, nor the rebuild
+  expect(getMeta(db, "schema_version")).toBe("9");
 });
 
 test("migrate() is safe standalone on a bare DB with no baseline tables (registry absent)", () => {

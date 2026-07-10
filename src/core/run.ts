@@ -33,7 +33,7 @@ import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
-import type { SpendLedger } from "../store/spend-ledger";
+import { scopesFor, type SpendLedger } from "../store/spend-ledger";
 import type { Verdict } from "./command-guard";
 import { log, redact } from "./logger";
 import { trace as otelTrace, context, SpanStatusCode, ioAttrs, type Span, type Telemetry } from "./otel";
@@ -417,9 +417,11 @@ export async function executeRun(
       const run = () => runChecker({
         model, agent: opts.agent, subscription, priceUsd,
         captureProviderCost: picked?.captureCost, signal: deps.signal,
-        // Plan 09: the checker runs on the same shared squad ledger the primary loop uses, so its tokens
-        // (and USD, when priced) count against the squad ceiling and are bounded by it — not invisible.
+        // Plan 09: the checker runs on the same shared ledger the primary loop uses, so its tokens
+        // (and USD, when priced) count against the ceilings and are bounded by them — not invisible.
+        // Plan 19: it is spend the DELEGATING agent caused, so it meters against ITS team, not the child's.
         spendLedger: deps.spendLedger,
+        spendScopes: scopesFor(opts.agent.team),
         goal: p.goal, criteria: p.criteria, output: p.output,
       });
       // Plan 16: the independent verification checker as its own "VERIFY" span — nests under the active
@@ -650,6 +652,10 @@ export async function executeRun(
     // Plan 09: squad-wide ceilings are metered + enforced here, the same place per-run caps are. Shared
     // across every run (parent + delegated children) so the whole squad's spend counts against them.
     spendLedger: deps.spendLedger,
+    // Plan 19: this run is ALSO metered against its own team's ceiling, so a team can be capped
+    // independently. A delegated child is metered against ITS team, not its parent's — the spend is
+    // the child's to answer for.
+    spendScopes: scopesFor(opts.agent.team),
     // Plan 12 (reopened): per-request transport deadline for the model fetch. Also bounds consumeStream()
     // in case the underlying stream ignores the abort signal. Config-disposed via defaults.modelRequestTimeoutMs.
     modelRequestTimeoutMs: deps.configDefaults?.modelRequestTimeoutMs,

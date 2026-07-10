@@ -164,6 +164,33 @@ const MIGRATIONS: Migration[] = [
       db.exec("CREATE INDEX IF NOT EXISTS registry_team ON registry(team)");
     },
   },
+  // v9: Plan 19 — per-team spend ceilings. The counter gains a `scope` dimension ('squad' | 'team:<id>')
+  // and it belongs in the primary key: a team's daily total and the squad's must accumulate separately.
+  // SQLite cannot alter a primary key, so the table is recreated and its rows copied forward as 'squad'
+  // spend. It is only a counter, not a ledger of record (traces stay canon for /costs) — but silently
+  // resetting someone's running weekly total would be rude, so we carry it.
+  {
+    version: 9,
+    up: (db) => {
+      if (!tableExists(db, "squad_spend")) return; // bare migrate() over a Database with no baseline
+      if (columnExists(db, "squad_spend", "scope")) return; // already reshaped
+      db.exec(`
+        CREATE TABLE squad_spend_v9 (
+          scope       TEXT NOT NULL,           -- 'squad' | 'team:<id>'
+          period_kind TEXT NOT NULL,           -- 'day' | 'week'
+          period_key  TEXT NOT NULL,           -- 'YYYY-MM-DD' | 'YYYY-Www'
+          tokens      INTEGER NOT NULL DEFAULT 0,
+          cost_usd    REAL NOT NULL DEFAULT 0, -- priced runs only; subscription/unpriced commit 0
+          updated     INTEGER DEFAULT (unixepoch()),
+          PRIMARY KEY (scope, period_kind, period_key)
+        );
+        INSERT INTO squad_spend_v9 (scope, period_kind, period_key, tokens, cost_usd, updated)
+          SELECT 'squad', period_kind, period_key, tokens, cost_usd, updated FROM squad_spend;
+        DROP TABLE squad_spend;
+        ALTER TABLE squad_spend_v9 RENAME TO squad_spend;
+      `);
+    },
+  },
 ];
 
 function tableExists(db: Database, table: string): boolean {
