@@ -12,7 +12,7 @@ import { seedRoot, reindex, loadIndex, loadAgent, createAgent, serializeAgent } 
 import { AgentDef } from "../schemas/agent";
 import { makeDeps, executeRun } from "./run";
 import { runChecker } from "./verification";
-import { makeDeckLedger, readDeckSpend } from "../store/deck-budget";
+import { makeSpendLedger, readSpendTotals } from "../store/spend-ledger";
 import { rollupCosts } from "./costs";
 import { readTrace } from "../store/trace";
 import { writePolicy, listPolicies } from "../store/policy";
@@ -857,8 +857,8 @@ test("Plan 09: a criteria delegation commits verifier spend to the deck ceiling 
     text("boss done"),                                   // boss final
   ) as any });
   // A deck ceiling IS configured (ceiling high enough not to block) so the ledger is live and enforced.
-  const deckLedger = makeDeckLedger(db, { dailyTokens: 10_000_000 });
-  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens, deckLedger });
+  const spendLedger = makeSpendLedger(db, { dailyTokens: 10_000_000 });
+  const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens, spendLedger });
   const boss = await loadAgent(ws, "boss");
   const res = await executeRun(deps, { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
 
@@ -874,7 +874,7 @@ test("Plan 09: a criteria delegation commits verifier spend to the deck ceiling 
   // (1) THE CEILING SEES THE VERIFIER: the deck_spend counter the ceiling reads = boss loop + worker
   // run + verifier call. Before the fix the verifier ran with no ledger, so this would be short by
   // verifierTokens (the under-count the finding flagged) and the daily ceiling could never bound it.
-  const deck = readDeckSpend(db);
+  const deck = readSpendTotals(db);
   expect(deck.dayTokens).toBe(res.trace.tokens + workerTrace.tokens + res.trace.verifierTokens);
   expect(deck.dayCostUsd).toBeCloseTo(res.trace.costUsd! + workerTrace.costUsd! + res.trace.verifierCostUsd, 6);
 

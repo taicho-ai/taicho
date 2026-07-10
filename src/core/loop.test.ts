@@ -4,7 +4,7 @@ import { tool, simulateReadableStream, type ToolSet } from "ai";
 import { z } from "zod";
 import { runLoop } from "./loop";
 import type { AgentDef } from "../schemas/agent";
-import type { DeckLedger, DeckSpend, DeckCeilings } from "../store/deck-budget";
+import type { SpendLedger, SpendTotals, SpendCeilings } from "../store/spend-ledger";
 
 // Plan 07: the loop unifies on streamText, so EVERY model is driven via doStream (not doGenerate).
 // These are the LanguageModelV3 stream parts a mock emits for a tool-call turn and a final-text turn.
@@ -143,10 +143,10 @@ test("stops with exhausted when the cost cap is reached (not the iteration cap)"
 // --- Plan 09: deck-wide ceilings, enforced in the loop (the one meter) -----------------------------
 // A fake ledger stands in for the DB-backed one: current() is the running cross-session total; add()
 // accumulates the way the real rolling counter does, so a test can watch spend cross a ceiling.
-function fakeLedger(init: Partial<DeckSpend>, ceilings: DeckCeilings) {
-  const s: DeckSpend = { dayTokens: 0, weekTokens: 0, dayCostUsd: 0, weekCostUsd: 0, ...init };
+function fakeLedger(init: Partial<SpendTotals>, ceilings: SpendCeilings) {
+  const s: SpendTotals = { dayTokens: 0, weekTokens: 0, dayCostUsd: 0, weekCostUsd: 0, ...init };
   const adds: { tokens: number; costUsd: number }[] = [];
-  const ledger: DeckLedger = {
+  const ledger: SpendLedger = {
     ceilings,
     current: () => ({ ...s }),
     add: (d) => { adds.push(d); s.dayTokens += d.tokens; s.weekTokens += d.tokens; s.dayCostUsd += d.costUsd; s.weekCostUsd += d.costUsd; },
@@ -158,7 +158,7 @@ test("deck ceiling ALREADY crossed refuses the run before any model call", async
   // Plan 07: the loop drives streamText (doStream); a ceiling ALREADY crossed refuses before any call.
   const model = new MockLanguageModelV3({ doStream: streamOf(finalChunks) });
   const { ledger } = fakeLedger({ dayTokens: 1000 }, { dailyTokens: 1000 });
-  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, deckLedger: ledger });
+  const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, spendLedger: ledger });
   expect(res.exhausted).toBe(true);
   expect(res.text).toContain("deck budget exhausted");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -171,7 +171,7 @@ test("deck ceiling stops the run once ACCUMULATED spend crosses it (not the iter
   const model = new MockLanguageModelV3({ doStream: streamOf(toolCallChunks) });
   const roomy = { ...agent, budgets: { ...agent.budgets, maxIterationsPerRun: 50 } };
   const { ledger, adds } = fakeLedger({}, { dailyTokens: 5 });
-  const res = await runLoop({ model, agent: roomy, system: "S", messages: [{ role: "user", content: "go" }], tools, deckLedger: ledger });
+  const res = await runLoop({ model, agent: roomy, system: "S", messages: [{ role: "user", content: "go" }], tools, spendLedger: ledger });
   expect(res.exhausted).toBe(true);
   expect(res.text).toContain("deck budget exhausted");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -197,7 +197,7 @@ test("a subscription (codexBackend) call commits TOKENS but 0 USD to the deck le
   const { ledger, adds } = fakeLedger({}, { weeklyTokens: 1_000_000 });
   await runLoop({
     model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools,
-    codexBackend: true, priceUsd: () => 999, deckLedger: ledger, // priceUsd would be $999 — must be ignored
+    codexBackend: true, priceUsd: () => 999, spendLedger: ledger, // priceUsd would be $999 — must be ignored
   });
   expect(adds.length).toBe(1);
   expect(adds[0].tokens).toBeGreaterThan(0); // tokens ALWAYS metered

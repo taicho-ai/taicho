@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrate } from "./migrate";
 import {
-  makeDeckLedger,
-  readDeckSpend,
-  deckCeilingHit,
+  makeSpendLedger,
+  readSpendTotals,
+  ceilingHit,
   hasCeilings,
   dayKey,
   isoWeekKey,
-  type DeckSpend,
-} from "./deck-budget";
+  type SpendTotals,
+} from "./spend-ledger";
 
 function memDb(): Database {
   const db = new Database(":memory:");
@@ -23,7 +23,7 @@ function memDb(): Database {
 test("add() accumulates day + week counters", () => {
   const db = memDb();
   const at = new Date("2026-07-04T10:00:00Z");
-  const led = makeDeckLedger(db, { dailyTokens: 1000 }, () => at);
+  const led = makeSpendLedger(db, { dailyTokens: 1000 }, () => at);
   led.add({ tokens: 100, costUsd: 1.5 });
   led.add({ tokens: 40, costUsd: 0.5 });
   expect(led.current()).toEqual({ dayTokens: 140, weekTokens: 140, dayCostUsd: 2, weekCostUsd: 2 });
@@ -32,7 +32,7 @@ test("add() accumulates day + week counters", () => {
 test("the day counter RESETS on the day boundary; the week counter carries", () => {
   const db = memDb();
   let clock = new Date("2026-07-04T23:00:00Z"); // Saturday
-  const led = makeDeckLedger(db, {}, () => clock);
+  const led = makeSpendLedger(db, {}, () => clock);
   led.add({ tokens: 100, costUsd: 1 });
   expect(led.current().dayTokens).toBe(100);
 
@@ -47,7 +47,7 @@ test("the day counter RESETS on the day boundary; the week counter carries", () 
 test("the week counter RESETS on the ISO-week boundary", () => {
   const db = memDb();
   let clock = new Date("2026-07-05T12:00:00Z"); // Sunday, last day of its ISO week
-  const led = makeDeckLedger(db, {}, () => clock);
+  const led = makeSpendLedger(db, {}, () => clock);
   led.add({ tokens: 200, costUsd: 2 });
   expect(led.current().weekTokens).toBe(200);
 
@@ -57,36 +57,36 @@ test("the week counter RESETS on the ISO-week boundary", () => {
 });
 
 test("spend PERSISTS across sessions (a fresh ledger over the same DB file sees prior spend)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "deck-budget-"));
+  const dir = mkdtempSync(join(tmpdir(), "spend-ledger-"));
   const file = join(dir, "t.db");
   const at = new Date("2026-07-04T10:00:00Z");
 
   const db1 = new Database(file);
   migrate(db1);
-  makeDeckLedger(db1, {}, () => at).add({ tokens: 500, costUsd: 3 });
+  makeSpendLedger(db1, {}, () => at).add({ tokens: 500, costUsd: 3 });
   db1.close();
 
   // Reopen — simulates a new process/session. The counter lives in the DB, not the ledger object.
   const db2 = new Database(file);
   migrate(db2);
-  expect(readDeckSpend(db2, () => at)).toEqual({ dayTokens: 500, weekTokens: 500, dayCostUsd: 3, weekCostUsd: 3 });
-  const led2 = makeDeckLedger(db2, {}, () => at);
+  expect(readSpendTotals(db2, () => at)).toEqual({ dayTokens: 500, weekTokens: 500, dayCostUsd: 3, weekCostUsd: 3 });
+  const led2 = makeSpendLedger(db2, {}, () => at);
   led2.add({ tokens: 100, costUsd: 1 });
   expect(led2.current().dayTokens).toBe(600);
   db2.close();
 });
 
-const spend = (over: Partial<DeckSpend> = {}): DeckSpend =>
+const spend = (over: Partial<SpendTotals> = {}): SpendTotals =>
   ({ dayTokens: 0, weekTokens: 0, dayCostUsd: 0, weekCostUsd: 0, ...over });
 
-test("deckCeilingHit fires per configured ceiling, else null", () => {
-  expect(deckCeilingHit(spend({ dayTokens: 999 }), { dailyTokens: 1000 })).toBeNull();
-  expect(deckCeilingHit(spend({ dayTokens: 1000 }), { dailyTokens: 1000 })).toContain("daily token ceiling");
-  expect(deckCeilingHit(spend({ weekTokens: 5000 }), { weeklyTokens: 5000 })).toContain("weekly token ceiling");
-  expect(deckCeilingHit(spend({ dayCostUsd: 10 }), { dailyCostUsd: 10 })).toContain("daily USD ceiling");
-  expect(deckCeilingHit(spend({ weekCostUsd: 50 }), { weeklyCostUsd: 50 })).toContain("weekly USD ceiling");
+test("ceilingHit fires per configured ceiling, else null", () => {
+  expect(ceilingHit(spend({ dayTokens: 999 }), { dailyTokens: 1000 })).toBeNull();
+  expect(ceilingHit(spend({ dayTokens: 1000 }), { dailyTokens: 1000 })).toContain("daily token ceiling");
+  expect(ceilingHit(spend({ weekTokens: 5000 }), { weeklyTokens: 5000 })).toContain("weekly token ceiling");
+  expect(ceilingHit(spend({ dayCostUsd: 10 }), { dailyCostUsd: 10 })).toContain("daily USD ceiling");
+  expect(ceilingHit(spend({ weekCostUsd: 50 }), { weeklyCostUsd: 50 })).toContain("weekly USD ceiling");
   // No ceilings set ⇒ never hit, whatever the spend.
-  expect(deckCeilingHit(spend({ dayTokens: 1e9, dayCostUsd: 1e9 }), {})).toBeNull();
+  expect(ceilingHit(spend({ dayTokens: 1e9, dayCostUsd: 1e9 }), {})).toBeNull();
 });
 
 test("hasCeilings distinguishes an empty budgets block from a configured one", () => {

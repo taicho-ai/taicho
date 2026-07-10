@@ -19,7 +19,7 @@ import { createCodexProvider } from "./core/providers/openai-codex";
 import { OPENAI_CODEX_AUTH } from "./core/auth/constants";
 import { createMcpManager, type McpManager } from "./core/mcp/manager";
 import { readMcpStore } from "./store/mcp-store";
-import { makeDeckLedger, hasCeilings } from "./store/deck-budget";
+import { makeSpendLedger, hasCeilings } from "./store/spend-ledger";
 import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
 import { reindexTasks, reconcileTasks } from "./store/task-state";
@@ -113,7 +113,7 @@ if (mcp) process.on("SIGTERM", () => { void mcp.closeAll().finally(() => process
 // Plan 09: one deck-wide spend ledger, shared by every run this session. DB-backed rolling counters
 // keyed by UTC day / ISO week persist across sessions. Built only when a ceiling is configured, so
 // with no `budgets` in taicho.yaml the loop does zero extra DB work (pre-Plan-09 behavior).
-const deckLedger = hasCeilings(config.budgets) ? makeDeckLedger(db, config.budgets) : undefined;
+const spendLedger = hasCeilings(config.budgets) ? makeSpendLedger(db, config.budgets) : undefined;
 
 // Plan 16: OpenTelemetry. Enabled only when an OTLP endpoint is configured (OTEL_EXPORTER_OTLP_ENDPOINT)
 // — otherwise undefined and every seam skips it (zero overhead). Shared by every run this session. Must
@@ -202,7 +202,7 @@ if (cli.command?.kind === "run") {
       ws, db, model: initial.model,
       resolveModel: initial.resolveModel, priceUsd: initial.priceUsd,
       configDefaults: config.defaults, mcp, embed: embedder?.embed,
-      deckLedger, telemetry,
+      spendLedger, telemetry,
     },
     { goal: cli.command.goal, agent: cli.command.agent, approve: cli.command.approve },
   );
@@ -215,7 +215,7 @@ if (cli.command?.kind === "run") {
 // scheduled run uses — the schedule's own approval mode (default reject) applies (no captain, so no
 // unsupervised privileged exec). add/list/remove already exited above; only `run` reaches here.
 if (cli.command?.kind === "schedule") {
-  const hd = { ws, db, model: initial.model, resolveModel: initial.resolveModel, priceUsd: initial.priceUsd, configDefaults: config.defaults, mcp, embed: embedder?.embed, deckLedger, telemetry };
+  const hd = { ws, db, model: initial.model, resolveModel: initial.resolveModel, priceUsd: initial.priceUsd, configDefaults: config.defaults, mcp, embed: embedder?.embed, spendLedger, telemetry };
   const r = await runScheduleCli(
     // `schedule run` is the same UNATTENDED path a live scheduled fire uses — mark it schedule:<id> so it
     // is EXCLUDED from the target agent's conversation ledger + boot-replay cache (still gets run evidence).
@@ -242,7 +242,7 @@ render(
     mcp={mcp}
     mcpYamlServers={Object.keys(config.mcp?.servers ?? {})}
     embed={embedder?.embed}
-    deckLedger={deckLedger}
+    spendLedger={spendLedger}
     telemetry={telemetry}
     startupNotice={startupNotice}
     {...initial}

@@ -7,14 +7,14 @@
  *  USD (its tokens still count), so a USD ceiling never fabricates spend it cannot measure. */
 import type { Database } from "bun:sqlite";
 
-export interface DeckCeilings {
+export interface SpendCeilings {
   dailyTokens?: number;
   weeklyTokens?: number;
   dailyCostUsd?: number;
   weeklyCostUsd?: number;
 }
 
-export interface DeckSpend {
+export interface SpendTotals {
   dayTokens: number;
   weekTokens: number;
   dayCostUsd: number;
@@ -23,21 +23,21 @@ export interface DeckSpend {
 
 /** The seam the loop enforces against: read the running deck total, commit a call's spend. Bound to
  *  the DB + configured ceilings so the loop stays provider-agnostic and needs no DB import. */
-export interface DeckLedger {
-  ceilings: DeckCeilings;
-  current(): DeckSpend;
+export interface SpendLedger {
+  ceilings: SpendCeilings;
+  current(): SpendTotals;
   add(delta: { tokens: number; costUsd: number }): void;
 }
 
 /** True when at least one ceiling is configured — callers skip building a ledger (and its per-call
  *  DB reads) entirely when there's nothing to enforce, preserving pre-Plan-09 behavior. */
-export function hasCeilings(c: DeckCeilings | undefined): c is DeckCeilings {
+export function hasCeilings(c: SpendCeilings | undefined): c is SpendCeilings {
   return !!c && (c.dailyTokens != null || c.weeklyTokens != null || c.dailyCostUsd != null || c.weeklyCostUsd != null);
 }
 
 /** Which ceiling (if any) the current running total has already reached — a human message, else null.
  *  Uses `>=` so it refuses the NEXT call once a limit is met, mirroring the per-run cap check. */
-export function deckCeilingHit(spend: DeckSpend, c: DeckCeilings): string | null {
+export function ceilingHit(spend: SpendTotals, c: SpendCeilings): string | null {
   if (c.dailyTokens != null && spend.dayTokens >= c.dailyTokens)
     return `daily token ceiling reached (${spend.dayTokens.toLocaleString()}/${c.dailyTokens.toLocaleString()} tok)`;
   if (c.weeklyTokens != null && spend.weekTokens >= c.weeklyTokens)
@@ -77,7 +77,7 @@ function readPeriod(db: Database, kind: "day" | "week", key: string): { tokens: 
 
 /** Read the current day + week running totals without building a full ledger (used by /costs' header
  *  and tests). Reflects only spend committed while a ceiling was configured. */
-export function readDeckSpend(db: Database, now: () => Date = () => new Date()): DeckSpend {
+export function readSpendTotals(db: Database, now: () => Date = () => new Date()): SpendTotals {
   const d = now();
   const day = readPeriod(db, "day", dayKey(d));
   const week = readPeriod(db, "week", isoWeekKey(d));
@@ -85,7 +85,7 @@ export function readDeckSpend(db: Database, now: () => Date = () => new Date()):
 }
 
 /** A DB-backed deck ledger. `now` is injectable so tests can cross day/week boundaries deterministically. */
-export function makeDeckLedger(db: Database, ceilings: DeckCeilings, now: () => Date = () => new Date()): DeckLedger {
+export function makeSpendLedger(db: Database, ceilings: SpendCeilings, now: () => Date = () => new Date()): SpendLedger {
   const upsert = db.query(
     `INSERT INTO deck_spend (period_kind, period_key, tokens, cost_usd, updated)
      VALUES (?, ?, ?, ?, unixepoch())
@@ -96,7 +96,7 @@ export function makeDeckLedger(db: Database, ceilings: DeckCeilings, now: () => 
   );
   return {
     ceilings,
-    current: () => readDeckSpend(db, now),
+    current: () => readSpendTotals(db, now),
     add: ({ tokens, costUsd }) => {
       if (tokens === 0 && costUsd === 0) return;
       const d = now();

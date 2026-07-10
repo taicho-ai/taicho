@@ -8,7 +8,7 @@
  *  Tokens are the hard, always-honest number; USD is a supplement shown only where genuinely priced.
  *  SCOPE: /costs covers RUN TRACES — the agent loop and its delegation verifier. The `/teach` coaching
  *  distiller (src/coaching/teach.ts) runs OUTSIDE any run and produces no trace; its spend IS metered
- *  against the deck ceiling (deck-budget.ts) but is not itemized here (there is no trace to attach it to). */
+ *  against the deck ceiling (spend-ledger.ts) but is not itemized here (there is no trace to attach it to). */
 import type { RunTrace } from "../schemas/trace";
 
 export interface CostGroup {

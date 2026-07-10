@@ -30,7 +30,7 @@ import { listPolicies } from "../store/policy";
 import type { PolicyNote } from "../schemas/policy";
 import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
-import type { DeckLedger } from "../store/deck-budget";
+import type { SpendLedger } from "../store/spend-ledger";
 import type { Verdict } from "./command-guard";
 import { log, redact } from "./logger";
 import { trace as otelTrace, context, SpanStatusCode, ioAttrs, type Span, type Telemetry } from "./otel";
@@ -178,7 +178,7 @@ export interface RunDeps {
   awaitTask?: (taskId: string, timeoutMs?: number, awaiterAgentId?: string) => Promise<TaskAwaitResult>;
   /** Plan 09: deck-wide spend ledger, shared by ALL runs in a session (including delegated children),
    *  enforced in the loop and persisted across sessions. Undefined ⇒ no deck ceilings configured. */
-  deckLedger?: DeckLedger;
+  spendLedger?: SpendLedger;
   /** Plan 16: OpenTelemetry handle, shared by ALL runs in a session. When set, executeRun opens a run
    *  span (making it active so the AI SDK's gen_ai spans + delegated child runs nest under it) and feeds
    *  run/model metrics. Undefined ⇒ telemetry disabled (no OTLP endpoint configured). */
@@ -215,7 +215,7 @@ export function makeDeps(opts: {
   onRunEnd?: RunDeps["onRunEnd"];
   dispatch?: RunDeps["dispatch"];
   awaitTask?: RunDeps["awaitTask"];
-  deckLedger?: RunDeps["deckLedger"];
+  spendLedger?: RunDeps["spendLedger"];
   telemetry?: RunDeps["telemetry"];
 }): RunDeps {
   return {
@@ -229,7 +229,7 @@ export function makeDeps(opts: {
     mcp: opts.mcp, embed: opts.embed,
     onRunStart: opts.onRunStart, onRunEnd: opts.onRunEnd,
     dispatch: opts.dispatch, awaitTask: opts.awaitTask,
-    deckLedger: opts.deckLedger,
+    spendLedger: opts.spendLedger,
     telemetry: opts.telemetry,
   };
 }
@@ -410,7 +410,7 @@ export async function executeRun(
         captureProviderCost: picked?.captureCost, signal: deps.signal,
         // Plan 09: the checker runs on the same shared deck ledger the primary loop uses, so its tokens
         // (and USD, when priced) count against the deck ceiling and are bounded by it — not invisible.
-        deckLedger: deps.deckLedger,
+        spendLedger: deps.spendLedger,
         goal: p.goal, criteria: p.criteria, output: p.output,
       });
       // Plan 16: the independent verification checker as its own "VERIFY" span — nests under the active
@@ -596,7 +596,7 @@ export async function executeRun(
     checkpoint: (s) => writeRunCheckpoint(deps.ws, runId, s),
     // Plan 09: deck-wide ceilings are metered + enforced here, the same place per-run caps are. Shared
     // across every run (parent + delegated children) so the whole deck's spend counts against them.
-    deckLedger: deps.deckLedger,
+    spendLedger: deps.spendLedger,
     // Plan 12 (reopened): per-request transport deadline for the model fetch. Also bounds consumeStream()
     // in case the underlying stream ignores the abort signal. Config-disposed via defaults.modelRequestTimeoutMs.
     modelRequestTimeoutMs: deps.configDefaults?.modelRequestTimeoutMs,

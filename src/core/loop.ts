@@ -7,7 +7,7 @@ import { trace as otelTrace, context as otelContext, SpanStatusCode, chatMessage
 import type { AgentDef } from "../schemas/agent";
 import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
-import { deckCeilingHit, type DeckLedger } from "../store/deck-budget";
+import { ceilingHit, type SpendLedger } from "../store/spend-ledger";
 import { compactMessages, estimateContextTokens, type CompactionSummary } from "./compaction";
 import { DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from "./providers/request-timeout";
 
@@ -80,7 +80,7 @@ export async function runLoop(opts: {
    *  sessions: before each call we refuse if a running total has crossed a ceiling, and after each
    *  call we commit that call's spend. Subscription calls commit 0 USD (unmeasurable) but still count
    *  tokens, so a USD ceiling never fabricates spend. Undefined ⇒ no deck ceilings configured. */
-  deckLedger?: DeckLedger;
+  spendLedger?: SpendLedger;
   /** Plan 12 (reopened): per-request transport deadline (ms) for the model fetch. A genuinely hung
    *  request (open socket, zero tokens) becomes a retryable error routed through the AI SDK's maxRetries,
    *  instead of the deleted loop-level idle watchdog. Config-disposed; defaults to 120s. Also used to
@@ -129,8 +129,8 @@ export async function runLoop(opts: {
     if (cap.maxCostPerRunUsd != null && costUsd >= cap.maxCostPerRunUsd) return done({ text: "[budget exhausted]", exhausted: true });
     // Deck-wide ceilings (Plan 09) — checked against the running cross-session total, alongside the
     // per-run caps above. Refuses the next call once any configured ceiling is crossed.
-    if (opts.deckLedger) {
-      const hit = deckCeilingHit(opts.deckLedger.current(), opts.deckLedger.ceilings);
+    if (opts.spendLedger) {
+      const hit = ceilingHit(opts.spendLedger.current(), opts.spendLedger.ceilings);
       if (hit) return done({ text: `[deck budget exhausted: ${hit}]`, exhausted: true });
     }
 
@@ -343,7 +343,7 @@ export async function runLoop(opts: {
     // Commit this call's spend to the deck ledger (Plan 09). Tokens always count; USD only for priced
     // runs — a subscription (codex backend) call has no measurable USD, so it commits 0 (honest: the
     // token ceiling still bounds it, the USD ceiling never sees a fabricated figure).
-    opts.deckLedger?.add({ tokens: callTokens, costUsd: opts.codexBackend ? 0 : callCost });
+    opts.spendLedger?.add({ tokens: callTokens, costUsd: opts.codexBackend ? 0 : callCost });
 
     if (toolCalls.length === 0) {
       opts.onStep?.({ phase: "final", text });

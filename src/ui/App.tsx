@@ -28,7 +28,7 @@ import type { RunResult, TaskAwaitResult, RunDeps } from "../core/run";
 import type { ModelMessage } from "ai";
 import type { AuthSource, TaichoConfig } from "../store/config";
 import { isStdioServer } from "../store/config";
-import type { DeckLedger } from "../store/deck-budget";
+import type { SpendLedger } from "../store/spend-ledger";
 import type { Telemetry } from "../core/otel";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
@@ -134,7 +134,7 @@ export function App(props: {
   mcpYamlServers?: string[];
   embed?: (text: string) => Promise<Float32Array>;
   startupNotice?: string;
-  deckLedger?: DeckLedger; // Plan 09: deck-wide spend ledger (undefined ⇒ no deck ceilings configured)
+  spendLedger?: SpendLedger; // Plan 09: deck-wide spend ledger (undefined ⇒ no deck ceilings configured)
   telemetry?: Telemetry;   // Plan 16: OpenTelemetry handle (undefined ⇒ OTLP export off)
   viewMode?: ViewMode;     // Plan 10: initial live-view mode (defaults to the persisted pref / `both`)
   terminalSize?: { columns: number; rows: number }; // Plan 10: authoritative size seam (tests/embeds); else live stdout
@@ -361,7 +361,7 @@ export function App(props: {
     say({ kind: "system", text: `  ⏰ schedule ${s.id} firing → ${s.agent}: ${s.goal} (approvals: ${s.approve})` });
     try {
       const res = await runHeadless(
-        { ws: props.ws, db: props.db, model: activeModel, resolveModel, priceUsd, configDefaults: props.configDefaults, mcp: props.mcp, embed: props.embed, deckLedger: props.deckLedger, telemetry: props.telemetry },
+        { ws: props.ws, db: props.db, model: activeModel, resolveModel, priceUsd, configDefaults: props.configDefaults, mcp: props.mcp, embed: props.embed, spendLedger: props.spendLedger, telemetry: props.telemetry },
         // scheduleFireOptions stamps triggeredBy: schedule:<id> — keeps this UNATTENDED fire OUT of the
         // target agent's conversation ledger + boot-replay cache (it still gets full run evidence).
         // Otherwise every cron/interval/watch fire appended a user+assistant pair and replayed as prior
@@ -600,7 +600,7 @@ export function App(props: {
     configDefaults: props.configDefaults,
     mcp: props.mcp,
     embed: props.embed,
-    deckLedger: props.deckLedger, // Plan 09: deck-wide ceilings enforced in the loop, shared by all runs
+    spendLedger: props.spendLedger, // Plan 09: deck-wide ceilings enforced in the loop, shared by all runs
     telemetry: props.telemetry,   // Plan 16: OpenTelemetry export, shared by all runs this session
     dispatch,
     awaitTask,
@@ -817,7 +817,7 @@ export function App(props: {
         // ceiling (real model call, but no run trace ⇒ not surfaced in /costs — see coaching/teach.ts).
         const draft = await draftPolicy(activeModel, agentId, correction, {
           codexBackend: authSource.kind === "oauth-openai-codex",
-          deckLedger: props.deckLedger,
+          spendLedger: props.spendLedger,
           priceUsd,
         });
         const decision = await requestApproval({ kind: "propose_coaching", draft });
