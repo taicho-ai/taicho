@@ -23,7 +23,8 @@ import { writeSkill } from "../store/skills";
 import { Skill } from "../schemas/skill";
 import { saveArtifact, readArtifact } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
-import { createTeam } from "../store/teams";
+import { createTeam, loadTeam } from "../store/teams";
+import { toolsForAgent } from "./tools";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -1321,4 +1322,25 @@ test("Plan 19: an empty team is refused with an actionable error, not an ENOENT"
   const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
   expect(res.trace.delegatedOut).toHaveLength(0);
   expect(res.trace.notes.some((n) => n.includes('team "ops" has no members'))).toBe(true);
+});
+
+test("Plan 19 Ph5: a team's tool policy reaches the member's real toolset (deny strips, grant adds)", async () => {
+  const { ws, db } = await boot();
+  // ops denies run_command to its members and grants recall to all of them
+  createTeam(ws, { id: "ops", charter: "keeps the lights on", tools: { deny: ["run_command"], grant: ["recall"] } });
+  await createAgent(ws, db, { id: "sre", role: "operates", identity: "You operate.", tools: ["run_command"], team: "ops" }, "root");
+  await reindex(ws, db);
+
+  // The model tries the denied tool; the SDK never exposes it, so the loop sees an unknown tool.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(text("ok")) as any });
+  const deps = makeDeps({ ws, db, model });
+  const sre = await loadAgent(ws, "sre");
+  const res = await executeRun(deps, { agent: sre, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("completed");
+
+  // Assert on the toolset the engine actually built for this agent.
+  const built = toolsForAgent(sre, {} as never, undefined, loadTeam(ws, "ops")!.tools);
+  expect(Object.keys(built)).not.toContain("run_command"); // agent asked for it; the team said no
+  expect(Object.keys(built)).toContain("recall");          // agent never asked; the team granted it
+  expect(Object.keys(built)).toContain("save_artifact");   // the Plan 14 floor survives untouched
 });

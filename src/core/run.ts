@@ -7,6 +7,7 @@ import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schem
 import { assemble, type RosterTeam } from "./prompt";
 import { listTeams, loadTeam, membersOf } from "../store/teams";
 import { routeToTeam } from "./team-routing";
+import { effectiveTools } from "../schemas/team";
 import { runLoop } from "./loop";
 import { runChecker } from "./verification";
 import { canDelegate, visibleToRows, acl } from "./registry";
@@ -521,8 +522,10 @@ export async function executeRun(
   const shown = new Set(rosterTeams.map((t) => t.id));
   const visible = visibleRows.filter((r) => !r.team || !shown.has(r.team));
 
-  // The agent's own team charter — a standing instruction for everyone who sits on it.
+  // The agent's own team: its charter is a standing instruction, its tool policy layers over the
+  // member's own grant (deny wins; the DEFAULT_WORKER_TOOLS floor is protected at team load).
   const ownTeam = opts.agent.team ? loadTeam(deps.ws, opts.agent.team) : null;
+  const agentTools = effectiveTools(opts.agent.tools, ownTeam?.tools);
 
   let applied: PolicyNote[] = [];
   try {
@@ -543,7 +546,8 @@ export async function executeRun(
   // graph normally, semantic when an embedder is configured. Skipped for agents without `recall`.
   let knowledgeBlock: string | undefined;
   let knowledgeIds: string[] = [];
-  if (opts.agent.tools.includes("recall")) {
+  // Plan 19: a team that grants `recall` gives every member the KB, auto-injection included.
+  if (agentTools.includes("recall")) {
     const q = opts.brief?.goal ?? lastUserText(opts.messages);
     if (q.trim()) {
       try {
@@ -620,7 +624,7 @@ export async function executeRun(
     skillsBlock,
     inputArtifactsBlock,
   });
-  const tools = toolsForAgent(opts.agent, ctx, deps.mcp);
+  const tools = toolsForAgent(opts.agent, ctx, deps.mcp, ownTeam?.tools);
 
   const runLoopCall = () => runLoop({
     model, agent: opts.agent, system, messages: opts.messages, tools,

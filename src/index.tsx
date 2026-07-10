@@ -77,6 +77,11 @@ const interruptedTasks = reconcileTasks(ws, db);
 // Plan 19: a team whose `lead` is missing, or sits on a DIFFERENT team, would route work out of the
 // team it is supposed to run. Report it — one bad team.md must not block boot, and the fix is an edit.
 const teamProblems = validateTeams(ws, db);
+// Plan 19: an agent's team, read from the derived registry index. Injected into the model resolver so
+// it can walk agent → team → defaults without importing the DB. A prepared statement: resolveModel runs
+// once per run, and per delegated child.
+const teamOfStmt = db.query<{ team: string | null }, [string]>("SELECT team FROM registry WHERE id = ?");
+const teamOf = (agentId: string): string | undefined => teamOfStmt.get(agentId)?.team ?? undefined;
 const notices: string[] = [];
 if (teamProblems.length)
   notices.push(`teams: ${teamProblems.map((p) => `${p.team} (${p.problem})`).join("; ")} — /teams to review`);
@@ -164,7 +169,7 @@ function buildFromAuth(src: AuthSource): BuiltAuth {
     const cfg = { provider: src.provider, model: config.defaults?.model ?? src.model };
     return {
       model: buildModel(cfg, modelRequestTimeoutMs),
-      resolveModel: createModelResolver({ config, fallback: cfg, timeoutMs: modelRequestTimeoutMs }).resolveModel,
+      resolveModel: createModelResolver({ config, fallback: cfg, timeoutMs: modelRequestTimeoutMs, teamOf }).resolveModel,
       priceUsd: pricerFor(cfg.model),
     };
   }
@@ -177,7 +182,9 @@ function buildFromAuth(src: AuthSource): BuiltAuth {
     // Subscription calls are not metered in USD; mark subscription:true so the run trace reports
     // "subscription" instead of a (meaningless) dollar cost.
     const pick = (id: string) => {
-      const m = config.agents?.[id]?.model ?? config.defaults?.model ?? OPENAI_CODEX_AUTH.defaultModelId;
+      // agent → team → defaults, the same walk createModelResolver makes for the env-key providers.
+      const t = teamOf(id);
+      const m = config.agents?.[id]?.model ?? (t ? config.teams?.[t]?.model : undefined) ?? config.defaults?.model ?? OPENAI_CODEX_AUTH.defaultModelId;
       return { model: codex(m), modelId: m, subscription: true };
     };
     return { model: codex(config.defaults?.model ?? OPENAI_CODEX_AUTH.defaultModelId), resolveModel: pick };

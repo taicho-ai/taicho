@@ -8,7 +8,7 @@ import { createTeam, loadTeam, listTeams, teamExists, membersOf, validateTeams, 
 import { syncRegistry } from "../core/registry";
 import { DEFAULT_WORKER_TOOLS } from "./roster";
 import { AgentDef } from "../schemas/agent";
-import { TeamDef } from "../schemas/team";
+import { TeamDef, TeamTools, effectiveTools } from "../schemas/team";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-teams-"));
 const agent = (id: string, team?: string): AgentDef =>
@@ -102,4 +102,21 @@ test("validateTeams passes when the lead sits on the team it leads", () => {
   createTeam(w, { id: "news", charter: "c", lead: "editor" });
   syncRegistry(db, [agent("editor", "news")]);
   expect(validateTeams(w, db)).toEqual([]);
+});
+
+// --- Plan 19 Ph5: the team tool policy layers over a member's own grant ----------------------------
+
+test("effectiveTools: grant ADDS, deny REMOVES, and deny wins over both", () => {
+  const own = ["save_artifact", "run_command"];
+  expect(effectiveTools(own, undefined)).toEqual(own); // no policy ⇒ identity, no allocation surprise
+  expect(effectiveTools(own, TeamTools.parse({}))).toEqual(own);
+
+  // grant adds a tool the member never asked for
+  expect(effectiveTools(own, TeamTools.parse({ grant: ["recall"] }))).toEqual([...own, "recall"]);
+  // deny strips a tool the member DID ask for — the team's word beats the member's
+  expect(effectiveTools(own, TeamTools.parse({ deny: ["run_command"] }))).toEqual(["save_artifact"]);
+  // listed in both: deny wins, so the policy is unambiguous rather than order-dependent
+  expect(effectiveTools(own, TeamTools.parse({ grant: ["run_command"], deny: ["run_command"] }))).toEqual(["save_artifact"]);
+  // no duplicates when a grant repeats what the member already has
+  expect(effectiveTools(own, TeamTools.parse({ grant: ["save_artifact"] }))).toEqual(own);
 });

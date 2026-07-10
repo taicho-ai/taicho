@@ -78,3 +78,27 @@ test("resolveModel resolves provider and model independently (partial override k
   expect(r.modelId).toBe("gpt-5.5");      // per-agent model
   expect(r.provider).toBe("anthropic");   // provider inherited from defaults (independent axes); warning fires
 });
+
+// --- Plan 19: model resolution walks agent -> team -> defaults -------------------------------------
+
+test("resolveModel prefers the agent override, then its team's, then defaults", () => {
+  const config = {
+    defaults: { provider: "anthropic" as const, model: "claude-sonnet-4-6" },
+    teams: { trading: { provider: "anthropic" as const, model: "claude-opus-4-8" } },
+    agents: { quant: { model: "claude-haiku-4-5" } },
+  };
+  const fallback = { provider: "anthropic" as const, model: "claude-sonnet-4-6" };
+  const teamOf = (id: string) => (id === "quant" || id === "riskdesk" ? "trading" : undefined);
+  const { resolveModel } = createModelResolver({ config, fallback, teamOf });
+
+  expect(resolveModel("quant").modelId).toBe("claude-haiku-4-5");   // agent wins over its team
+  expect(resolveModel("riskdesk").modelId).toBe("claude-opus-4-8"); // team wins over defaults
+  expect(resolveModel("root").modelId).toBe("claude-sonnet-4-6");   // unaffiliated falls to defaults
+});
+
+test("resolveModel with no teamOf injected behaves exactly as it did before Plan 19", () => {
+  const config = { defaults: { model: "claude-sonnet-4-6" }, teams: { trading: { model: "claude-opus-4-8" } } };
+  const fallback = { provider: "anthropic" as const, model: "claude-sonnet-4-6" };
+  const { resolveModel } = createModelResolver({ config, fallback });
+  expect(resolveModel("quant").modelId).toBe("claude-sonnet-4-6"); // teams config is inert without teamOf
+});

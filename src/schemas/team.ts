@@ -38,6 +38,22 @@ export const TeamDef = z.object({
 });
 export type TeamDef = z.infer<typeof TeamDef>;
 
+/** A member's effective toolset: its own grant, minus the team's `deny`, plus the team's `grant`.
+ *
+ *  `deny` wins over BOTH the member's own grant and the team's own `grant` — a team that lists a tool in
+ *  both is unambiguous rather than order-dependent. The DEFAULT_WORKER_TOOLS floor is protected earlier,
+ *  when the team file loads (store/teams.ts assertPolicyRespectsFloor), so nothing here can strip a
+ *  worker's ability to produce and hand off an artifact. */
+export function effectiveTools(agentTools: string[], policy?: TeamTools): string[] {
+  if (!policy || (!policy.grant.length && !policy.deny.length)) return agentTools;
+  const denied = new Set(policy.deny);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of [...agentTools, ...policy.grant])
+    if (!denied.has(t) && !seen.has(t)) { seen.add(t); out.push(t); }
+  return out;
+}
+
 /** The ACL grammar's team production (core/registry.ts). An entry in canSee/canDelegateTo is `"*"`,
  *  an exact agent id, or `team:<id>`. No existing id contains a colon, so this is purely additive. */
 export const TEAM_ACL_PREFIX = "team:";

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import type { AgentDef } from "../schemas/agent";
+import { effectiveTools, type TeamTools } from "../schemas/team";
 import type { RunContext, RunResult } from "./run";
 import type { McpManager } from "./mcp/manager";
 import type { VerificationVerdict } from "../schemas/trace";
@@ -50,12 +51,18 @@ function latestHandlePerId(handles: string[]): string[] {
   return [...best.values()].map((b) => b.handle);
 }
 
-export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager): ToolSet {
+export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager, teamPolicy?: TeamTools): ToolSet {
   const set: ToolSet = {};
+  // Plan 19: a team's tool policy layers over the member's own grant — `grant` ADDS, `deny` REMOVES and
+  // wins. Every gate below reads `has()` rather than agent.tools directly, so the policy applies
+  // uniformly (built-ins, KB tools, and the `mcp:<server>` refs resolved further down). The
+  // DEFAULT_WORKER_TOOLS floor is protected when the team file loads, not here.
+  const granted = new Set(effectiveTools(agent.tools, teamPolicy));
+  const has = (t: string) => granted.has(t);
 
   // Legacy simple-markdown write, kept as a back-compat wrapper over the structured store (per the
   // plan: save_artifact "replaces/wraps" it). Prefer save_artifact for provenance + hand-off.
-  if (agent.tools.includes("write_artifact"))
+  if (has("write_artifact"))
     set.write_artifact = tool({
       description: "Write a simple markdown artifact and return its path. Prefer save_artifact for structured, versioned, provenance-tracked outputs you hand off by reference.",
       inputSchema: z.object({
@@ -73,7 +80,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("save_artifact"))
+  if (has("save_artifact"))
     set.save_artifact = tool({
       description: "Save a work product to the shared artifact store as a structured, versioned, addressable artifact — the way to hand work to other agents (and the human) BY REFERENCE instead of dumping it into the conversation. Your identity + this run are recorded as provenance automatically. Give a `body` (local content) OR an `external` locator (a URI/ref into a system an MCP server fronts). Reusing an existing `id` saves a NEW immutable version. Returns the handle (id@vN) — pass it in delegate_task's inputArtifacts to hand it off.",
       inputSchema: z.object({
@@ -101,7 +108,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("read_artifact"))
+  if (has("read_artifact"))
     set.read_artifact = tool({
       description: "Fetch an artifact by handle ('id' for the latest version, or 'id@vN'). Returns metadata + summary by DEFAULT (cheap — keeps context thin). Pass includeBody:true to pull the body, which is size-capped and truncated with a marker; never dump a whole large artifact into context.",
       inputSchema: z.object({
@@ -134,7 +141,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("list_artifacts"))
+  if (has("list_artifacts"))
     set.list_artifacts = tool({
       description: "Discover artifacts in the shared store (the latest version of each). Filter by producer (agent id), type (free-form tag), role (output|input|resource), or q (substring over id/title/summary). Returns handles + summaries — read one with read_artifact.",
       inputSchema: z.object({
@@ -152,7 +159,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       }),
     });
 
-  if (agent.tools.includes("annotate_artifact"))
+  if (has("annotate_artifact"))
     set.annotate_artifact = tool({
       description: "Leave feedback ON an artifact version (by handle 'id' for the latest, or 'id@vN'). An OPEN annotation becomes the input to a REVISION run: when the artifact is later handed to an agent by reference, your feedback rides along, that agent reads the artifact, addresses your points, and saves a NEW version. Use this to request changes, flag a problem, or sign off (kind:'approval'). Your identity is recorded as the author. Pin your feedback to the exact version you reviewed.",
       inputSchema: z.object({
@@ -171,7 +178,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("list_annotations"))
+  if (has("list_annotations"))
     set.list_annotations = tool({
       description: "List the feedback/annotations on an artifact (by handle 'id' for all versions, or 'id@vN' for one). Call this BEFORE you revise an artifact so you address every open point. Returns each annotation's author, body, kind, verdict (if it's a verification), and status (open/addressed/dismissed).",
       inputSchema: z.object({
@@ -186,7 +193,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       }),
     });
 
-  if (agent.tools.includes("create_agent"))
+  if (has("create_agent"))
     set.create_agent = tool({
       description: "Propose a NEW worker agent for the captain to approve. Give it a clear id, a one-line role, and an identity that defines its point of view.",
       inputSchema: z.object({
@@ -213,7 +220,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("delegate_task"))
+  if (has("delegate_task"))
     set.delegate_task = tool({
       description:
         "Delegate a goal to another agent by id, or to a TEAM by its id — a team routes the goal to its " +
@@ -405,7 +412,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   // check_task / await_task follow up. Results come back BY REFERENCE (summary + handles), never the
   // inlined payload. Requires a host scheduler (the REPL wires ctx.dispatchTask); when unwired the
   // tool cleanly reports it (a headless/unit context has no background runner).
-  if (agent.tools.includes("dispatch_task"))
+  if (has("dispatch_task"))
     set.dispatch_task = tool({
       description:
         "Kick a goal off to another agent in the BACKGROUND and keep working — fire-and-forget. Returns " +
@@ -449,7 +456,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("check_task"))
+  if (has("check_task"))
     set.check_task = tool({
       description: "Check a background task (from dispatch_task) WITHOUT blocking: returns its status (queued/running/completed/failed/interrupted/cancelled) plus a short summary and result handle when done. Reference-only — never the full payload; pull artifacts with read_artifact.",
       inputSchema: z.object({ taskId: z.string() }),
@@ -460,7 +467,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("await_task"))
+  if (has("await_task"))
     set.await_task = tool({
       description: "BLOCK until a background task settles (bounded by a timeout), then return its final status + summary + result handle. Use when you dispatched work earlier and now genuinely need it before continuing. Reference-only — never the inlined payload.",
       inputSchema: z.object({
@@ -478,14 +485,14 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("find_agents"))
+  if (has("find_agents"))
     set.find_agents = tool({
       description: "Search the squad for agents whose role matches a capability. Returns top matches.",
       inputSchema: z.object({ query: z.string(), k: z.number().int().positive().max(20).default(8) }),
       execute: async ({ query, k }) => ({ matches: ctx.findAgents(query, k) }),
     });
 
-  if (agent.tools.includes("read_url"))
+  if (has("read_url"))
     set.read_url = tool({
       description: "Fetch a web page (e.g. an MCP server's setup docs) and return it as clean markdown. Requires FIRECRAWL_API_KEY in the environment.",
       inputSchema: z.object({ url: z.string().url() }),
@@ -495,7 +502,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (mcp && agent.tools.includes("add_mcp_server"))
+  if (mcp && has("add_mcp_server"))
     set.add_mcp_server = tool({
       description: "Connect a NEW MCP server for the captain to approve. Provide a `url` for a remote/hosted server (with auth:'oauth' or headers), or a `command`/`args` for a local stdio server. Put secrets as ${ENV_VAR} refs (ask_human for the var name first). Returns the connection status + tool count; on error, fix the config and call again.",
       inputSchema: z.object({
@@ -525,7 +532,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("ask_human"))
+  if (has("ask_human"))
     set.ask_human = tool({
       description: "Ask the human captain a clarifying question with 2-4 options when intent is ambiguous. The captain picks an option or types their own answer; you receive { answer } and continue.",
       inputSchema: z.object({
@@ -538,7 +545,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("remember"))
+  if (has("remember"))
     set.remember = tool({
       description: "Save a durable fact / decision / entity to the squad's shared knowledgebase, optionally linking it to existing nodes with typed edges (rel e.g. relates_to, depends_on, contradicts). Returns the node id — recall first to get ids to link to.",
       inputSchema: z.object({
@@ -565,7 +572,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("recall"))
+  if (has("recall"))
     set.recall = tool({
       description: "Search the squad's shared knowledgebase and its typed-edge graph. Returns matching nodes plus their linked neighbors — by meaning (semantic when available) and by relationship.",
       inputSchema: z.object({
@@ -580,7 +587,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("read_source"))
+  if (has("read_source"))
     set.read_source = tool({
       description: "Read an admin-authored source document from kb/sources/ so you can extract entities from it. `path` is like \"sources/architecture.md\" or \"architecture.md\".",
       inputSchema: z.object({ path: z.string() }),
@@ -594,7 +601,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("forget"))
+  if (has("forget"))
     set.forget = tool({
       description: "Prune the knowledgebase: cascade-delete nodes matching a filter, plus their edges and vectors. Filter by `kind` (e.g. decision), `sourcePrefix` (e.g. \"worker-x:\" for one assistant's memory, or \"sources/foo.md@\" for a doc), and/or explicit `ids`. At least one clause is required.",
       inputSchema: z.object({
@@ -610,7 +617,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("reindex_knowledge"))
+  if (has("reindex_knowledge"))
     set.reindex_knowledge = tool({
       description: "Rebuild the knowledge graph index from the canonical node files and refresh semantic vectors. Use after bulk hand-edits.",
       inputSchema: z.object({}),
@@ -621,7 +628,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("propose_skill"))
+  if (has("propose_skill"))
     set.propose_skill = tool({
       description: "Propose a reusable skill (a reviewed step-by-step procedure for a repeatable operation) for the captain to approve. On approval it's saved and every agent can use it via use_skill.",
       inputSchema: z.object({
@@ -641,7 +648,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
-  if (agent.tools.includes("run_command"))
+  if (has("run_command"))
     set.run_command = tool({
       description: "Run a shell command in the workspace. It runs in a restricted SANDBOX first (no network; writes confined to the workspace) — a command the sandbox completes returns straight away. The safety guard clears benign commands; anything it flags — OR any command proposed after UNTRUSTED content (a fetched web page or an MCP tool result) has entered this run — needs the captain's approval first. A command the sandbox can't complete escalates to a captain-approved unsandboxed run. Returns { exitCode, stdout, stderr, sandbox }.",
       inputSchema: z.object({ command: z.string(), cwd: z.string().optional().describe("working directory (defaults to the workspace); a cwd outside the workspace can't be sandbox-confined, so it needs the captain's approval") }),
@@ -728,7 +735,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   // can't shadow a privileged built-in (e.g. a server tool namespacing to create_agent).
   const mcpToolNames = new Set<string>();
   if (mcp)
-    for (const ref of agent.tools) {
+    for (const ref of granted) {
       if (!ref.startsWith("mcp:")) continue;
       for (const [k, v] of Object.entries(mcp.toolsForRef(ref.slice("mcp:".length))))
         if (!(k in set)) { set[k] = v; mcpToolNames.add(k); }

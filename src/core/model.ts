@@ -46,7 +46,14 @@ export function buildModel(cfg: ResolvedConfig, timeoutMs?: number): Model {
 
 export interface ResolvedModel { model: Model; modelId: string; provider: Provider; captureCost?: boolean; }
 
-export function createModelResolver(opts: { config: TaichoConfig; fallback: ResolvedConfig; timeoutMs?: number }): {
+/** @param teamOf the running agent's team, or undefined. Injected rather than looked up so the resolver
+ *  stays free of a DB import; the REPL passes a prepared registry query. */
+export function createModelResolver(opts: {
+  config: TaichoConfig;
+  fallback: ResolvedConfig;
+  timeoutMs?: number;
+  teamOf?: (agentId: string) => string | undefined;
+}): {
   resolveModel: (agentId: string) => ResolvedModel;
 } {
   const cache = new Map<string, Model>();
@@ -54,9 +61,13 @@ export function createModelResolver(opts: { config: TaichoConfig; fallback: Reso
   // is config-disposed (defaults.modelRequestTimeoutMs) — model-supplied values never reach it.
   const timeoutFetch = withRequestTimeout(fetch, opts.timeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS);
   const resolveModel = (agentId: string): ResolvedModel => {
+    // Plan 19: agent → team → defaults. The agent still wins, so a single specialist can out-run its
+    // team's model without the team having to know about it.
     const a = opts.config.agents?.[agentId];
-    const provider: Provider = a?.provider ?? opts.config.defaults?.provider ?? opts.fallback.provider;
-    const model = a?.model ?? opts.config.defaults?.model ?? opts.fallback.model;
+    const teamId = opts.teamOf?.(agentId);
+    const t = teamId ? opts.config.teams?.[teamId] : undefined;
+    const provider: Provider = a?.provider ?? t?.provider ?? opts.config.defaults?.provider ?? opts.fallback.provider;
+    const model = a?.model ?? t?.model ?? opts.config.defaults?.model ?? opts.fallback.model;
     const key = `${provider}:${model}`;
     // Heuristic diagnostic: a partial per-agent override can pair a model id with a mismatched
     // provider (e.g. an OpenAI model under the Anthropic provider). Warn once per provider:model

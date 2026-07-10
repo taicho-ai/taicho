@@ -83,12 +83,28 @@ export function interpolateEnv(value: string, env: Record<string, string | undef
  *  daily/weekly spend. Any subset may be set; USD ceilings only constrain priced runs (a subscription
  *  squad is bounded by tokens, never a fabricated dollar figure). Plan 19 adds per-team ceilings under
  *  `teams.<id>.ceilings`, metered against the same SpendLedger with a different scope. */
-const SquadCeilings = z.object({
+const Ceilings = z.object({
   dailyTokens: z.number().int().positive().optional(),
   weeklyTokens: z.number().int().positive().optional(),
   dailyCostUsd: z.number().positive().optional(),
   weeklyCostUsd: z.number().positive().optional(),
-}).optional();
+});
+const SquadCeilings = Ceilings.optional();
+
+/** Plan 19: per-team configuration. `team.md` is canon for CAPABILITY (lead, charter, tool policy);
+ *  taicho.yaml overrides MODEL and BUDGETS — exactly the division of authority agents already use
+ *  between agent.md and `agents.<id>`. One rule, learned once.
+ *
+ *  Resolution walks agent → team → defaults, so "the trading team runs opus with a tight daily ceiling"
+ *  is one block instead of a line repeated on every member. `ceilings` bound the team's rolling spend
+ *  across sessions, metered against the same SpendLedger as the squad ceiling, under its own scope. */
+const TeamOverride = z.object({
+  provider: z.enum(["anthropic", "openai", "openrouter"]).optional(),
+  model: z.string().optional(),
+  budgets: PartialBudgets,
+  ceilings: Ceilings.optional(),
+});
+export type TeamOverride = z.infer<typeof TeamOverride>;
 
 export const TaichoConfig = z.object({
   defaults: z.object({
@@ -108,6 +124,8 @@ export const TaichoConfig = z.object({
   }).optional(),
   // Squad-level ceilings (Plan 09) — top-level because they bound the whole squad, not one agent.
   budgets: SquadCeilings,
+  // Plan 19: per-team model/budget overrides + the team's own spend ceiling.
+  teams: z.record(z.string(), TeamOverride).optional(),
   agents: z.record(z.string(), AgentOverride).optional(),
   auth: z.object({ chatgpt_signin: z.boolean().optional() }).optional(),
   // Plan 04: a global ceiling on total in-flight + queued BACKGROUND runs (dispatch_task). Bounds
