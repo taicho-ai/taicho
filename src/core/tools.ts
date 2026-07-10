@@ -216,7 +216,9 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   if (agent.tools.includes("delegate_task"))
     set.delegate_task = tool({
       description:
-        "Delegate a goal to another agent by id. Hand work over BY REFERENCE via `inputArtifacts` " +
+        "Delegate a goal to another agent by id, or to a TEAM by its id — a team routes the goal to its " +
+        "lead, or to whichever member best fits the goal. Prefer addressing the team when one covers the " +
+        "work; you are not expected to know who sits on it. Hand work over BY REFERENCE via `inputArtifacts` " +
         "(artifact handles the child reads with read_artifact) rather than pasting content into `context`; " +
         "you get back the child's output artifact handles + a short summary — not its full text. " +
         "Optionally pass `criteria` — a plain-language contract for what 'done' means (e.g. \"a markdown " +
@@ -225,7 +227,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         "and a still-failing result comes back with its failed verdict attached so you can see the caveat. " +
         "Set criteria whenever the output has concrete requirements you'd otherwise have to re-check by hand.",
       inputSchema: z.object({
-        to: z.string(),
+        to: z.string().describe("an agent id, or a team id (ids share one namespace, so a bare name is unambiguous)"),
         goal: z.string(),
         context: z.string().optional(),
         criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
@@ -245,8 +247,18 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           ctx.notes.push(`delegate refused: ${budgetMsg()}`);
           return { error: budgetMsg() };
         }
-        const guard = ctx.delegationGuard(to);
+        // Plan 19: `to` may be a team. Resolve it to the agent that will actually run BEFORE any guard
+        // fires, so the cycle/depth checks apply to that agent rather than to a team id that is never
+        // in the ancestry chain. Everything downstream — runChild, the checker, the retry — sees a
+        // plain agent id and does not know a team was involved.
+        const guard = ctx.resolveDelegation(to, goal);
         if (!guard.ok) { ctx.notes.push(`delegate refused: ${guard.error}`); return { error: guard.error }; }
+        const target = guard.agentId;
+        if (guard.note) {
+          // Never a silent pick: rankAgents is a keyword match and will sometimes choose badly.
+          ctx.notes.push(guard.note);
+          ctx.emit?.({ note: guard.note });
+        }
 
         // resolve input handles; drop (and note) any that don't exist rather than passing a dead ref.
         const resolved: string[] = [], dropped: string[] = [];
@@ -256,7 +268,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         // Spawn one child run (initial OR the verification retry). Both get the SAME input handles BY
         // REFERENCE, and each spawn folds its spend + produced handles into this run's aggregate/graph.
         const spawn = async (childContext?: string) => {
-          const child = await ctx.runChild({ to, goal, context: childContext, criteria, inputArtifacts: resolved, callId: spawnCallId });
+          const child = await ctx.runChild({ to: target, goal, context: childContext, criteria, inputArtifacts: resolved, callId: spawnCallId });
           ctx.delegatedOut.push(child.runId);
           ctx.childTraces.push(child.trace);
           ctx.outputArtifacts.push(...child.trace.artifacts); // hand-off graph: handles the child produced
@@ -290,7 +302,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
 
           // No criteria ⇒ no check ⇒ today's trust-everything behavior, zero extra cost.
           // Parent context gets handles + a summary, NOT the child's full body (the pollution vector).
-          if (!criteria) return { to, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
+          if (!criteria) return { to: target, team: guard.team, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text };
           const criteriaText = criteria; // narrowed to string past the guard (kept for the surface closure)
 
           // Plan 06 Phase 3 — surface a FAILED verdict two ways, then hand the caveat to the parent:
@@ -331,13 +343,13 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
                 }
               }
               try {
-                const { proposed } = recordVerificationFailure(ctx.ws, { targetAgent: to, criteria: criteriaText, runId: c.runId, reasons: v.reasons });
-                if (proposed) ctx.emit?.({ note: `⚑ ${to} keeps failing this check — proposed a coaching note (${proposed.id}) for your approval` });
+                const { proposed } = recordVerificationFailure(ctx.ws, { targetAgent: target, criteria: criteriaText, runId: c.runId, reasons: v.reasons });
+                if (proposed) ctx.emit?.({ note: `⚑ ${target} keeps failing this check — proposed a coaching note (${proposed.id}) for your approval` });
               } catch (e) {
                 ctx.notes.push(`coaching proposal skipped: ${e instanceof Error ? e.message : String(e)}`);
               }
             }
-            return { to, runId: c.runId, outputArtifacts: c.trace.artifacts, summary: c.text, verification: v };
+            return { to: target, team: guard.team, runId: c.runId, outputArtifacts: c.trace.artifacts, summary: c.text, verification: v };
           };
 
           // Independent checker call, BEFORE the result reaches the parent's context. Its spend is
@@ -349,15 +361,18 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           let verdict = first.verdict;
 
           if (!verdict.pass) {
-            ctx.emit?.({ note: `↻ ${to} output failed verification: ${verdict.reasons.join("; ")} — retrying once` });
+            ctx.emit?.({ note: `↻ ${target} output failed verification: ${verdict.reasons.join("; ")} — retrying once` });
             // Exactly ONE bounded retry — consumes a work item like any delegation.
             ctx.workItems.n += 1;
             const overBudget = ctx.workItems.n > agent.budgets.maxWorkItemsPerRequest;
-            const retryGuard = ctx.delegationGuard(to);
+            // Re-guard against the RESOLVED agent, never the original `to`. Passing a team id here would
+            // re-run the ranker, and a leadless team could hand the retry — carrying feedback about the
+            // FIRST agent's mistakes — to a different member entirely.
+            const retryGuard = ctx.resolveDelegation(target, goal);
             if (overBudget || !retryGuard.ok) {
               const why = overBudget ? budgetMsg() : !retryGuard.ok ? retryGuard.error : "retry blocked";
               ctx.notes.push(`verification retry refused: ${why}`);
-              ctx.emit?.({ note: `⚠ ${to} result surfaced WITHOUT a passing verification (retry blocked: ${why})` });
+              ctx.emit?.({ note: `⚠ ${target} result surfaced WITHOUT a passing verification (retry blocked: ${why})` });
               return surface(verdict, child);
             }
             const feedback = "Your previous attempt did NOT meet the acceptance criteria. Fix these before returning:\n" +
@@ -371,8 +386,8 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
             ctx.verifications.push({ criteria, verdict: second.verdict, runId: retry.runId, retried: true, tokens: second.tokens, costUsd: second.costUsd, costNote: second.costNote });
             child = retry;
             verdict = second.verdict;
-            if (verdict.pass) ctx.emit?.({ note: `✓ ${to} passed verification after one retry` });
-            else ctx.emit?.({ note: `⚠ ${to} still failed verification after retry: ${verdict.reasons.join("; ")} — surfacing result with the failed verdict` });
+            if (verdict.pass) ctx.emit?.({ note: `✓ ${target} passed verification after one retry` });
+            else ctx.emit?.({ note: `⚠ ${target} still failed verification after retry: ${verdict.reasons.join("; ")} — surfacing result with the failed verdict` });
           }
 
           // Criteria was set: always attach the verdict so the parent (and captain) sees the caveat.
@@ -398,9 +413,10 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         "until the child returns) when you don't need the result right now — e.g. long research you'll " +
         "check on later. Follow up with check_task(taskId) for status or await_task(taskId) to block on " +
         "it when you finally need it. Results come back BY REFERENCE (a summary + artifact handles), never " +
-        "inlined. Hand inputs over with `inputArtifacts` and set `criteria` exactly as for delegate_task.",
+        "inlined. Hand inputs over with `inputArtifacts` and set `criteria` exactly as for delegate_task. " +
+        "`to` may be an agent id or a team id, resolved the same way delegate_task resolves it.",
       inputSchema: z.object({
-        to: z.string(),
+        to: z.string().describe("an agent id, or a team id (ids share one namespace)"),
         goal: z.string(),
         context: z.string().optional(),
         criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
@@ -415,16 +431,21 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           ctx.notes.push(`dispatch refused: ${budgetMsg()}`);
           return { error: budgetMsg() };
         }
-        const guard = ctx.delegationGuard(to);
+        // Plan 19: a team is resolved to a concrete agent HERE, on the dispatching turn — not later when
+        // the background run starts. The task record then names the agent that actually ran, and a
+        // membership change between dispatch and settle cannot silently move the work.
+        const guard = ctx.resolveDelegation(to, goal);
         if (!guard.ok) { ctx.notes.push(`dispatch refused: ${guard.error}`); return { error: guard.error }; }
+        const target = guard.agentId;
+        if (guard.note) { ctx.notes.push(guard.note); ctx.emit?.({ note: guard.note }); }
         // Resolve input handles up front; drop (and note) dead refs rather than dispatch a broken brief.
         const resolved: string[] = [], dropped: string[] = [];
         for (const h of inputArtifacts ?? []) (readArtifact(ctx.ws, h) ? resolved : dropped).push(h);
         if (dropped.length) ctx.notes.push(`dispatch: dropped unknown input artifact(s) ${dropped.join(", ")}`);
-        const r = await ctx.dispatchTask({ to, goal, context, criteria, inputArtifacts: resolved });
+        const r = await ctx.dispatchTask({ to: target, goal, context, criteria, inputArtifacts: resolved });
         if ("error" in r) { ctx.notes.push(`dispatch failed: ${r.error}`); return r; }
-        ctx.notes.push(`dispatched ${r.taskId} → ${to}`);
-        return { taskId: r.taskId, status: "queued", to, note: `running in background — check_task("${r.taskId}") for status, or await_task to block on it` };
+        ctx.notes.push(`dispatched ${r.taskId} → ${target}`);
+        return { taskId: r.taskId, status: "queued", to: target, team: guard.team, note: `running in background — check_task("${r.taskId}") for status, or await_task to block on it` };
       },
     });
 

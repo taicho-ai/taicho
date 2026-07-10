@@ -23,6 +23,7 @@ import { writeSkill } from "../store/skills";
 import { Skill } from "../schemas/skill";
 import { saveArtifact, readArtifact } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
+import { createTeam } from "../store/teams";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -1210,4 +1211,114 @@ test("recovery: run.ts writes an incremental transcript AND a resume checkpoint 
   expect(cp.runId).toBe(res.runId);
   expect(Array.isArray(cp.messages)).toBe(true);
   expect(cp.iteration).toBeGreaterThan(0);
+});
+
+// --- Plan 19: delegating to a TEAM, end to end through executeRun ---------------------------------
+
+/** Root, a team, and two members. Root delegates to the TEAM id; the engine resolves it to an agent. */
+async function bootTeam(opts: { lead?: string } = {}) {
+  const { ws, db } = await boot();
+  createTeam(ws, { id: "news", charter: "covers breaking stories", lead: opts.lead });
+  await createAgent(ws, db, { id: "reporter", role: "files stories on deadline", identity: "You report.", team: "news" }, "root");
+  await createAgent(ws, db, { id: "factchecker", role: "verifies claims and sources", identity: "You verify.", team: "news" }, "root");
+  await reindex(ws, db);
+  return { ws, db };
+}
+
+test("Plan 19: root delegates to a LEADLESS team and the engine routes to the best-ranked member", async () => {
+  const { ws, db } = await bootTeam();
+  const notes: string[] = [];
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("delegate_task", { to: "news", goal: "verify these claims and sources" }),
+      text("done"),
+      text("checked"), // the child's own reply
+    ) as any,
+  });
+  const deps = makeDeps({ ws, db, model, onStep: (i) => { if (i.note) notes.push(i.note); } });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "check the story" }], triggeredBy: "user" });
+
+  expect(res.trace.outcome).toBe("completed");
+  // the CHILD run is the resolved agent, never the team id — a team has no agent.md to load
+  expect(res.trace.delegatedOut).toHaveLength(1);
+  expect(res.trace.delegatedOut[0]!.startsWith("factchecker/")).toBe(true);
+  // the routing decision is surfaced, never silent
+  expect(notes.some((n) => n.includes("routed news → factchecker"))).toBe(true);
+  expect(res.trace.notes.some((n) => n.includes("routed news → factchecker (ranked"))).toBe(true);
+});
+
+test("Plan 19: a team WITH a lead routes to the lead, consuming one delegation level", async () => {
+  const { ws, db } = await bootTeam({ lead: "reporter" });
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("delegate_task", { to: "news", goal: "verify these claims and sources" }), // ranker would pick factchecker
+      text("done"),
+      text("filed"),
+    ) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  // the lead wins over the ranker — that is the whole point of naming one
+  expect(res.trace.delegatedOut[0]!.startsWith("reporter/")).toBe(true);
+  expect(res.trace.notes.some((n) => n === "routed news → reporter (lead)")).toBe(true);
+});
+
+test("Plan 19: `team:<id>` addresses a team explicitly, and a bare agent id still works", async () => {
+  const { ws, db } = await bootTeam();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("delegate_task", { to: "team:news", goal: "files stories deadline" }),
+      text("done"),
+      text("filed"),
+    ) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut[0]!.startsWith("reporter/")).toBe(true);
+});
+
+test("Plan 19: delegating to an unknown name reports agent-or-team, not just agent", async () => {
+  const { ws, db } = await bootTeam();
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "ghost", goal: "x" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut).toHaveLength(0);
+  expect(res.trace.notes.some((n) => n.includes('no agent or team "ghost"'))).toBe(true);
+});
+
+test("Plan 19: a lead delegating to its OWN team is refused, not looped", async () => {
+  const { ws, db } = await bootTeam({ lead: "reporter" });
+  // reporter needs delegate_task + the right to address its team
+  const reporter = await loadAgent(ws, "reporter");
+  reporter.tools = [...reporter.tools, "delegate_task"];
+  reporter.canDelegateTo = ["team:news"];
+  writeFileSync(paths.agentFile(ws, "reporter"), serializeAgent(reporter));
+  await reindex(ws, db);
+
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "news", goal: "x" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const res = await executeRun(deps, { agent: await loadAgent(ws, "reporter"), messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut).toHaveLength(0);
+  expect(res.trace.notes.some((n) => n.includes("a lead cannot address its own team"))).toBe(true);
+});
+
+test("Plan 19: an empty team is refused with an actionable error, not an ENOENT", async () => {
+  const { ws, db } = await boot();
+  createTeam(ws, { id: "ops", charter: "keeps the lights on" }); // no members
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "ops", goal: "x" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.delegatedOut).toHaveLength(0);
+  expect(res.trace.notes.some((n) => n.includes('team "ops" has no members'))).toBe(true);
 });

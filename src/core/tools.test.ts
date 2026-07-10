@@ -113,7 +113,8 @@ test("dispatch_task: fires to ctx.dispatchTask, consumes a work item, returns { 
   const briefs: Array<Record<string, unknown>> = [];
   const c = {
     ws: "/nope", agentId: "boss", runId: "boss/1", workItems: { n: 0 }, notes: [] as string[],
-    delegationGuard: () => ({ ok: true } as const),
+    // Plan 19: an agent id resolves to itself; a team id would resolve to a member (see team-routing).
+    resolveDelegation: (to: string) => ({ ok: true, agentId: to } as const),
     dispatchTask: async (b: Record<string, unknown>) => { briefs.push(b); return { taskId: "task_bg_1" }; },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any as RunContext;

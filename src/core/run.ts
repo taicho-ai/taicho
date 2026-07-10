@@ -6,6 +6,7 @@ import type { AgentDef } from "../schemas/agent";
 import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schemas/trace";
 import { assemble, type RosterTeam } from "./prompt";
 import { listTeams, loadTeam, membersOf } from "../store/teams";
+import { routeToTeam } from "./team-routing";
 import { runLoop } from "./loop";
 import { runChecker } from "./verification";
 import { canDelegate, visibleToRows, acl } from "./registry";
@@ -119,7 +120,13 @@ export interface RunContext {
    *  is 0 for subscription runs (unpriced), and aggregate.costUsd is null there anyway. */
   verifierSpend: { tokens: number; costUsd: number };
   childTraces: RunTrace[];
-  delegationGuard: (to: string) => { ok: true } | { ok: false; error: string };
+  /** Plan 19: `to` may name an agent or a team. Resolves the team to the agent that will actually run
+   *  (its lead, or the best-ranked member), then applies the ACL / cycle / depth / run-count guards to
+   *  THAT agent. `note` describes a team routing decision, so a bad keyword pick is never silent. */
+  resolveDelegation: (
+    to: string,
+    goal: string,
+  ) => { ok: true; agentId: string; team?: string; note?: string } | { ok: false; error: string };
   /** Criteria→verdict records for this run's delegations; written to trace.verification + transcript. */
   verifications: VerificationRecord[];
   /** The independent delegation checker: child output + criteria → verdict, via the delegating
@@ -465,17 +472,38 @@ export async function executeRun(
     childSpend: { tokens: 0, costUsd: 0 },
     verifierSpend: { tokens: 0, costUsd: 0 },
     childTraces: [],
-    delegationGuard: (to) => {
-      // The target row carries `team`, which a `team:<id>` ACL entry matches against. A target that
-      // does not exist still gets an ACL check first, so the error the model sees is unchanged.
-      const row = loadIndex(deps.db).find((r) => r.id === to);
-      if (!canDelegate(opts.agent, row ?? { id: to })) return { ok: false, error: `not permitted to delegate to "${to}"` };
-      if (!row) return { ok: false, error: `no agent "${to}"` };
-      if (to === opts.agent.id || ancestry.includes(to)) return { ok: false, error: `delegation cycle: "${to}" is already an ancestor` };
-      // inclusive: root is depth 0, so this allows up to MAX_DELEGATION_DEPTH levels of descendants
-      if (depth + 1 > MAX_DELEGATION_DEPTH) return { ok: false, error: `max delegation depth (${MAX_DELEGATION_DEPTH}) reached` };
+    // Plan 19: `to` may name an agent OR a team. Ids share one namespace (roster.createAgent and
+    // teams.createTeam both enforce it), so a bare "news" is unambiguous; "team:news" is accepted too.
+    // RESOLVE FIRST, then cycle-check the resolved AGENT — checking the team id would let
+    // root → news → editor → news → editor loop forever, since the team id is never in `ancestry`.
+    resolveDelegation: (to, goal) => {
+      const explicitTeam = to.startsWith("team:");
+      const bareId = explicitTeam ? to.slice(5) : to;
+      // An agent id wins a bare lookup; the shared namespace means only one of the two can exist.
+      const row = explicitTeam ? undefined : loadIndex(deps.db).find((r) => r.id === bareId);
+      const team = row ? null : loadTeam(deps.ws, bareId);
+
+      if (!team && !row) return { ok: false, error: `no agent or team "${to}"` };
+      if (!canDelegate(opts.agent, team ? { id: team.id, isTeam: true } : row!))
+        return { ok: false, error: `not permitted to delegate to "${to}"` };
+
+      let target = row?.id ?? "";
+      let note: string | undefined;
+      if (team) {
+        const route = routeToTeam(team, membersOf(deps.db, team.id), goal, [opts.agent.id, ...ancestry]);
+        if (!route.ok) return { ok: false, error: route.error };
+        target = route.agentId;
+        note = `routed ${team.id} → ${target} (${route.why})`;
+      }
+
+      if (target === opts.agent.id || ancestry.includes(target))
+        return { ok: false, error: `delegation cycle: "${target}" is already an ancestor` };
+      // inclusive: root is depth 0, so this allows up to MAX_DELEGATION_DEPTH levels of descendants.
+      // A led team consumes a level, which is why the message says so.
+      if (depth + 1 > MAX_DELEGATION_DEPTH)
+        return { ok: false, error: `max delegation depth (${MAX_DELEGATION_DEPTH}) reached (a team with a lead consumes one level)` };
       if (deps.runCounter!.n >= MAX_RUNS_PER_REQUEST) return { ok: false, error: `max runs per request (${MAX_RUNS_PER_REQUEST}) reached` };
-      return { ok: true };
+      return { ok: true, agentId: target, team: team?.id, note };
     },
   };
 
