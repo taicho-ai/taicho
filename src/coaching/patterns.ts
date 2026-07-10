@@ -28,7 +28,7 @@ const FailureRecord = z.object({
 });
 type FailureRecord = z.infer<typeof FailureRecord>;
 
-/** Deck-level append-only ledger of verification failures (one JSON object per line). */
+/** Squad-level append-only ledger of verification failures (one JSON object per line). */
 function ledgerFile(ws: string): string {
   return join(ws, "verification-failures.jsonl");
 }

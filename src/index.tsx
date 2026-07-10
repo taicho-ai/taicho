@@ -4,7 +4,7 @@ import { App } from "./ui/App";
 import { ensureWorkspace } from "./store/files";
 import { openDb } from "./store/db";
 import { seedRoot, seedLibrarian, reindex, loadIndex, reconcileWorkerTools, LIBRARIAN_ID } from "./store/roster";
-import { reindexKnowledge } from "./store/knowledge";
+import { reindexKnowledge, reconcileKbScope } from "./store/knowledge";
 import { diffSources } from "./store/sources";
 import { createEmbedder } from "./core/embed";
 import { ensureEmbedSpace } from "./store/migrate";
@@ -57,12 +57,14 @@ if (cli.command?.kind === "schedule" && cli.command.args[0] !== "run") {
 await seedRoot(ws, config.defaults);
 await seedLibrarian(ws, config.defaults);
 // Plan 14 T3: rescue any worker born toolless (`tools: []`) — grant it the default artifact baseline so
-// a live deck (root/2026-07-04-run6's 9 empty-tools agents) becomes usable without hand-editing each file.
+// a live squad (root/2026-07-04-run6's 9 empty-tools agents) becomes usable without hand-editing each file.
 const backfilledWorkers = await reconcileWorkerTools(ws);
 await seedSkills(ws);
 const db = openDb(ws);
 const idx = loadIndex(db);
 if (idx.length === 0 || !idx.some((r) => r.id === LIBRARIAN_ID)) await reindex(ws, db);
+// Plan 19 Ph1b: rewrite any kb node file still saying `scope: deck` BEFORE the reindex below reads them.
+reconcileKbScope(ws, db);
 reindexKnowledge(ws, db); // rebuild the KB graph index from kb/nodes/*.md (files are canon)
 reindexSkills(ws, db); // rebuild the skills index from skills/*.md (files are canon)
 const kbDrift = diffSources(ws, db);
@@ -93,7 +95,7 @@ const mcp: McpManager | undefined = config.mcp?.enabled === false
   ? undefined
   : await createMcpManager({
       ws,
-      // Firecrawl is a built-in default MCP server on every deck (scrape/crawl/search/map/extract)
+      // Firecrawl is a built-in default MCP server on every squad (scrape/crawl/search/map/extract)
       // whenever FIRECRAWL_API_KEY is set — lowest precedence, so a workspace's store/yaml can override
       // or replace it. Then layer the /mcp-added store, then taicho.yaml (yaml wins on a name clash).
       servers: {
@@ -110,7 +112,7 @@ const mcp: McpManager | undefined = config.mcp?.enabled === false
 // foreground process group. Async cleanup can't run in a process "exit" handler, so we don't use one.)
 if (mcp) process.on("SIGTERM", () => { void mcp.closeAll().finally(() => process.exit(0)); });
 
-// Plan 09: one deck-wide spend ledger, shared by every run this session. DB-backed rolling counters
+// Plan 09: one squad-wide spend ledger, shared by every run this session. DB-backed rolling counters
 // keyed by UTC day / ISO week persist across sessions. Built only when a ceiling is configured, so
 // with no `budgets` in taicho.yaml the loop does zero extra DB work (pre-Plan-09 behavior).
 const spendLedger = hasCeilings(config.budgets) ? makeSpendLedger(db, config.budgets) : undefined;

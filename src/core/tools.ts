@@ -531,7 +531,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         const requested = edges ?? [];
         const valid = requested.filter((e) => nodeExists(ctx.db, e.to)); // drop dangling edge targets
         const node = KbNode.parse({
-          id: mkKbId(), title, content, kind, summary, scope: "deck",
+          id: mkKbId(), title, content, kind, summary, scope: "squad",
           source: ctx.ingestSource ?? `${ctx.agentId}:${ctx.runId}`, edges: valid, created: new Date().toISOString(),
         });
         writeNode(ctx.ws, ctx.db, node);
@@ -684,7 +684,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   // Skills are a universal agent capability (like the MCP-tools grant): every agent can discover and
   // load reviewed procedures. Not gated by agent.tools; built-ins still win over MCP tools below.
   set.find_skills = tool({
-    description: "Search the deck's reusable skills (reviewed procedures for repeatable operations) by what you're trying to do. Returns matching skill names + when to use them; call use_skill to load the full procedure.",
+    description: "Search the squad's reusable skills (reviewed procedures for repeatable operations) by what you're trying to do. Returns matching skill names + when to use them; call use_skill to load the full procedure.",
     inputSchema: z.object({ query: z.string(), k: z.number().int().positive().max(20).default(6) }),
     execute: async ({ query, k }) => ({ matches: rankSkills(getActiveSkills(ctx.db), query, k).map((h) => ({ id: h.id, name: h.name, description: h.description })) }),
   });

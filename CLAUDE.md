@@ -164,7 +164,7 @@ Design/rationale: `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`.
 - **`src/core/otel.ts`** — `initTelemetry` builds a `NodeTracerProvider` +
   `AsyncLocalStorageContextManager` (context propagation across the delegation's await boundaries — Bun
   implements `AsyncLocalStorage`) + a `MeterProvider`, both OTLP. Returns a `Telemetry` handle threaded
-  through `RunDeps` like the deck ledger (undefined ⇒ disabled). Test seam: inject `spanExporter` /
+  through `RunDeps` like the spend ledger (undefined ⇒ disabled). Test seam: inject `spanExporter` /
   `metricReader` (in-memory, no network). The OTLP exporters read the STANDARD `OTEL_*` env vars
   themselves (endpoint/headers/protocol) — nothing bespoke.
 - **`loop.ts`** — every `streamText` gets `experimental_telemetry: { isEnabled, tracer, … }`, so the AI

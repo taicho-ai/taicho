@@ -39,7 +39,7 @@ export interface ModelCallMetric {
   durationMs: number;
 }
 
-/** The live telemetry handle threaded through RunDeps (like the deck ledger). Undefined ⇒ disabled. */
+/** The live telemetry handle threaded through RunDeps (like the squad ledger). Undefined ⇒ disabled. */
 export interface Telemetry {
   /** Base tracer (service = the aggregate service name) for any span not tied to a specific agent. */
   tracer: Tracer;
@@ -115,7 +115,7 @@ export function initTelemetry(opts: InitTelemetryOpts = {}): Telemetry | undefin
 
     const reader = opts.metricReader
       ?? new PeriodicExportingMetricReader({ exporter: new OTLPMetricExporter(), exportIntervalMillis: 15_000 });
-    // Metrics stay under the single aggregate service (they're deck-wide, not per-agent).
+    // Metrics stay under the single aggregate service (they're squad-wide, not per-agent).
     meterProvider = new MeterProvider({ resource: resourceFromAttributes({ "service.name": baseService, "service.version": version }), readers: [reader] });
     metrics.setGlobalMeterProvider(meterProvider);
   } catch (e) {

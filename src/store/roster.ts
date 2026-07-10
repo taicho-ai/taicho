@@ -68,7 +68,7 @@ export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]):
 export const LIBRARIAN_ID = "librarian";
 export const LIBRARIAN_TOOLS = ["read_source", "remember", "recall", "forget", "reindex_knowledge"];
 
-const LIBRARIAN_IDENTITY = `You are the librarian of a taicho squad — the keeper of the deck's shared knowledge graph.
+const LIBRARIAN_IDENTITY = `You are the librarian of a taicho squad — the keeper of the squad's shared knowledge graph.
 
 Your job is to turn source documents into a clean graph, and to prune memory on command:
 - To INGEST a source document: read it with read_source, then extract the ENTITIES and RELATIONSHIPS it asserts — not chunks of prose. remember each entity/fact/decision (choose a fitting kind), and link them with typed edges (relates_to, depends_on, part_of, contradicts, derived_from). recall first to reuse existing node ids when linking. Keep each node atomic and self-contained.
@@ -181,8 +181,8 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
 
 /** Plan 14 T3 backfill — rescue existing workers that were born TOOLLESS. A worker persisted with an
  *  EMPTY tools list ([]) can't save/read/hand-off artifacts; it can only call the unconditional baseline
- *  (find_skills/use_skill) and hand work back as loose text (the root/2026-07-04-run6 deck). On boot we
- *  grant such workers the DEFAULT_WORKER_TOOLS baseline and rewrite their agent.md, so a live deck becomes
+ *  (find_skills/use_skill) and hand work back as loose text (the root/2026-07-04-run6 squad). On boot we
+ *  grant such workers the DEFAULT_WORKER_TOOLS baseline and rewrite their agent.md, so a live squad becomes
  *  usable without hand-editing each file. This is deliberately a CODE-level migration keyed on the empty
  *  list — the definitively-broken signal — NOT on "missing some artifact tool": a NON-empty explicit grant
  *  is a deliberate curation choice (root, librarian, or a hand-restricted worker) and is left untouched.

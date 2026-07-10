@@ -1,4 +1,4 @@
-/** Starter skills shipped so the deck is useful out of the box. Written as canonical files on first
+/** Starter skills shipped so the squad is useful out of the box. Written as canonical files on first
  *  boot (only when skills/ is empty), then indexed by reindexSkills. Fixed ids ⇒ idempotent. */
 import { mkdir, writeFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -55,7 +55,7 @@ export const STARTER_SKILLS: Skill[] = [
     description: "Recall shared knowledge before acting and record durable facts so the squad stops re-deriving them.",
     tags: ["knowledge", "memory", "recall", "remember"], created: SEED_TS,
     body: [
-      "Use the deck knowledgebase on repeatable work:",
+      "Use the squad knowledgebase on repeatable work:",
       "1. recall(query) FIRST — reuse existing facts/decisions instead of re-deriving them.",
       "2. When you learn something durable (a decision, entity, or fact), remember it with a clear title and typed edges to related nodes (recall first to get ids to link to).",
       "3. Keep nodes atomic and self-contained; prefer linking over duplicating.",

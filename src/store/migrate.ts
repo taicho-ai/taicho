@@ -102,6 +102,7 @@ const MIGRATIONS: Migration[] = [
   // v6: deck spend counters (Plan 09). Rolling per-period totals keyed by UTC day / ISO week so
   // deck-wide budget ceilings span sessions. An enforcement counter, not a ledger of record — traces
   // stay canon for /costs reporting; this just answers "how much has the deck spent this day/week".
+  // (v7 renames this table to squad_spend. Migrations are history — this DDL stays as it shipped.)
   {
     version: 6,
     up: (db) =>
@@ -115,6 +116,35 @@ const MIGRATIONS: Migration[] = [
           PRIMARY KEY (period_kind, period_key)
         );
       `),
+  },
+  // v7: Plan 19 — "deck" retires in favour of "squad" (every agent in the workspace; taicho is 隊長,
+  // squad leader). Unlike the DeckLedger→SpendLedger rename this touches PERSISTED values, so it is a
+  // real migration, not a find-and-replace:
+  //   · kb_nodes.scope rows 'deck' → 'squad'. The column DEFAULT stays 'deck' because SQLite cannot
+  //     alter a default without rebuilding the table — and it is inert, since store/knowledge.ts always
+  //     supplies scope explicitly. Node FILES are canon; reconcileKbScope() rewrites their frontmatter
+  //     at boot and reindexKnowledge() then refreshes these rows anyway. This UPDATE covers the window
+  //     before that runs, and any DB whose canonical files were removed.
+  //   · deck_spend → squad_spend. Rows carry forward: silently resetting a user's running weekly total
+  //     would be rude, and the counter is cheap to move.
+  {
+    version: 7,
+    up: (db) => {
+      db.exec("UPDATE kb_nodes SET scope = 'squad' WHERE scope = 'deck'");
+      const legacy = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'deck_spend'").get();
+      if (legacy) db.exec("ALTER TABLE deck_spend RENAME TO squad_spend");
+      else
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS squad_spend (
+            period_kind TEXT NOT NULL,
+            period_key  TEXT NOT NULL,
+            tokens      INTEGER NOT NULL DEFAULT 0,
+            cost_usd    REAL NOT NULL DEFAULT 0,
+            updated     INTEGER DEFAULT (unixepoch()),
+            PRIMARY KEY (period_kind, period_key)
+          );
+        `);
+    },
   },
 ];
 

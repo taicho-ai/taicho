@@ -140,7 +140,7 @@ test("stops with exhausted when the cost cap is reached (not the iteration cap)"
   expect((model as any).doStreamCalls.length).toBe(1); // one $1 call exceeds the $0.001 cap
 });
 
-// --- Plan 09: deck-wide ceilings, enforced in the loop (the one meter) -----------------------------
+// --- Plan 09: squad-wide ceilings, enforced in the loop (the one meter) -----------------------------
 // A fake ledger stands in for the DB-backed one: current() is the running cross-session total; add()
 // accumulates the way the real rolling counter does, so a test can watch spend cross a ceiling.
 function fakeLedger(init: Partial<SpendTotals>, ceilings: SpendCeilings) {
@@ -154,18 +154,18 @@ function fakeLedger(init: Partial<SpendTotals>, ceilings: SpendCeilings) {
   return { ledger, adds };
 }
 
-test("deck ceiling ALREADY crossed refuses the run before any model call", async () => {
+test("squad ceiling ALREADY crossed refuses the run before any model call", async () => {
   // Plan 07: the loop drives streamText (doStream); a ceiling ALREADY crossed refuses before any call.
   const model = new MockLanguageModelV3({ doStream: streamOf(finalChunks) });
   const { ledger } = fakeLedger({ dayTokens: 1000 }, { dailyTokens: 1000 });
   const res = await runLoop({ model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools, spendLedger: ledger });
   expect(res.exhausted).toBe(true);
-  expect(res.text).toContain("deck budget exhausted");
+  expect(res.text).toContain("squad budget exhausted");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   expect((model as any).doStreamCalls.length).toBe(0); // refused at the top of the loop, before spending
 });
 
-test("deck ceiling stops the run once ACCUMULATED spend crosses it (not the iteration cap)", async () => {
+test("squad ceiling stops the run once ACCUMULATED spend crosses it (not the iteration cap)", async () => {
   // Always tool-calls, so only a budget stops it. usage fixture = 2 tok/call; dailyTokens:5 is crossed
   // after the 3rd call (2→4→6), so the 4th iteration's top-of-loop check refuses.
   const model = new MockLanguageModelV3({ doStream: streamOf(toolCallChunks) });
@@ -173,13 +173,13 @@ test("deck ceiling stops the run once ACCUMULATED spend crosses it (not the iter
   const { ledger, adds } = fakeLedger({}, { dailyTokens: 5 });
   const res = await runLoop({ model, agent: roomy, system: "S", messages: [{ role: "user", content: "go" }], tools, spendLedger: ledger });
   expect(res.exhausted).toBe(true);
-  expect(res.text).toContain("deck budget exhausted");
+  expect(res.text).toContain("squad budget exhausted");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   expect((model as any).doStreamCalls.length).toBe(3); // 3 calls committed 6 tok, then refused
   expect(adds.length).toBe(3);
 });
 
-test("a subscription (codexBackend) call commits TOKENS but 0 USD to the deck ledger", async () => {
+test("a subscription (codexBackend) call commits TOKENS but 0 USD to the squad ledger", async () => {
   const model = new MockLanguageModelV3({
     doStream: (async () => ({
       stream: simulateReadableStream({

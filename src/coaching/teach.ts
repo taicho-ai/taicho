@@ -15,8 +15,8 @@ type Usage = Awaited<ReturnType<typeof generateText>>["usage"];
  *    generateText 400s ("Stream must be set to true" / "Instructions are required") for a signed-in
  *    subscription user. So on that backend the call routes through streamText (drained to completion),
  *    exactly like the agent loop (see loop.ts). The env path (api key) uses plain generateText.
- *  - spendLedger/priceUsd (Plan 09): the distiller is a real model call the deck caused, so it's metered
- *    against the deck ceiling. It runs OUTSIDE any run (no trace) ⇒ NOT surfaced in /costs (see costs.ts).
+ *  - spendLedger/priceUsd (Plan 09): the distiller is a real model call the squad caused, so it's metered
+ *    against the squad ceiling. It runs OUTSIDE any run (no trace) ⇒ NOT surfaced in /costs (see costs.ts).
  *    Subscription/unpriced ⇒ 0 USD (honest: tokens still count; the USD ceiling never fabricates spend). */
 export interface DraftOptions {
   codexBackend?: boolean;
@@ -50,7 +50,7 @@ export async function draftPolicy(model: Model, agentId: string, correction: str
     usage = res.usage;
   }
 
-  // Commit the distiller's spend to the deck ceiling (Plan 09) BEFORE parsing — the tokens were spent
+  // Commit the distiller's spend to the squad ceiling (Plan 09) BEFORE parsing — the tokens were spent
   // regardless of whether the JSON parses. No priceUsd (subscription/unpriced) ⇒ 0 USD; tokens always count.
   if (opts?.spendLedger) {
     const inputTokens = usage?.inputTokens ?? 0;

@@ -1,4 +1,4 @@
-/** Plan 09: deck-wide spend ceilings. The agent loop is the one meter (tokens + advisory USD); this
+/** Plan 09: squad-wide spend ceilings. The agent loop is the one meter (tokens + advisory USD); this
  *  is the durable rolling counter it reads/commits against so ceilings SPAN SESSIONS. Counters are
  *  keyed by UTC day (YYYY-MM-DD) and ISO week (YYYY-Www): when the day/week rolls over the key
  *  changes and the new period naturally reads 0 — no explicit reset. Files/traces stay canon for
@@ -21,7 +21,7 @@ export interface SpendTotals {
   weekCostUsd: number;
 }
 
-/** The seam the loop enforces against: read the running deck total, commit a call's spend. Bound to
+/** The seam the loop enforces against: read the running squad total, commit a call's spend. Bound to
  *  the DB + configured ceilings so the loop stays provider-agnostic and needs no DB import. */
 export interface SpendLedger {
   ceilings: SpendCeilings;
@@ -69,7 +69,7 @@ export function isoWeekKey(date: Date): string {
 }
 
 function readPeriod(db: Database, kind: "day" | "week", key: string): { tokens: number; cost: number } {
-  const r = db.query("SELECT tokens, cost_usd FROM deck_spend WHERE period_kind = ? AND period_key = ?").get(kind, key) as
+  const r = db.query("SELECT tokens, cost_usd FROM squad_spend WHERE period_kind = ? AND period_key = ?").get(kind, key) as
     | { tokens: number; cost_usd: number }
     | null;
   return { tokens: r?.tokens ?? 0, cost: r?.cost_usd ?? 0 };
@@ -84,10 +84,10 @@ export function readSpendTotals(db: Database, now: () => Date = () => new Date()
   return { dayTokens: day.tokens, weekTokens: week.tokens, dayCostUsd: day.cost, weekCostUsd: week.cost };
 }
 
-/** A DB-backed deck ledger. `now` is injectable so tests can cross day/week boundaries deterministically. */
+/** A DB-backed squad ledger. `now` is injectable so tests can cross day/week boundaries deterministically. */
 export function makeSpendLedger(db: Database, ceilings: SpendCeilings, now: () => Date = () => new Date()): SpendLedger {
   const upsert = db.query(
-    `INSERT INTO deck_spend (period_kind, period_key, tokens, cost_usd, updated)
+    `INSERT INTO squad_spend (period_kind, period_key, tokens, cost_usd, updated)
      VALUES (?, ?, ?, ?, unixepoch())
      ON CONFLICT(period_kind, period_key) DO UPDATE SET
        tokens = tokens + excluded.tokens,

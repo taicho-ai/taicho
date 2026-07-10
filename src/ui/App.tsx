@@ -134,7 +134,7 @@ export function App(props: {
   mcpYamlServers?: string[];
   embed?: (text: string) => Promise<Float32Array>;
   startupNotice?: string;
-  spendLedger?: SpendLedger; // Plan 09: deck-wide spend ledger (undefined ⇒ no deck ceilings configured)
+  spendLedger?: SpendLedger; // Plan 09: squad-wide spend ledger (undefined ⇒ no squad ceilings configured)
   telemetry?: Telemetry;   // Plan 16: OpenTelemetry handle (undefined ⇒ OTLP export off)
   viewMode?: ViewMode;     // Plan 10: initial live-view mode (defaults to the persisted pref / `both`)
   terminalSize?: { columns: number; rows: number }; // Plan 10: authoritative size seam (tests/embeds); else live stdout
@@ -600,7 +600,7 @@ export function App(props: {
     configDefaults: props.configDefaults,
     mcp: props.mcp,
     embed: props.embed,
-    spendLedger: props.spendLedger, // Plan 09: deck-wide ceilings enforced in the loop, shared by all runs
+    spendLedger: props.spendLedger, // Plan 09: squad-wide ceilings enforced in the loop, shared by all runs
     telemetry: props.telemetry,   // Plan 16: OpenTelemetry export, shared by all runs this session
     dispatch,
     awaitTask,
@@ -813,7 +813,7 @@ export function App(props: {
       setActivity(`teaching ${agentId}…`);
       try {
         // Plan 07: route the distiller through the Codex-safe streaming shape when signed in with a
-        // ChatGPT subscription (a bare non-streaming call 400s). Plan 09: meter it against the deck
+        // ChatGPT subscription (a bare non-streaming call 400s). Plan 09: meter it against the squad
         // ceiling (real model call, but no run trace ⇒ not surfaced in /costs — see coaching/teach.ts).
         const draft = await draftPolicy(activeModel, agentId, correction, {
           codexBackend: authSource.kind === "oauth-openai-codex",

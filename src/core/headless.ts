@@ -154,7 +154,7 @@ export interface HeadlessDeps {
   configDefaults?: RunDeps["configDefaults"];
   mcp?: RunDeps["mcp"];
   embed?: RunDeps["embed"];
-  spendLedger?: RunDeps["spendLedger"]; // Plan 09: deck-wide ceilings enforced in the loop
+  spendLedger?: RunDeps["spendLedger"]; // Plan 09: squad-wide ceilings enforced in the loop
   telemetry?: RunDeps["telemetry"]; // Plan 16: OpenTelemetry export (undefined ⇒ off)
 }
 

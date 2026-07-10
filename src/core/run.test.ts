@@ -70,7 +70,7 @@ test("worker run writes an immutable artifact and a completed trace", async () =
   expect(existsSync(join(ws, "runs", "writer", `${res.runId.split("/")[1]}.json`))).toBe(true);
 });
 
-test("auto-injects deck knowledge for an agent with `recall` and records it in the trace ledger", async () => {
+test("auto-injects squad knowledge for an agent with `recall` and records it in the trace ledger", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "seeker", role: "seeks", identity: "You seek.", tools: ["recall"] }, "root");
   writeNode(ws, db, KbNode.parse({ id: "kb_seed", title: "Deploy target", content: "we deploy to fly.io", created: new Date().toISOString() }));
@@ -846,17 +846,17 @@ test("aggregate folds checker spend: with criteria it equals own loop + child ru
   expect(res.trace.aggregate!.costUsd).toBeCloseTo(res.trace.costUsd! + childCost + verifierCost, 6);
 });
 
-test("Plan 09: a criteria delegation commits verifier spend to the deck ceiling AND /costs surfaces it exactly once", async () => {
+test("Plan 09: a criteria delegation commits verifier spend to the squad ceiling AND /costs surfaces it exactly once", async () => {
   const { ws, db } = await boot();
   bossAndWorker(ws, db);
-  // boss delegates WITH criteria ⇒ an independent checker call runs on the shared deck ledger.
+  // boss delegates WITH criteria ⇒ an independent checker call runs on the shared squad ledger.
   const model = new MockLanguageModelV3({ doGenerate: mockValues(
     call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" }), // boss iter1
     text("attempt one, mentions Y"),                     // worker (1 call)
     text('{"pass": true, "reasons": []}'),               // checker (1 independent call)
     text("boss done"),                                   // boss final
   ) as any });
-  // A deck ceiling IS configured (ceiling high enough not to block) so the ledger is live and enforced.
+  // A squad ceiling IS configured (ceiling high enough not to block) so the ledger is live and enforced.
   const spendLedger = makeSpendLedger(db, { dailyTokens: 10_000_000 });
   const deps = makeDeps({ ws, db, model, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens, spendLedger });
   const boss = await loadAgent(ws, "boss");
@@ -874,17 +874,17 @@ test("Plan 09: a criteria delegation commits verifier spend to the deck ceiling 
   // (1) THE CEILING SEES THE VERIFIER: the deck_spend counter the ceiling reads = boss loop + worker
   // run + verifier call. Before the fix the verifier ran with no ledger, so this would be short by
   // verifierTokens (the under-count the finding flagged) and the daily ceiling could never bound it.
-  const deck = readSpendTotals(db);
-  expect(deck.dayTokens).toBe(res.trace.tokens + workerTrace.tokens + res.trace.verifierTokens);
-  expect(deck.dayCostUsd).toBeCloseTo(res.trace.costUsd! + workerTrace.costUsd! + res.trace.verifierCostUsd, 6);
+  const squad = readSpendTotals(db);
+  expect(squad.dayTokens).toBe(res.trace.tokens + workerTrace.tokens + res.trace.verifierTokens);
+  expect(squad.dayCostUsd).toBeCloseTo(res.trace.costUsd! + workerTrace.costUsd! + res.trace.verifierCostUsd, 6);
 
   // (2) /costs SURFACES IT ONCE: rollup sums each trace's OWN spend (loop + verifier); the verifier
   // writes no child trace, so adding verifierTokens counts it exactly once — never double.
   const rollup = rollupCosts([res.trace, workerTrace]);
   expect(rollup.totals.tokens).toBe(res.trace.tokens + res.trace.verifierTokens + workerTrace.tokens);
-  // parity: /costs and the deck ceiling report the SAME comprehensive number — verifier included, no double-count.
-  expect(rollup.totals.tokens).toBe(deck.dayTokens);
-  expect(rollup.totals.costUsd).toBeCloseTo(deck.dayCostUsd, 6);
+  // parity: /costs and the squad ceiling report the SAME comprehensive number — verifier included, no double-count.
+  expect(rollup.totals.tokens).toBe(squad.dayTokens);
+  expect(rollup.totals.costUsd).toBeCloseTo(squad.dayCostUsd, 6);
 });
 
 test("subscription checker is cost-honest: costUsd is 0 (never fabricated) even with a pricer, tokens still metered so they fold", async () => {

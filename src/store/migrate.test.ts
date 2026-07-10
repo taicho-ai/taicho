@@ -46,9 +46,42 @@ test("v5 creates the tasks index table", () => {
   expect(() => db.query("SELECT id, agent, goal, status, kind, root_run_id, result_ref, summary, created, updated FROM tasks").all()).not.toThrow();
 });
 
-test("v6 creates the deck_spend counter table and bumps SCHEMA_VERSION to 6", () => {
+test("v7 leaves a fresh DB with squad_spend (v6's deck_spend renamed) and bumps SCHEMA_VERSION to 7", () => {
   const db = openDb(ws());
-  expect(SCHEMA_VERSION).toBe(6);
-  expect(getMeta(db, "schema_version")).toBe("6");
-  expect(() => db.query("SELECT period_kind, period_key, tokens, cost_usd, updated FROM deck_spend").all()).not.toThrow();
+  expect(SCHEMA_VERSION).toBe(7);
+  expect(getMeta(db, "schema_version")).toBe("7");
+  expect(() => db.query("SELECT period_kind, period_key, tokens, cost_usd, updated FROM squad_spend").all()).not.toThrow();
+  expect(() => db.query("SELECT * FROM deck_spend").all()).toThrow(); // the old name is gone
+});
+
+/** Rewind a current DB to look like one written by a pre-Plan-19 taicho: the counter table under its old
+ *  name, kb rows scoped 'deck', schema_version pinned at 6. This is the ONLY shape that exercises v7 —
+ *  a fresh DB never has legacy rows, so testing against openDb() alone would pass while every real
+ *  workspace broke. */
+function rewindToV6(db: ReturnType<typeof openDb>) {
+  db.exec("ALTER TABLE squad_spend RENAME TO deck_spend");
+  db.query("INSERT INTO deck_spend (period_kind, period_key, tokens, cost_usd) VALUES ('day', '2026-07-01', 4200, 1.5)").run();
+  db.query(
+    "INSERT INTO kb_nodes (id, kind, title, content, scope) VALUES ('kb_legacy', 'fact', 'T', 'C', 'deck')",
+  ).run();
+  db.query("UPDATE meta SET value = '6' WHERE key = 'schema_version'").run();
+}
+
+test("v7 migrates a legacy v6 DB: kb scope 'deck' -> 'squad', deck_spend -> squad_spend with rows intact", () => {
+  const db = openDb(ws());
+  rewindToV6(db);
+
+  migrate(db);
+
+  expect(getMeta(db, "schema_version")).toBe("7");
+  // The scope value moved, and the row survived.
+  expect((db.query("SELECT scope FROM kb_nodes WHERE id = 'kb_legacy'").get() as { scope: string }).scope).toBe("squad");
+  // The counter carried forward — silently resetting someone's running weekly total would be rude.
+  const row = db.query("SELECT tokens, cost_usd FROM squad_spend WHERE period_key = '2026-07-01'").get() as { tokens: number; cost_usd: number };
+  expect(row.tokens).toBe(4200);
+  expect(row.cost_usd).toBeCloseTo(1.5, 6);
+  expect(() => db.query("SELECT * FROM deck_spend").all()).toThrow();
+
+  migrate(db); // idempotent — a second boot must not re-run the rename and throw
+  expect(getMeta(db, "schema_version")).toBe("7");
 });

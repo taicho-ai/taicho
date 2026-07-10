@@ -1,4 +1,4 @@
-/** Deck knowledgebase store: one file per node at kb/nodes/<kb_id>.md (YAML frontmatter = the node
+/** Squad knowledgebase store: one file per node at kb/nodes/<kb_id>.md (YAML frontmatter = the node
  *  minus `content`, body = content). Files are canon; kb_nodes/kb_edges in SQLite are a rebuildable
  *  index. Mirrors store/policy.ts + store/roster.ts. */
 import { YAML } from "bun";
@@ -102,6 +102,27 @@ export function neighbors(db: Database, seedIds: string[], hops: number, rels?: 
     GROUP BY id`;
   const params = [seedJson, hops, ...(rels && rels.length ? rels : []), seedJson];
   return db.query(sql).all(...params) as { id: string; depth: number }[];
+}
+
+/** Plan 19 Ph1b: rewrite any node file still carrying the legacy `scope: deck` frontmatter. `parseNode`
+ *  already normalizes the value on read (schemas/knowledge.ts KbScope), so this just re-serializes what
+ *  it parsed — the files are canon and must eventually say what they mean. Idempotent, and a no-op on a
+ *  workspace that has never seen a pre-Plan-19 taicho. Runs at boot, before reindexKnowledge. */
+export function reconcileKbScope(ws: string, db: Database): number {
+  const dir = paths.kbNodeDir(ws);
+  if (!existsSync(dir)) return 0;
+  let migrated = 0;
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith(".md")) continue;
+    const file = join(dir, f);
+    let raw: string;
+    try { raw = readFileSync(file, "utf8"); } catch { continue; }
+    if (!/^scope:\s*["']?deck["']?\s*$/m.test(raw)) continue;
+    try { writeNode(ws, db, parseNode(raw)); migrated++; }
+    catch (e) { log.warn(`kb scope backfill skipped ${f}`, e); }
+  }
+  if (migrated) log.info(`kb: rewrote ${migrated} node file(s) from scope 'deck' to 'squad'`);
+  return migrated;
 }
 
 /** Rebuild the kb_nodes/kb_edges index from the canonical files (proves files-are-canon). */

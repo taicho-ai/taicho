@@ -31,7 +31,7 @@ const draftStreamModel = () => new MockLanguageModelV3({
   })) as any,
 });
 
-/** A minimal in-memory deck ledger that just records what was committed — no DB needed here. */
+/** A minimal in-memory squad ledger that just records what was committed — no DB needed here. */
 function spyLedger(): { ledger: SpendLedger; committed: { tokens: number; costUsd: number } } {
   const committed = { tokens: 0, costUsd: 0 };
   const ledger: SpendLedger = {
@@ -48,10 +48,10 @@ test("draftPolicy parses a JSON draft from the model", async () => {
   expect(draft.scope).toBe("agent");
 });
 
-test("draftPolicy meters its distiller call into the deck ledger (Plan 09) — priced USD when a pricer is present", async () => {
+test("draftPolicy meters its distiller call into the squad ledger (Plan 09) — priced USD when a pricer is present", async () => {
   const { ledger, committed } = spyLedger();
   await draftPolicy(draftModel(), "writer", "always cite", { spendLedger: ledger, priceUsd: ({ inputTokens, outputTokens }) => inputTokens + outputTokens });
-  expect(committed.tokens).toBeGreaterThan(0); // the coaching call counts against the deck ceiling
+  expect(committed.tokens).toBeGreaterThan(0); // the coaching call counts against the squad ceiling
   expect(committed.costUsd).toBeGreaterThan(0); // priced ⇒ real USD committed
 });
 
@@ -76,7 +76,7 @@ test("Codex subscription path (Plan 07): draftPolicy STREAMS and routes system -
   expect(JSON.stringify(call.prompt)).not.toContain("standing instruction"); // NOT duplicated as a system message
 });
 
-test("Codex subscription path also meters its streamed usage into the deck ledger", async () => {
+test("Codex subscription path also meters its streamed usage into the squad ledger", async () => {
   const { ledger, committed } = spyLedger();
   await draftPolicy(draftStreamModel(), "writer", "always cite", { codexBackend: true, spendLedger: ledger });
   expect(committed.tokens).toBeGreaterThan(0); // usage read off the streamed result, committed to the ceiling

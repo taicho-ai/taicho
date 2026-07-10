@@ -61,7 +61,7 @@ every connected server's tools** — the built-in defaults plus anything you add
 with `/mcp` (`/mcp add <name> <command…>`, `/mcp list`, `/mcp remove <name>`).
 
 **Firecrawl is built in.** Set a [Firecrawl](https://firecrawl.dev) key and the Firecrawl MCP
-(scrape / crawl / search / map / extract) connects on every deck, available to all agents:
+(scrape / crawl / search / map / extract) connects on every squad, available to all agents:
 
 ```
 export FIRECRAWL_API_KEY=fc-...     # the Firecrawl MCP server + root's docs reader
@@ -76,7 +76,7 @@ command/URL on a card*:
 Secrets a server needs stay in your environment — reference them as `${VAR}` in the config
 (in `env`, `headers`, or the URL), never inline.
 
-## Knowledge (shared deck memory)
+## Knowledge (shared squad memory)
 
 The squad shares a **knowledgebase** — a graph of typed nodes (facts, decisions, entities) linked by
 typed edges. Any agent granted `remember` / `recall` can save durable knowledge and search it by
@@ -135,14 +135,14 @@ The root orchestrator has two extra, captain-gated powers:
 - **`propose_skill`** — root can draft a reusable skill; you approve it on a card, and on approval it's
   saved `active` and the whole squad can `use_skill` it.
 - **`run_command`** — root can run shell commands. This is always on: `run_command` is a built-in
-  root tool that every deck's root gets on boot, not something you enable per deck. Each command is
+  root tool that every squad's root gets on boot, not something you enable per squad. Each command is
   checked by the external [`dcg`](https://github.com/Dicklesworthstone/destructive_command_guard)
   guard: commands it clears run automatically; anything it flags — or any command at all if `dcg`
   isn't installed — is sent to you for approval first. Output is captured (capped) and returned.
   Install `dcg` to reduce approval prompts; without it, every command asks (fail-safe).
 
 Both are root-only. There's no sandbox in this version — the guard, the fail-safe (when in doubt,
-ask), and your approval on every blocked command are the guardrails, not a per-deck toggle.
+ask), and your approval on every blocked command are the guardrails, not a per-squad toggle.
 
 ## Observability
 
