@@ -5,6 +5,9 @@ import { join } from "node:path";
 export const paths = {
   agentDir: (ws: string, id: string) => join(ws, "agents", id),
   agentFile: (ws: string, id: string) => join(ws, "agents", id, "agent.md"),
+  teamsDir: (ws: string) => join(ws, "teams"),
+  teamDir: (ws: string, id: string) => join(ws, "teams", id),
+  teamFile: (ws: string, id: string) => join(ws, "teams", id, "team.md"),
   policyDir: (ws: string, id: string) => join(ws, "agents", id, "policies"),
   exemplarDir: (ws: string, id: string) => join(ws, "agents", id, "exemplars"),
   artifactDir: (ws: string) => join(ws, "artifacts"),
@@ -27,6 +30,7 @@ export const paths = {
 
 export async function ensureWorkspace(ws: string) {
   await mkdir(join(ws, "agents"), { recursive: true });
+  await mkdir(join(ws, "teams"), { recursive: true });
   await mkdir(join(ws, "artifacts"), { recursive: true });
   await mkdir(join(ws, "runs"), { recursive: true });
   await mkdir(join(ws, "conversations"), { recursive: true });

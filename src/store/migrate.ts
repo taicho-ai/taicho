@@ -146,7 +146,33 @@ const MIGRATIONS: Migration[] = [
         `);
     },
   },
+  // v8: Plan 19 — team membership on the registry index. `registry` is created by openDb's BASELINE
+  // `CREATE TABLE IF NOT EXISTS` (db.ts), not by a migration, and IF NOT EXISTS cannot add a column to a
+  // table that already exists. So the column is declared in BOTH places and both are idempotent:
+  //   · baseline db.ts  — gives a FRESH workspace the column at creation
+  //   · this ALTER      — gives every EXISTING workspace the column on upgrade
+  // Either one alone is a bug (baseline alone silently skips existing DBs; ALTER alone throws
+  // "duplicate column" on fresh ones), which is why the guard below is a check and not a try/catch.
+  // Membership is canon in agents/<id>/agent.md (`team:`); this column is the derived index that makes
+  // "who is on team news" one query instead of a full roster scan.
+  {
+    version: 8,
+    up: (db) => {
+      // migrate() also runs standalone over a bare Database in unit tests, where the baseline never ran.
+      if (!tableExists(db, "registry")) return;
+      if (!columnExists(db, "registry", "team")) db.exec("ALTER TABLE registry ADD COLUMN team TEXT");
+      db.exec("CREATE INDEX IF NOT EXISTS registry_team ON registry(team)");
+    },
+  },
 ];
+
+function tableExists(db: Database, table: string): boolean {
+  return !!db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+}
+
+function columnExists(db: Database, table: string, column: string): boolean {
+  return (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).some((c) => c.name === column);
+}
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
 

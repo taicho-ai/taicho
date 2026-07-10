@@ -7,7 +7,7 @@ import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schem
 import { assemble } from "./prompt";
 import { runLoop } from "./loop";
 import { runChecker } from "./verification";
-import { canDelegate, visibleToRows } from "./registry";
+import { canDelegate, visibleToRows, acl } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
 import { readArtifact } from "../store/artifacts";
@@ -384,7 +384,7 @@ export async function executeRun(
     spanEvents, emitStep, telemetry: tel,
     requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
-    canDelegate: (toId) => canDelegate(opts.agent, toId),
+    canDelegate: (toId) => canDelegate(opts.agent, loadIndex(deps.db).find((r) => r.id === toId) ?? { id: toId }),
     runChild: async ({ to, goal, context, criteria, inputArtifacts, callId }) => {
       const child = await loadAgent(deps.ws, to);
       return executeRun(deps, {
@@ -448,11 +448,12 @@ export async function executeRun(
     awaitTask: deps.awaitTask
       ? (taskId, timeoutMs) => deps.awaitTask!(taskId, timeoutMs, opts.agent.id)
       : undefined,
-    // Discovery respects the caller's visibility ACL, consistent with the inline-roster path.
+    // Discovery respects the caller's visibility ACL, consistent with the inline-roster path. `acl`
+    // understands the Plan 19 `team:<id>` entry, so a member's find_agents is scoped to its own team.
     findAgents: (query, k) =>
       rankAgents(
         loadIndex(deps.db)
-          .filter((r) => opts.agent.canSee.includes("*") || opts.agent.canSee.includes(r.id))
+          .filter((r) => acl(opts.agent.canSee, r))
           .filter((r) => r.id !== opts.agent.id),
         query,
         k,
@@ -464,8 +465,11 @@ export async function executeRun(
     verifierSpend: { tokens: 0, costUsd: 0 },
     childTraces: [],
     delegationGuard: (to) => {
-      if (!canDelegate(opts.agent, to)) return { ok: false, error: `not permitted to delegate to "${to}"` };
-      if (!loadIndex(deps.db).some((r) => r.id === to)) return { ok: false, error: `no agent "${to}"` };
+      // The target row carries `team`, which a `team:<id>` ACL entry matches against. A target that
+      // does not exist still gets an ACL check first, so the error the model sees is unchanged.
+      const row = loadIndex(deps.db).find((r) => r.id === to);
+      if (!canDelegate(opts.agent, row ?? { id: to })) return { ok: false, error: `not permitted to delegate to "${to}"` };
+      if (!row) return { ok: false, error: `no agent "${to}"` };
       if (to === opts.agent.id || ancestry.includes(to)) return { ok: false, error: `delegation cycle: "${to}" is already an ancestor` };
       // inclusive: root is depth 0, so this allows up to MAX_DELEGATION_DEPTH levels of descendants
       if (depth + 1 > MAX_DELEGATION_DEPTH) return { ok: false, error: `max delegation depth (${MAX_DELEGATION_DEPTH}) reached` };

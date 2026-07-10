@@ -5,6 +5,7 @@ import { ensureWorkspace } from "./store/files";
 import { openDb } from "./store/db";
 import { seedRoot, seedLibrarian, reindex, loadIndex, reconcileWorkerTools, LIBRARIAN_ID } from "./store/roster";
 import { reindexKnowledge, reconcileKbScope } from "./store/knowledge";
+import { validateTeams } from "./store/teams";
 import { diffSources } from "./store/sources";
 import { createEmbedder } from "./core/embed";
 import { ensureEmbedSpace } from "./store/migrate";
@@ -73,7 +74,12 @@ const kbDrift = diffSources(ws, db);
 // auto-resume is deferred). The captain can inspect/cancel via /tasks.
 reindexTasks(ws, db);
 const interruptedTasks = reconcileTasks(ws, db);
+// Plan 19: a team whose `lead` is missing, or sits on a DIFFERENT team, would route work out of the
+// team it is supposed to run. Report it — one bad team.md must not block boot, and the fix is an edit.
+const teamProblems = validateTeams(ws, db);
 const notices: string[] = [];
+if (teamProblems.length)
+  notices.push(`teams: ${teamProblems.map((p) => `${p.team} (${p.problem})`).join("; ")} — /teams to review`);
 if (kbDrift.changed.length || kbDrift.deleted.length)
   notices.push(`kb: ${kbDrift.changed.length} changed / ${kbDrift.deleted.length} removed source(s) — run /kb sync`);
 if (interruptedTasks.length)
