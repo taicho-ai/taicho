@@ -14,6 +14,7 @@ export interface SlashCommand { name: string; summary: string; usage?: string; r
 export const COMMANDS: SlashCommand[] = [
   { name: "help", summary: "list commands" },
   { name: "agents", summary: "list the squad" },
+  { name: "teams", summary: "list teams, their leads, and their members" },
   { name: "costs", summary: "cross-session spend rollup (agent / day / model)", usage: "[agent]" },
   { name: "tasks", summary: "list / cancel background tasks", usage: "[cancel <id>]" },
   { name: "schedules", summary: "scheduled/triggered runs (cron / interval / watch)", usage: "list | add <goal> --every … | remove <id> | run <id>" },
@@ -46,6 +47,8 @@ export function suggestCommands(buffer: string): SlashCommand[] {
 
 export interface SlashDeps {
   roster: RegistryRow[];
+  /** Plan 19: the squad's teams, captain-owned files. Empty on a squad that has never made one. */
+  teams: { id: string; charter: string; lead?: string }[];
   listTraces: (agentId?: string) => RunTrace[]; // still the source /costs rolls up
   listPolicies: (agentId: string) => PolicyNote[];
   deletePolicy: (agentId: string, polId: string) => boolean;
@@ -63,7 +66,20 @@ export function runSlash(cmd: string, arg: string, deps: SlashDeps): Line[] {
       sys("  @<agent> <task> — address an agent · ESC to quit"),
     ];
   if (cmd === "agents")
-    return deps.roster.map((r) => sys(`  ${r.is_root ? "*" : "-"} ${r.id}: ${r.role}`));
+    return deps.roster.map((r) => sys(`  ${r.is_root ? "*" : "-"} ${r.id}: ${r.role}${r.team ? ` (${r.team})` : ""}`));
+  if (cmd === "teams") {
+    if (!deps.teams.length)
+      return [sys("  (no teams) — a team is a captain-owned file at teams/<id>/team.md")];
+    const out: Line[] = [];
+    for (const t of deps.teams) {
+      const members = deps.roster.filter((r) => r.team === t.id);
+      const how = t.lead ? `lead: ${t.lead}` : "routed by capability";
+      out.push(sys(`  ${t.id}: ${t.charter}`));
+      out.push(sys(`    ${how} · ${members.length} agent${members.length === 1 ? "" : "s"}`));
+      for (const m of members) out.push(sys(`      ${m.id === t.lead ? "*" : "-"} ${m.id}: ${m.role}`));
+    }
+    return out;
+  }
   if (cmd === "costs") {
     // Cross-session spend rollup from the per-run RunTrace records. Honest about subscription
     // (costUsd:null) runs — reports their tokens, never a fabricated $0. Optional [agent] scopes it.

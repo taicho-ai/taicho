@@ -15,6 +15,7 @@ import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../
 import { gatherConversationArtifacts } from "../core/conversation-artifacts";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
+import { listTeams } from "../store/teams";
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy, approvePolicy } from "../store/policy";
 import { updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
@@ -1014,7 +1015,11 @@ export function App(props: {
       return;
     }
     runSlashPure(cmd, arg, {
-      roster,
+      // Plan 19: read BOTH fresh. `teams` are captain-owned files and `roster` is the derived index of
+      // agent.md, so an edit + reindex shows up without a restart — and, crucially, /teams' member
+      // counts cannot disagree with the team list they are counted against.
+      roster: loadIndex(props.db),
+      teams: listTeams(props.ws).map((t) => ({ id: t.id, charter: t.charter, lead: t.lead })),
       listTraces: (a?: string) => listTraces(props.ws, a),
       listPolicies: (a: string) => listPolicies(props.ws, a),
       deletePolicy: (a: string, p: string) => deletePolicy(props.ws, a, p),

@@ -12,6 +12,7 @@ const trace = (id: string): RunTrace => ({
 });
 const deps = {
   roster,
+  teams: [] as { id: string; charter: string; lead?: string }[],
   listTraces: (a?: string) => (a ? [trace(`${a}/2026-06-11-run1`)] : [trace("root/2026-06-11-run1"), trace("w/2026-06-11-run1")]),
   listPolicies: (a: string) => a === "w" ? [{ id: "pol_1", agent: "w", when: "x", do: "y", scope: "agent", status: "approved", taughtBy: "user", created: "2026-06-11T00:00:00.000Z", expanded: [] } as any] : [],
   deletePolicy: (_a: string, p: string) => p === "pol_1",
@@ -49,7 +50,9 @@ test("/policies approve <id> flips a proposed note (via approvePolicy); unknown 
 
 test("suggestCommands: all on bare slash, prefix-filtered, none past the command or for non-slash", () => {
   expect(suggestCommands("/").length).toBe(COMMANDS.length);
-  expect(suggestCommands("/te").map((c) => c.name)).toEqual(["teach"]);
+  // Plan 19 added /teams, so "/te" is now ambiguous — both survive, in COMMANDS order.
+  expect(suggestCommands("/te").map((c) => c.name)).toEqual(["teams", "teach"]);
+  expect(suggestCommands("/teac").map((c) => c.name)).toEqual(["teach"]);
   expect(suggestCommands("/CO").map((c) => c.name)).toEqual(["costs"]); // case-insensitive
   expect(suggestCommands("/zzz")).toEqual([]);
   expect(suggestCommands("/costs ")).toEqual([]); // space -> into args, not completing the name
@@ -65,7 +68,7 @@ test("cycleIndex: wraps both ends, moves in the middle, guards empty", () => {
 });
 
 test("/help is derived from COMMANDS (lists every command)", () => {
-  const text = runSlash("help", "", { roster: [], listTraces: () => [], listPolicies: () => [], deletePolicy: () => false, approvePolicy: () => null }).map((l) => l.text).join("\n");
+  const text = runSlash("help", "", { teams: [], roster: [], listTraces: () => [], listPolicies: () => [], deletePolicy: () => false, approvePolicy: () => null }).map((l) => l.text).join("\n");
   for (const c of COMMANDS) expect(text).toContain(`/${c.name}`);
 });
 
@@ -150,4 +153,46 @@ test("parseArtifactsCommand parses subcommands (Plan 01 Ph4 UI)", () => {
   expect(parseArtifactsCommand("annotate doc").kind).toBe("error");          // needs a body
   expect(parseArtifactsCommand("show").kind).toBe("error");                  // needs a handle
   expect(parseArtifactsCommand("wat").kind).toBe("error");
+});
+
+// --- Plan 19: /teams ------------------------------------------------------------------------------
+
+const teamRoster = [
+  { id: "root", role: "orch", is_root: 1, team: null },
+  { id: "editor", role: "assigns copy", is_root: 0, team: "news" },
+  { id: "reporter", role: "files stories", is_root: 0, team: "news" },
+  { id: "quant", role: "prices instruments", is_root: 0, team: "trading" },
+];
+const teamDeps = {
+  ...deps,
+  roster: teamRoster,
+  teams: [
+    { id: "news", charter: "covers breaking stories", lead: "editor" },
+    { id: "trading", charter: "prices and risks instruments" },
+  ],
+};
+
+test("/teams on a squad with no teams says so, and points at the file", () => {
+  const out = runSlash("teams", "", deps).map((l) => l.text).join("\n");
+  expect(out).toContain("(no teams)");
+  expect(out).toContain("teams/<id>/team.md");
+});
+
+test("/teams lists each team, how it routes, and its members with the lead marked", () => {
+  const out = runSlash("teams", "", teamDeps).map((l) => l.text);
+  const joined = out.join("\n");
+  expect(joined).toContain("news: covers breaking stories");
+  expect(joined).toContain("lead: editor · 2 agents");
+  expect(joined).toContain("trading: prices and risks instruments");
+  expect(joined).toContain("routed by capability · 1 agent"); // singular, and the leadless phrasing
+  expect(out.some((t) => t.includes("* editor"))).toBe(true);  // the lead is marked
+  expect(out.some((t) => t.includes("- reporter"))).toBe(true);
+  expect(joined).not.toContain("root");                        // unaffiliated agents are not on a team
+});
+
+test("/agents annotates an agent with its team", () => {
+  const out = runSlash("agents", "", teamDeps).map((l) => l.text).join("\n");
+  expect(out).toContain("reporter: files stories (news)");
+  expect(out).toContain("* root: orch");     // unaffiliated: no parenthetical
+  expect(out).not.toContain("root: orch (");
 });

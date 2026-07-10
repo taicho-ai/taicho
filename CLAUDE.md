@@ -108,7 +108,17 @@ issues tsc won't).
   - `otel.ts` — OpenTelemetry export (Plan 16); the ONLY trace visualization path now (see
     **Observability** + **OpenTelemetry** below). `conversation-artifacts.ts` — the Plan 15 artifact
     browser's run-tree walker (extracted from the retired trace-tree.ts).
-  - `prompt.ts`, `tools.ts`, `registry.ts`, `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
+  - `team-routing.ts` — Plan 19. A PURE function: `delegate_task(to:"news")` → the agent that will
+    actually run. A team with a `lead` routes to it (one delegation level, one model call); a LEADLESS
+    team is routed by the engine to the best-ranked member (`rankAgents`) for free — leadless is the
+    default. The engine RESOLVES first, then cycle-checks the RESOLVED AGENT: checking the team id would
+    let `root → news → editor → news` loop forever, since a team id is never in `ancestry`. A lead may
+    not address its own team; ancestors are never routing candidates. The pick is never silent — it
+    rides `ctx.emit` as a note and lands on `trace.notes`, because `rankAgents` is a keyword match and
+    will sometimes choose badly. `run.ts`'s `ctx.resolveDelegation` is the seam.
+  - `prompt.ts`, `tools.ts`, `registry.ts` (the ACL grammar: an entry in `canSee`/`canDelegateTo` is
+    `"*"`, an exact agent id, or Plan 19's `team:<id>` — additive, since no agent id contains a colon),
+    `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
 - **`src/store/`** — persistence: `config.ts` (provider/model/auth resolution + `taicho.yaml`),
   `db.ts` (SQLite), `roster.ts` (agent.md canon + registry index; `createAgent` **baseline-merges**
   `DEFAULT_WORKER_TOOLS` — the artifact grant — under any model-proposed `tools`, so an explicit
@@ -119,13 +129,30 @@ issues tsc won't).
   chat turns + background dispatches, `reconcileTasks`/`reindexTasks` on boot),
   `schedules.ts` (Plan 04 Ph6 durable schedules: `schedules/<id>.json` canon — a small captain-owned
   set, so a file scan is the whole query surface, no DB index; a bad cron is rejected at CREATE time),
+  `teams.ts` (Plan 19 **teams**: `teams/<id>/team.md` canon — charter, optional `lead`, tool policy.
+  A file scan like `schedules.ts`, no teams table. MEMBERSHIP IS NOT HERE — the agent declares
+  `team: <id>` in its own frontmatter, one source of truth, and a team's roster is derived by grouping
+  the `registry.team` column. Captain-owned: there is deliberately **no `create_team` tool**, because a
+  team grants capability to its members and a model that could mint teams could escalate its own
+  privileges. `assertPolicyRespectsFloor` rejects a `tools.deny` intersecting `DEFAULT_WORKER_TOOLS` at
+  LOAD — Plan 14's floor is not a team's to punch through. `validateTeams` reports a lead that is
+  missing or sits on another team, at boot, without blocking it),
+  `spend-ledger.ts` (Plan 09 + Plan 19 ceilings: **one meter, two scopes**. `squad` bounds every agent;
+  `team:<id>` bounds one team's members. `loop.ts` tests every scope a run belongs to before each model
+  call and commits to all of them in ONE transaction; the exhaustion message names the scope that
+  tripped. A delegated child meters against ITS team; the Plan 06 checker against the DELEGATING agent's;
+  the coaching distiller against `squad` alone. Was `deck-budget.ts`/`DeckLedger` — the type counts
+  money, not decks),
   `artifacts.ts` (addressable, versioned, immutable-per-version hand-off store over `artifacts/`;
   `gcArtifacts` archives unreferenced old versions, keep-latest-N + lineage/trace-safe),
   `annotations.ts` (Plan 01 Ph4 **feedback & revision**: append-only `artifacts/<id>/annotations.jsonl` —
   feedback pinned to a version; an OPEN annotation rides an input artifact into a revision run; a Plan 06
   verification verdict is an annotation like any other).
 - **`src/coaching/`** — corrections → durable, conditional, approval-gated policy notes.
-- **`src/schemas/`** — zod schemas (`agent`, `brief`, `policy`, `trace`, `artifact`, `annotation`).
+- **`src/schemas/`** — zod schemas (`agent`, `brief`, `policy`, `trace`, `artifact`, `annotation`,
+  `team`). `knowledge.ts`'s `KbScope` PREPROCESSES the legacy `"deck"` value to `"squad"` so a
+  pre-Plan-19 `kb/nodes/*.md` still parses; `reconcileKbScope` rewrites those files at boot (files are
+  canon), and migration v7 fixes the derived rows.
 
 ## Observability — OpenTelemetry only (Plan 16 + Plan 17)
 
@@ -254,6 +281,20 @@ resolution).
   NOT in the baseline; the model requests it explicitly. `reconcileWorkerTools` (boot, in `index.tsx`)
   backfills the baseline onto any EXISTING worker persisted with `tools: []`, leaving deliberate
   non-empty grants (and root/librarian) untouched.
+- **Teams are a legibility boundary, not a security one (Plan 19):** root keeps `canDelegateTo: ["*"]`,
+  so it CAN name a member directly — it won't, because its roster shows teams, not their members. That
+  is what makes the old `INLINE_ROSTER_MAX = 30` cliff unreachable: a sixty-agent squad renders as five
+  team lines. Want the hard boundary? Narrow root's ACL to `["team:news", "team:trading"]`; the grammar
+  supports it. The default doesn't assume you want it. A squad with no `teams/` renders the roster
+  **byte-identically** to pre-Plan-19 — asserted in `prompt.test.ts`, because silently reshaping every
+  existing prompt would be a real regression.
+- **`registry` is baseline DDL, not a migration (Plan 19 gotcha):** `db.ts`'s `CREATE TABLE IF NOT
+  EXISTS registry` cannot add a column to a table that already exists. `team` is therefore declared in
+  BOTH the baseline (fresh workspaces) and a guarded `ALTER` in migration v8 (existing ones), and both
+  are idempotent. Either alone is a bug. Any migration test for such a column must open a **pre-migration
+  DB**, not a fresh `openDb()` — `migrate.test.ts`'s `rewindToV6` rebuilds the old shape on purpose.
+  Note `migrate()` also runs standalone over a bare `Database` in `spend-ledger.test.ts`, so a migration
+  must not assume a baseline table exists.
 - **Logging (Plan 03):** never `console.error/warn` from engine/store code — a stray write corrupts
   the Ink TUI. Use the leveled `log` from `src/core/logger.ts`; it writes to `taicho.log` in the
   workspace and redacts auth material centrally (so no call site can leak a token). Raise to debug

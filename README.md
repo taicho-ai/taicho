@@ -76,6 +76,27 @@ command/URL on a card*:
 Secrets a server needs stay in your environment — reference them as `${VAR}` in the config
 (in `env`, `headers`, or the URL), never inline.
 
+## Teams
+
+Group agents into teams and address the team, not its members:
+
+```
+teams/news/team.md      # charter, an optional lead, a tool policy
+agents/reporter/agent.md  ->  team: news
+```
+
+`delegate_task(to: "news")` routes to the team's `lead` if it has one, or to whichever member best fits
+the goal. Root's prompt then lists teams instead of sixty agents. `/teams` shows them.
+
+```yaml
+# taicho.yaml — resolution walks agent -> team -> defaults
+teams:
+  trading:
+    model: claude-opus-4-8
+    ceilings: { dailyCostUsd: 25 }   # this team's own spend cap
+    tools: { deny: [run_command] }
+```
+
 ## Knowledge (shared squad memory)
 
 The squad shares a **knowledgebase** — a graph of typed nodes (facts, decisions, entities) linked by
