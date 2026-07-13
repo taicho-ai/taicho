@@ -496,6 +496,15 @@ export function App(props: {
   const settlePlanItem = (taskId: string, status: "done" | "failed" | "blocked", note: string) => {
     const settled = settlePlanItemForTask(props.ws, props.db, taskId, status, note);
     if (settled) { const st = foldPlan(props.ws, settled.planId); if (st) setPlan(st); }
+    // Plan 21 §2: a background settle while the browser is DOCKED. Its run is structurally invisible
+    // to scopes 1–2 (no delegatedOut edge, no ledger turn), so injecting a row there would lie —
+    // instead the state bump re-renders the shelf (a real change only in all-runs) and scopes 1–2 get
+    // a one-keystroke hint. Never while READING (the reader is full-screen; the shelf catches up on esc).
+    setBrowser((b) => {
+      if (!b || b.ui.reading) return b;
+      const hint = b.ui.scope === "all" ? undefined : "+ new from background — press 3";
+      return { ...b, ui: { ...b.ui, hint } };
+    });
   };
 
   // Fire-and-forget a goal onto another agent (dispatch_task). Returns the taskId immediately; the

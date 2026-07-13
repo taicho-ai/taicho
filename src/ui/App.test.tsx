@@ -1402,6 +1402,75 @@ test("Plan 21: bare /artifacts re-enters the browser scoped to the latest run", 
   expect(lastFrame()).toContain("re-doc@v1");            // same latest-run scope
 });
 
+test("Plan 21 Ph2: scope round-trip — this run / conversation / all runs (grouped)", async () => {
+  // Two turns, two artifacts. Scope 1 shows only the latest turn's; scope 2 (ledger union) shows
+  // both; scope 3 shows both under run-group headers.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("save_artifact", { id: "art-one", title: "Art One", body: "first" }),
+    finalText("one saved."),
+    toolCall("save_artifact", { id: "art-two", title: "Art Two", body: "second" }),
+    finalText("two saved."),
+  ) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make one", ENTER);
+  await waitFor(lastFrame, "art-one@v1");
+  await send(stdin, ESC);                                 // leave the first dock
+  await waitForGone(lastFrame, "ARTIFACTS");
+  await send(stdin, "make two", ENTER);
+  await waitFor(lastFrame, "art-two@v1");                 // second turn docked, scoped to ITS run
+  expect(lastFrame()).not.toContain("art-one@v1");        // scope 1 = this run only
+
+  await send(stdin, "2");                                 // conversation scope: every ledger turn
+  await waitFor(lastFrame, "art-one@v1");
+  expect(lastFrame()).toContain("art-two@v1");
+
+  await send(stdin, "3");                                 // all runs: grouped by producing run
+  await waitFor(lastFrame, "artifact");                   // a group header ("── … · 1 artifact · …")
+  expect(lastFrame()).toContain("──");
+  expect(lastFrame()).toContain("art-one@v1");
+  expect(lastFrame()).toContain("art-two@v1");
+
+  await send(stdin, "1");                                 // back to this run
+  await waitForGone(lastFrame, "art-one@v1");
+  expect(lastFrame()).toContain("art-two@v1");
+});
+
+test("Plan 21 Ph2: a background settle while docked HINTS instead of lying a row into scope 1", async () => {
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("bg-art")) return finalText("bg done");                  // worker AFTER its save (before
+      // the identity branch — the worker's prompt always carries its identity; identity-first loops it)
+      if (s.includes("HINT-WORKER-IDENTITY")) {
+        await sleep(300); // settle AFTER the dock is up
+        return toolCall("save_artifact", { id: "bg-art", title: "BG Art", body: "made off-turn" });
+      }
+      if (s.includes("task_bg_")) return finalText("dispatched and saved.");  // root after dispatch
+      return {
+        content: [
+          { type: "tool-call", toolCallId: "s1", toolName: "save_artifact", input: JSON.stringify({ id: "fg-art", title: "FG Art", body: "foreground" }) },
+          { type: "tool-call", toolCallId: "d1", toolName: "dispatch_task", input: JSON.stringify({ to: "hintworker", goal: "make one off-turn" }) },
+        ],
+        finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+      } as unknown as LanguageModelV3GenerateResult;
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "hintworker", role: "background maker", identity: "HINT-WORKER-IDENTITY — you save artifacts off-turn.", tools: [] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "save and dispatch", ENTER);
+  await waitFor(lastFrame, "ARTIFACTS");                  // docked (scope 1) with the foreground artifact
+  expect(lastFrame()).toContain("fg-art@v1");
+  await waitFor(lastFrame, "press 3", 6000);              // the settle hinted…
+  expect(lastFrame()).not.toContain("bg-art@v1");         // …and did NOT inject the out-of-scope row
+  await send(stdin, "3");                                 // one keystroke away, as promised
+  await waitFor(lastFrame, "bg-art@v1");
+}, 15000);
+
 test("Plan 21: a pending approval SUSPENDS the docked browser — the card owns 'y', the dock returns after", async () => {
   // Turn 1: root saves an artifact AND dispatches a background worker, then finishes → the dock
   // appears. The worker (slow start) then requests create_agent → the approval card must take the
