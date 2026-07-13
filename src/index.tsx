@@ -129,10 +129,10 @@ const mcp: McpManager | undefined = config.mcp?.enabled === false
       },
       onUrl: (u) => console.error("Open to authorize the MCP server:\n" + u),
     });
-// Reap MCP servers on shutdown. The ESC quit path awaits closeAll(); SIGTERM closes then exits.
+// MCP servers are reaped on shutdown: the ESC quit path awaits closeAll(); SIGTERM is handled by the
+// ONE composed handler registered after telemetry init below (close MCP → flush OTel → exit).
 // (Ctrl+C/SIGINT is owned by Ink, which exits the app; stdio children otherwise die with the
 // foreground process group. Async cleanup can't run in a process "exit" handler, so we don't use one.)
-if (mcp) process.on("SIGTERM", () => { void mcp.closeAll().finally(() => process.exit(0)); });
 
 // Plan 09: one squad-wide spend ledger, shared by every run this session. DB-backed rolling counters
 // keyed by UTC day / ISO week persist across sessions. Built only when a ceiling is configured, so
@@ -148,7 +148,19 @@ const spendLedger = hasAnyCeilings(ceilingConfig) ? makeSpendLedger(db, ceilingC
 // — otherwise undefined and every seam skips it (zero overhead). Shared by every run this session. Must
 // be flushed on exit (BatchSpanProcessor buffers), so each exit path below awaits telemetry?.shutdown().
 const telemetry = initTelemetry({ serviceVersion: "0.0.1" });
-if (telemetry) process.on("SIGTERM", () => { void telemetry.shutdown(); });
+
+// Plan 20: ONE composed SIGTERM handler — reap MCP children, flush buffered spans, then EXIT.
+// Previously two independent handlers raced (MCP's exit(0) could beat the un-awaited telemetry
+// flush, dropping spans) and with MCP disabled the telemetry-only handler swallowed the signal
+// without exiting, leaving the REPL running. Registered unconditionally; each step no-ops when its
+// subsystem is off.
+process.on("SIGTERM", () => {
+  void (async () => {
+    try { await mcp?.closeAll(); } catch { /* best-effort on the way down */ }
+    try { await telemetry?.shutdown(); } catch { /* best-effort on the way down */ }
+    process.exit(0);
+  })();
+});
 
 const e2eModel = createE2eModel(process.env.TAICHO_E2E_MODEL);
 const authSource = e2eModel
