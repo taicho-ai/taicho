@@ -19,7 +19,7 @@ bun scripts/e2e-evidence.ts agent-flow        # Layer 4 — records real-binary 
 bun scripts/e2e-evidence.ts artifact-handoff  # Layer 4 — Plan 01 hand-off by reference (parent stays thin)
 bun scripts/e2e-evidence.ts squad-panes       # Layer 4 — Plan 10 live panes + bar during a delegation
 bun scripts/e2e-evidence.ts consistent-blocks # Layer 4 — Plan 13 agent blocks live→done + operation view
-bun scripts/e2e-evidence.ts artifact-viewer   # Layer 4 — Plan 15 completion bar + artifact viewer
+bun scripts/e2e-evidence.ts artifact-browser  # Layer 4 — Plan 21 docked browser + full-screen reader
 bun scripts/otel-verify.ts                    # Layer 4b — real OTLP wire verification (see below)
 ```
 There is no `npm test` script — use `bun test` (Bun's built-in runner discovers `src/**/*.test.ts`).

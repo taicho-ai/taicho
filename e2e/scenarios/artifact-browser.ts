@@ -1,9 +1,9 @@
-/** Scenario spec for the `artifact-viewer` evidence run (Plan 15 Phase 4, Layer 4).
+/** Scenario spec for the `artifact-browser` evidence run (Plan 21 Phase 1, Layer 4).
  *
- *  Proves the artifact viewer + completion action bar (Plan 15): when a flow finishes with artifacts,
- *  the app shows a completion bar ("View artifacts (N) · Continue chatting"), and opening the viewer
- *  renders the artifact's markdown body on screen. The artifact body is NOT in scrollback — the viewer
- *  is the read surface.
+ *  Proves the artifact BROWSER (Plan 21, replacing Plan 15's bar + viewer): when a foreground turn
+ *  completes with artifacts, the browser DOCKS ITSELF over the chat (no bar, no command), ⏎ opens the
+ *  full-screen reader with the markdown body, and esc chains reader → shelf → chat. The artifact body
+ *  is NOT in root's transcript — the browser is the read surface.
  *
  *  This scenario uses the SLOW-MODE `artifact-viewer` e2e model (src/core/e2e-model.ts), which holds
  *  the child's model call in-flight ~4s (the save_artifact tool call). During that window the
@@ -12,9 +12,9 @@
  *  Flow: boot dist/taicho with TAICHO_E2E_MODEL=artifact-viewer ->
  *  "create a proof worker agent" -> approve the New-agent card with `y` ->
  *  "use the proof worker to save a proof document" -> root delegates -> child saves artifact ->
- *  completion bar appears (Wait+Screen /View artifacts/ + Screenshot bar.png) ->
- *  Enter on "View artifacts" -> viewer opens with markdown body (Wait+Screen /Proof Document/ +
- *  Screenshot viewer.png) -> esc closes.
+ *  the browser docks itself (Wait+Screen /ARTIFACTS/ + Screenshot dock.png) ->
+ *  Enter opens the full-screen reader (Wait+Screen /Proof Document/, a reader-only string — the shelf
+ *  shows handles, never titles + Screenshot reader.png) -> esc back to the shelf -> esc to chat.
  *
  *  Video is EVIDENCE, never the assertion: the workspace-file assertions below (the artifact exists,
  *  the body is in the artifact file, the body is NOT in root's transcript) decide pass/fail.
@@ -22,8 +22,8 @@
  *  NOTE on tape paths: VHS 0.11.0 cannot tokenize absolute paths in `Output`/`Screenshot` (a leading
  *  `/` breaks its lexer). So the tape writes RELATIVE filenames and vhs is run with cwd = the temp
  *  workspace; the wrapper (`scripts/e2e-evidence.ts`) copies session.mp4 / *.png out of the workspace
- *  into `evidence/artifact-viewer/` afterwards.
- *  NOTE on Height: the viewer needs vertical room for the markdown body — `Set Height 1000` gives
+ *  into `evidence/artifact-browser/` afterwards.
+ *  NOTE on Height: the reader needs vertical room for the markdown body — `Set Height 1000` gives
  *  room, matching the trace-inspector scenario's fix for Ink vertical clipping under VHS.
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -35,7 +35,7 @@ const SECOND_PROMPT = "use the proof worker to save a proof document";
 /** The artifact id the child saves. */
 const ARTIFACT_ID = "proof-doc";
 /** A distinctive line from the artifact body — must be in the artifact file, NOT in root's transcript. */
-const BODY_MARKER = "This document proves the artifact viewer renders markdown bodies correctly";
+const BODY_MARKER = "This document proves the artifact viewer renders markdown bodies correctly";  // (marker text is baked into the artifact-viewer e2e model mode)
 
 // ── run-id discovery (run ids are date-stamped, e.g. 2026-07-04-run2 — never hardcode) ──
 
@@ -94,14 +94,14 @@ function check(name: string, expected: string, fn: () => { pass: boolean; actual
 }
 
 const scenario: Scenario = {
-  name: "artifact-viewer",
-  e2eModelMode: "artifact-viewer",
+  name: "artifact-browser",
+  e2eModelMode: "artifact-viewer",  // the model mode predates the browser and stays — the tape is what changed
 
   // Artifacts this tape writes (relative filenames — the wrapper copies them out of the temp ws into
-  // evidence/artifact-viewer/ and records them in the manifest). bar.png shows the completion bar;
-  // viewer.png shows the artifact viewer with the markdown body on screen. Keep in sync with the tape.
+  // evidence/artifact-browser/ and records them in the manifest). dock.png shows the self-docked
+  // shelf over the chat; reader.png shows the full-screen reader. Keep in sync with the tape.
   video: "session.mp4",
-  screenshots: ["approval-card.png", "bar.png", "viewer.png", "final.png"],
+  screenshots: ["approval-card.png", "dock.png", "reader.png", "final.png"],
 
   // Every load-bearing wait gates Enter/Screenshot on stable on-screen text (Wait+Screen), never a
   // fixed Sleep — the SLOW is in the e2e MODEL (the ~4s child hold), not the tape.
@@ -126,13 +126,16 @@ Sleep 500ms
 Type "${SECOND_PROMPT}"
 Wait+Screen@10s /use the proof worker to save a proof document/
 Enter
-Wait+Screen@30s /View artifacts/
+Wait+Screen@30s /ARTIFACTS/
 Sleep 700ms
-Screenshot bar.png
+Screenshot dock.png
 Enter
 Wait+Screen@15s /Proof Document/
 Sleep 700ms
-Screenshot viewer.png
+Screenshot reader.png
+Escape
+Sleep 500ms
+Wait+Screen@10s /ARTIFACTS/
 Escape
 Sleep 500ms
 Wait+Screen@10s /message root/
