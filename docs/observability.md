@@ -37,7 +37,7 @@ provider, no network, zero overhead. Setting the endpoint is the on-switch.
 |---|---|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | **The on-switch.** Your collector/backend base URL (e.g. `http://localhost:4318`). |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Auth + routing headers, `k=v,k=v` (e.g. an API key). |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json`. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Ignored — taicho hardwires the OTLP/**HTTP JSON** exporters (`http/json`); protobuf is not selectable. Point it at an endpoint that accepts OTLP/HTTP. |
 | `OTEL_SERVICE_NAME` | The base/namespace service name. Defaults to `taicho`. |
 | `OTEL_TAICHO_CAPTURE_CONTENT` | Set to `0`/`false`/`no`/`off` to STRIP **prompt/completion + tool args/results** from spans. **On by default** (see Privacy). |
 

@@ -633,3 +633,26 @@ captain wants the content OUT of the chat and in a viewer they can navigate to a
 - [x] Layer-1 `App.test.tsx`: completion bar appears with correct count; `⏎` opens viewer on newest; `←/→` steps; `tab` jump list switches; `esc` returns; no-artifact turn → no bar; root reply has no body. *(Added two Layer-1 tests in `App.test.tsx`: one verifies the completion bar appears with correct count and `⏎` opens the viewer; another verifies no bar appears when no artifacts are produced.)*
 - [x] Layer-4 VHS evidence (same bar as Plan 10/13): drive a delegation to completion → screenshot the bar → open the viewer (markdown body on screen) → open the jump list; file assertions confirm artifacts exist and the body is NOT in scrollback. *(Added `artifact-viewer` slow-mode e2e model in `e2e-model.ts` (child holds save_artifact ~4s); `e2e/scenarios/artifact-viewer.ts` drives the binary through create-agent → approve → delegate → completion bar appears (Wait+Screen /View artifacts/ + Screenshot bar.png) → Enter opens viewer (Wait+Screen /Proof Document/ + Screenshot viewer.png) → esc closes. 8 file assertions: agent created, root run completed, delegation recorded, child completed, artifact exists in store, artifact body file has body marker, root transcript does NOT contain body marker (the viewer is the read surface), ledger has second prompt. Same bar as squad-panes.)*
 - [x] Update `TESTING.md`, `CLAUDE.md`. *(Added Plan 15 section to `TESTING.md` documenting the completion action bar and artifact viewer. Updated `CLAUDE.md` with `ArtifactViewer.tsx` and `gatherConversationArtifacts` references.)*
+
+---
+
+## Plans 16–19 — shipped without checkbox tracking here (2026-07-13 note)
+
+Plans 16–19 were built after this index's last update and tracked only via their design docs +
+merged PRs. Recorded here so this file stays the one plan index:
+
+- [x] **Plan 16 — OpenTelemetry export.** `gen_ai.*` spans + metrics over OTLP; taicho-native
+  `chat <model> · iter N` spans (not the AI SDK's `experimental_telemetry`); one tracer provider per
+  agent (`service.name` = agent id); content capture opt-out via `OTEL_TAICHO_CAPTURE_CONTENT`.
+  Spec: `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`. Verify: `scripts/otel-verify.ts`.
+- [x] **Plan 17 — retire the `/trace` waterfall.** Deleted `trace-tree`/`trace-layout`/`live-trace` +
+  `TraceInspector`/`LiveWaterfall`, the `/trace`+`/runs` commands, `/view waterfall`. OTel is the only
+  trace-visualization path. Plan doc: `docs/superpowers/plans/2026-07-09-plan-17-retire-trace-waterfall.md`.
+  *(Leftover: `e2e/scenarios/trace-inspector.ts` + `live-waterfall.ts` still import the deleted module.)*
+- [x] **Plan 18 — agent-owned plans.** `plans/<id>/v<N>.json` versions (structure) + `events.jsonl`
+  (state); engine-owned terminal status for run-bound items; per-call tail-slot injection (never in
+  messages/system prompt); pinned plan panel. Spec: `docs/superpowers/specs/2026-07-10-agent-owned-plans-design.md`.
+  *(Known bug: the `dispatch_task` settle half is unwired — `settlePlanItemForTask` has no callers.)*
+- [x] **Plan 19 — teams.** `teams/<id>/team.md` canon; membership via agent frontmatter `team:`;
+  `team:<id>` ACL grammar; delegate-to-team routing (lead or ranked member); per-team spend ceilings
+  + tool policy; roster renders teams. Spec: `docs/superpowers/specs/2026-07-10-teams-design.md`.

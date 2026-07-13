@@ -28,17 +28,16 @@ A run id is `"<agent>/<recordId>"`, e.g. `root/2026-07-04-run2`. Each run writes
 | `runs/<agent>/<recordId>/failure.md`  | `writeRunFailure`                      | Only for non-`completed` outcomes — a human failure digest. |
 | `runs/<agent>/<recordId>/child-runs.json` | `writeChildRuns`                   | Compact rows for each delegated child run. |
 
-### 1a. Flush timing (important)
+### 1a. Flush timing
 
-Today the transcript is collected in memory during the loop and **flushed once at run end** (see
-`run.ts`: `for (const event of result.transcript) appendRunTranscript(...)`). So `transcript.jsonl`
-appears when the run **finishes**, not incrementally as it executes. Consequences for observers:
+Since Plan 04 Phase 5 the transcript flushes **live, per event**: the loop emits each event through
+`onEvent`, which `run.ts` wires straight to `appendRunTranscript`, so `transcript.jsonl` grows while
+the run executes. The loop also checkpoints the message array **per iteration**
+(`checkpoint.json`), so a crashed run is legible. Two exceptions land at run end: the tool/approval
+*span* events (`tool_start`/`tool_end`/`approval_start`/`approval_end`, buffered so they can be
+merged by timestamp) and `verification` records.
 
-- `taicho tail <runId>` and `--follow` show a run's events **once the run lands**, and are ideal for
-  watching runs *across* a session (each completes, its events appear).
-- Truly live, per-event streaming *within* a single in-flight run arrives with **Plan 04 Phase 5**
-  (incremental transcript flush). `tailRun` already reads incrementally, so it lights up for free
-  the moment that flush lands.
+- `taicho tail <runId> --follow` therefore streams an **in-flight** run's events as they happen.
 
 ---
 
@@ -49,7 +48,7 @@ appears when the run **finishes**, not incrementally as it executes. Consequence
 ```jsonc
 {
   "runId": "root/2026-07-04-run2",
-  "triggeredBy": "user",            // "user" | delegating run id
+  "triggeredBy": "user",            // "user" | delegating run id | task id (background dispatch) | "schedule:<id>"
   "agent": "root",
   "task": "prove delegation works", // brief goal, or "(chat)"
   "messagesPassedToModel": [ /* ModelMessage[] actually sent */ ],
@@ -69,10 +68,13 @@ Every line shares one envelope (`RunTranscriptEvent`):
 
 | `kind` | Emitted by | `data` |
 |--------|-----------|--------|
-| `model_request`  | `loop.ts` before each model call | `{ messageCount }` |
+| `model_request`  | `loop.ts` before each model call | `{ messageCount, contextTokens, compacted }` |
 | `model_response` | `loop.ts` after each model call  | `{ text, usage, toolCalls, responseMessages }` |
 | `model_error`    | `loop.ts` on a call failure      | `{ error }` |
 | `tool_call`      | `loop.ts` per proposed tool call | the AI-SDK tool call: `{ toolName, toolCallId, input, … }` |
+| `compaction`     | `loop.ts` when in-run compaction folds (Plan 05) | `{ before, after, threshold, foldedRoundTrips, foldedMessages, tools, summary }` |
+| `tool_start` / `tool_end` | `tools.ts`'s `instrument()` wrapper (buffered, merged at run end) | `{ tool, callId, argsPreview, args }` (`tool_end` adds the result/error preview) |
+| `approval_start` / `approval_end` | `run.ts`'s approval wrapper (buffered, merged at run end) | `{ kind, label }` |
 | `verification`   | `run.ts` after a delegation checker | a `VerificationRecord` (§3): `{ criteria, verdict:{pass,reasons}, runId, retried, tokens, costUsd, costNote }` |
 
 `data` is intentionally **payload-agnostic** — treat unknown `kind`s and extra fields as forward-
@@ -95,7 +97,7 @@ Authoritative schema: `src/schemas/trace.ts`. Fields:
 ```ts
 {
   id, agent, task,
-  triggeredBy,                       // "user" | delegating run id
+  triggeredBy,                       // "user" | delegating run id | task id | "schedule:<id>"
   ledger: {                          // the coaching ledger — "why did it do that?"
     retrieved: string[],             // policy ids surfaced
     applied:   string[],             // policy ids applied
@@ -112,6 +114,10 @@ Authoritative schema: `src/schemas/trace.ts`. Fields:
   outcome: "completed" | "blocked" | "failed" | "interrupted",
   tokens, costUsd,                   // costUsd null on subscription runs (costNote: "subscription")
   costNote?,
+  contextTokens,                     // Plan 05: peak estimated context actually sent (post-compaction)
+  verifierTokens, verifierCostUsd,   // Plan 09: this run's OWN delegation-checker spend (no child trace)
+  model?,                            // resolved model id — the /costs "by provider" dimension
+  plan?, planEvents?,                // Plan 18: plan handle at run end + transitions this run wrote
   aggregate: { tokens, costUsd },    // this run + child runs + verifier calls
   notes: string[],
   durationMs, started,
