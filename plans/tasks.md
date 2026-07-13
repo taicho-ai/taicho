@@ -681,3 +681,19 @@ true. Spec: `docs/superpowers/specs/2026-07-13-plan-20-hardening-design.md`. Ste
 - [x] Delete dead e2e scenarios `trace-inspector.ts` + `live-waterfall.ts` (import deleted trace-tree).
 - [x] Drop phantom `search_knowledge` from untrustedSources; fix SquadPanes "waterfall" comment.
 - [x] Atomic temp+rename writes for `tasks/*.json` (matches schedules.ts).
+
+---
+
+## Plan 21 — Artifact Browser (2026-07-13)
+
+Artifacts become a mode: completed foreground turns dock the browser over dimmed chat; the reader is
+full-screen; `/artifacts` subcommands collapse into keys. Spec (adversarially reviewed, 12 findings
+folded in): `docs/superpowers/specs/2026-07-13-plan-21-artifact-browser-design.md`. Step plan:
+`docs/superpowers/plans/2026-07-13-plan-21-artifact-browser.md`. One PR: `plan-21-artifact-browser`.
+
+- [ ] Ph1 — shelf + full-screen reader + auto-enter (completed turns only); browserKeyRef precedence (pending card SUSPENDS the dock); delete the completion bar; bare `/artifacts` entry; VHS scenario swap; prompt.ts note.
+- [ ] Ph2 — scopes: conversation (all-agent ledger union) + all-runs (grouped by run, `s` sorts); background-settle hint line.
+- [ ] Ph3 — filter chips + `/` live search on the browser's own input; honesty line; `ArtifactFilter.since`.
+- [ ] Ph4 — verbs `a` `y` `o` `v` `g` (`GcOptions.dryRun`, `artifactBodyPath`); port gc protection tests to store level; retire `/artifacts` subcommands.
+- [ ] Ph5 — `r` request revision (composes+submits a normal turn).
+- [ ] Ph6 — extend the VHS tape (annotate flow); docs sweep.
