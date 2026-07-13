@@ -13,7 +13,7 @@ export interface SlashCommand { name: string; summary: string; usage?: string; r
 /** Single source of truth for slash commands — drives both /help and the live suggester. */
 export const COMMANDS: SlashCommand[] = [
   { name: "help", summary: "list commands" },
-  { name: "agents", summary: "list the squad" },
+  { name: "agents", summary: "list the squad", usage: "[reindex]" },
   { name: "teams", summary: "list teams, their leads, and their members" },
   { name: "costs", summary: "cross-session spend rollup (agent / day / model)", usage: "[agent]" },
   { name: "tasks", summary: "list / cancel background tasks", usage: "[cancel <id>]" },

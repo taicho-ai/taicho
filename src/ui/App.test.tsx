@@ -724,6 +724,21 @@ test("Plan 20 (Plan 18's settle half): a background task settle TICKS the plan i
   expect(item.note ?? "").toContain("completed");
 });
 
+test("Plan 20: /agents reindex picks up a hand-edit to agent.md (team: takes effect mid-session)", async () => {
+  const { ws, db, props } = await setup({ model: mockModel("hi") });
+  await createAgent(ws, db, { id: "member", role: "member role", identity: "You are a member." }, "root");
+  expect(loadIndex(db).find((r) => r.id === "member")!.team ?? null).toBeNull();
+
+  // The documented membership mechanism: hand-edit the agent's own frontmatter.
+  const file = join(ws, "agents", "member", "agent.md");
+  writeFileSync(file, readFileSync(file, "utf8").replace("id: member", "id: member\nteam: news"));
+
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/agents reindex", ENTER);
+  await waitFor(lastFrame, "roster reindexed");
+  expect(loadIndex(db).find((r) => r.id === "member")!.team).toBe("news");   // the derived row refreshed
+});
+
 test("Plan 20: focus-mode Enter opens the run the ring HIGHLIGHTS, not blockFeed insertion order", async () => {
   // Root streams a delta BEFORE delegating, so root's runId enters blockFeed first. The rendered
   // block list (allBlocks) EXCLUDES root — index 0 is the child — but the old Enter path indexed

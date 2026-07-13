@@ -3,7 +3,7 @@ import { render } from "ink";
 import { App } from "./ui/App";
 import { ensureWorkspace } from "./store/files";
 import { openDb } from "./store/db";
-import { seedRoot, seedLibrarian, reindex, loadIndex, reconcileWorkerTools, LIBRARIAN_ID } from "./store/roster";
+import { seedRoot, seedLibrarian, reindex, loadIndex, reconcileWorkerTools } from "./store/roster";
 import { reindexKnowledge, reconcileKbScope } from "./store/knowledge";
 import { validateTeams } from "./store/teams";
 import { diffSources } from "./store/sources";
@@ -63,8 +63,10 @@ await seedLibrarian(ws, config.defaults);
 const backfilledWorkers = await reconcileWorkerTools(ws);
 await seedSkills(ws);
 const db = openDb(ws);
-const idx = loadIndex(db);
-if (idx.length === 0 || !idx.some((r) => r.id === LIBRARIAN_ID)) await reindex(ws, db);
+// Plan 20: files are canon, the registry is derived — rebuild EVERY boot (a scan of agents/*/agent.md,
+// trivially cheap) so hand-edits like `team: news` take effect on restart. The old only-if-empty guard
+// left registry.team stale forever (membersOf, team routing, per-team model resolution all read it).
+await reindex(ws, db);
 // Plan 19 Ph1b: rewrite any kb node file still saying `scope: deck` BEFORE the reindex below reads them.
 reconcileKbScope(ws, db);
 reindexKnowledge(ws, db); // rebuild the KB graph index from kb/nodes/*.md (files are canon)

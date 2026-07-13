@@ -14,7 +14,7 @@ import { BANNER } from "./banner";
 import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
 import { gatherConversationArtifacts } from "../core/conversation-artifacts";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
-import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
+import { loadAgent, loadIndex, reindex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTeams } from "../store/teams";
 import { PlanPanel } from "./PlanPanel";
 import type { PlanState } from "../schemas/plan";
@@ -761,6 +761,14 @@ export function App(props: {
   };
 
   const runSlash = async (cmd: string, arg: string) => {
+    // Plan 20: mid-session roster reindex, for hand-edits to agents/*/agent.md (e.g. `team: news`).
+    // Boot also reindexes unconditionally; this covers edits made while the REPL is open. The bare
+    // `/agents` list stays in runSlashPure.
+    if (cmd === "agents" && arg.trim().toLowerCase() === "reindex") {
+      await reindex(props.ws, props.db);
+      say({ kind: "system", text: "  roster reindexed from agents/*/agent.md" });
+      return;
+    }
     if (cmd === "view") {
       const mode = arg.trim().toLowerCase();
       if (!mode) { say({ kind: "system", text: `  live view: ${viewMode} (usage: /view ${VIEW_MODES.join("|")})` }); return; }
