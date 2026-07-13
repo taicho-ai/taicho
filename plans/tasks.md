@@ -666,18 +666,18 @@ true. Spec: `docs/superpowers/specs/2026-07-13-plan-20-hardening-design.md`. Ste
 `docs/superpowers/plans/2026-07-13-plan-20-hardening.md`. Three PRs off worktrees.
 
 ### PR 1 — engine (`plan-20-engine`)
-- [ ] Idle timer: `toolExecuting` boolean → executing COUNTER (parallel-tool false-kill); clear the timer on the error path; fix loop.ts's lying header.
-- [ ] Checker honesty: a checker that never RAN surfaces `{pass:false, checkerError:true}` — no retry, no annotation/coaching, plan item settles from the child's real outcome.
-- [ ] Stale engine comments: otel.ts header (experimental_telemetry / "/trace unchanged"), compaction.ts "Ph3 deferred".
+- [x] Idle timer: `toolExecuting` boolean → executing COUNTER (parallel-tool false-kill); clear the timer on the error path; fix loop.ts's lying header.
+- [x] Checker honesty: a checker that never RAN surfaces `{pass:false, checkerError:true}` — no retry, no annotation/coaching, plan item settles from the child's real outcome.
+- [x] Stale engine comments: otel.ts header (experimental_telemetry / "/trace unchanged"), compaction.ts "Ph3 deferred".
 
 ### PR 2 — REPL (`plan-20-repl`)
-- [ ] Wire `settlePlanItemForTask` into App's settleTask/failTask (the Plan 18 background-settle bug) + refresh the plan panel.
-- [ ] `dispatch_task` stops claiming a checker it doesn't run (description honesty).
-- [ ] Focus ring + Enter read ONE collection (`allBlocks`) — drill-in opens the highlighted run.
-- [ ] Roster reindex: unconditional at boot; `/agents reindex` for mid-session hand-edits.
-- [ ] One composed SIGTERM handler: close MCP → flush OTel → exit(0).
+- [x] Wire `settlePlanItemForTask` into App's settleTask/failTask (the Plan 18 background-settle bug) + refresh the plan panel.
+- [x] `dispatch_task` stops claiming a checker it doesn't run (description honesty).
+- [x] Focus ring + Enter read ONE collection (`allBlocks`) — drill-in opens the highlighted run.
+- [x] Roster reindex: unconditional at boot; `/agents reindex` for mid-session hand-edits.
+- [x] One composed SIGTERM handler: close MCP → flush OTel → exit(0).
 
 ### PR 3 — cleanup (`plan-20-cleanup`)
-- [ ] Delete dead e2e scenarios `trace-inspector.ts` + `live-waterfall.ts` (import deleted trace-tree).
-- [ ] Drop phantom `search_knowledge` from untrustedSources; fix SquadPanes "waterfall" comment.
-- [ ] Atomic temp+rename writes for `tasks/*.json` (matches schedules.ts).
+- [x] Delete dead e2e scenarios `trace-inspector.ts` + `live-waterfall.ts` (import deleted trace-tree).
+- [x] Drop phantom `search_knowledge` from untrustedSources; fix SquadPanes "waterfall" comment.
+- [x] Atomic temp+rename writes for `tasks/*.json` (matches schedules.ts).

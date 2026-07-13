@@ -1,6 +1,6 @@
 # Plan 20 — Hardening Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Implement the seven fixes in `docs/superpowers/specs/2026-07-13-plan-20-hardening-design.md` — no new features, make existing claims true.
 
@@ -28,7 +28,7 @@
 
 **Interfaces:** none exported — behavior-only.
 
-- [ ] **Step 1: Write the failing test** (in `loop.test.ts`, after the existing idle-timer tests; reuse the file's `streamSeq` helper and chunk-builder style — copy the shape of the existing single-tool idle test):
+- [x] **Step 1: Write the failing test** (in `loop.test.ts`, after the existing idle-timer tests; reuse the file's `streamSeq` helper and chunk-builder style — copy the shape of the existing single-tool idle test):
 
 ```ts
 test("parallel tool calls: the idle timer stays disarmed until the LAST tool finishes (counter, not boolean)", async () => {
@@ -69,12 +69,12 @@ test("parallel tool calls: the idle timer stays disarmed until the LAST tool fin
 
 (`AGENT`, `sleep`, `tool`, `z` all already exist in `loop.test.ts` — reuse them.)
 
-- [ ] **Step 2: Run it, verify it fails for the right reason**
+- [x] **Step 2: Run it, verify it fails for the right reason**
 
 Run: `bun test src/core/loop.test.ts -t "parallel tool calls"`
 Expected: FAIL — `res.error` is `"model stream idle for 150ms (no chunks, no tool execution)"`.
 
-- [ ] **Step 3: Implement.** In `loop.ts` replace the timer state block (lines 223-246):
+- [x] **Step 3: Implement.** In `loop.ts` replace the timer state block (lines 223-246):
 
 ```ts
       let streamErr: unknown;
@@ -118,7 +118,7 @@ In `onChunk` (lines 292-298) replace the two `setToolExecuting(...)` calls with 
       }
 ```
 
-- [ ] **Step 4: Fix the lying header** (lines 19-25) — replace with:
+- [x] **Step 4: Fix the lying header** (lines 19-25) — replace with:
 
 ```ts
 // Plan 12 (+ reopened): a hung model call is bounded TWICE. (1) A transport deadline on the provider
@@ -132,12 +132,12 @@ In `onChunk` (lines 292-298) replace the two `setToolExecuting(...)` calls with 
 
 Also update the stale in-block comment at 215-222 (`- The timer is DISARMED when a tool-start chunk arrives` block) to mention the counter.
 
-- [ ] **Step 5: Run the test + full file**
+- [x] **Step 5: Run the test + full file**
 
 Run: `bun test src/core/loop.test.ts`
 Expected: ALL PASS (the new test + the 29 existing).
 
-- [ ] **Step 6: Commit** — `git add src/core/loop.ts src/core/loop.test.ts && git commit -m "Plan 20: idle timer counts executing tools; timer cleared on error path"`
+- [x] **Step 6: Commit** — `git add src/core/loop.ts src/core/loop.test.ts && git commit -m "Plan 20: idle timer counts executing tools; timer cleared on error path"`
 
 ### Task 2: A checker that never ran must not pass
 
@@ -148,7 +148,7 @@ Expected: ALL PASS (the new test + the 29 existing).
 **Interfaces:**
 - Produces: `runChecker` return gains `checkerError?: boolean`; `VerificationRecord` gains optional `checkerError`; `ctx.checkCriteria` return type mirrors it.
 
-- [ ] **Step 1: Failing unit test** (in `run.test.ts` next to the existing `runChecker` tests at ~:898):
+- [x] **Step 1: Failing unit test** (in `run.test.ts` next to the existing `runChecker` tests at ~:898):
 
 ```ts
 test("a checker that never RAN (model error) is not a pass: checkerError verdict, pass=false", async () => {
@@ -167,10 +167,10 @@ test("a checker that never RAN (model error) is not a pass: checkerError verdict
 
 (`mkAgent` — use whatever agent-builder the neighboring `runChecker` tests at run.test.ts:898-915 use; copy their exact call shape.)
 
-- [ ] **Step 2: Run to verify failure** — `bun test src/core/run.test.ts -t "never RAN"`
+- [x] **Step 2: Run to verify failure** — `bun test src/core/run.test.ts -t "never RAN"`
 Expected: FAIL — today `r.checkerError` is undefined and `r.verdict.pass` is true (unparseable → advisory pass).
 
-- [ ] **Step 3: Implement `verification.ts`.** Change the return type and add the detection (replace lines 58 and 77-88):
+- [x] **Step 3: Implement `verification.ts`.** Change the return type and add the detection (replace lines 58 and 77-88):
 
 ```ts
 }): Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string; checkerError?: boolean }> {
@@ -201,7 +201,7 @@ Expected: FAIL — today `r.checkerError` is undefined and `r.verdict.pass` is t
   };
 ```
 
-- [ ] **Step 4: Schema + seam types.** `schemas/trace.ts` — inside `VerificationRecord`, after `costNote`:
+- [x] **Step 4: Schema + seam types.** `schemas/trace.ts` — inside `VerificationRecord`, after `costNote`:
 
 ```ts
   checkerError: z.boolean().optional(),       // Plan 20: the checker itself never ran (outage/cancel) — verdict is "unverified", not a judged fail
@@ -213,7 +213,7 @@ Expected: FAIL — today `r.checkerError` is undefined and `r.verdict.pass` is t
   checkCriteria: (p: { goal: string; criteria: string; output: string }) => Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string; checkerError?: boolean }>;
 ```
 
-- [ ] **Step 5: Failing integration test** (in `run.test.ts`, next to the Plan 06 delegate tests). Model branches: the checker's prompt is recognizable (`VERIFIER_SYSTEM` / user text starting `GOAL:`), so throw ONLY there:
+- [x] **Step 5: Failing integration test** (in `run.test.ts`, next to the Plan 06 delegate tests). Model branches: the checker's prompt is recognizable (`VERIFIER_SYSTEM` / user text starting `GOAL:`), so throw ONLY there:
 
 ```ts
 test("delegate with criteria: checker outage ⇒ no retry, no annotation, item/record marked checkerError", async () => {
@@ -237,7 +237,7 @@ test("delegate with criteria: checker outage ⇒ no retry, no annotation, item/r
 
 (Adapt `setup`/`mkDeps`/`text`/`toolCall` to the file's actual helper names — run.test.ts already has all four shapes; the branching-doGenerate pattern is the one App.test.tsx's dispatch test documents.)
 
-- [ ] **Step 6: Implement the tools.ts policy.** In the delegate handler, line 470 currently pushes the first verification record — add the flag, then insert the early return between line 470 and `let verdict = first.verdict;`:
+- [x] **Step 6: Implement the tools.ts policy.** In the delegate handler, line 470 currently pushes the first verification record — add the flag, then insert the early return between line 470 and `let verdict = first.verdict;`:
 
 ```ts
           ctx.verifications.push({ criteria, verdict: first.verdict, runId: child.runId, retried: false, tokens: first.tokens, costUsd: first.costUsd, costNote: first.costNote, checkerError: first.checkerError });
@@ -264,16 +264,16 @@ And mirror it for the RETRY's check — after line 496's `ctx.verifications.push
             }
 ```
 
-- [ ] **Step 7: Run** — `bun test src/core/run.test.ts` → ALL PASS; `bun test src/core/tools.test.ts` (guards against handler regressions) → PASS.
-- [ ] **Step 8: Commit** — `git commit -am "Plan 20: checker outage surfaces UNVERIFIED (pass=false, checkerError) — no retry, no annotation, item settles from outcome"`
+- [x] **Step 7: Run** — `bun test src/core/run.test.ts` → ALL PASS; `bun test src/core/tools.test.ts` (guards against handler regressions) → PASS.
+- [x] **Step 8: Commit** — `git commit -am "Plan 20: checker outage surfaces UNVERIFIED (pass=false, checkerError) — no retry, no annotation, item settles from outcome"`
 
 ### Task 3: Fix the remaining lying comments (engine files)
 
 **Files:** Modify `src/core/otel.ts:1-13`, `src/core/compaction.ts:15-17`. (loop.ts's were fixed in Task 1.)
 
-- [ ] **Step 1:** `otel.ts` header — replace the two stale claims: `(via the AI SDK's experimental_telemetry)` → `(taicho-native "chat <model> · iter N" spans opened in loop.ts — NOT the AI SDK's experimental_telemetry, which is unused)`; delete the final paragraph sentence `This is Plan 16 Phase 1 ("emit alongside") … are follow-ups.` and replace with `Since Plan 17 this export is the ONLY trace-visualization path (the internal /trace waterfall is retired).` Also fix the `Telemetry.captureContent` doc at otel.ts:51 to say "ON by default; opt out via OTEL_TAICHO_CAPTURE_CONTENT=0|false|no|off".
-- [ ] **Step 2:** `compaction.ts:15-17` — replace `Cross-turn (boot-replay) compaction is Phase 3 and is deferred — it depends on … not yet built. See plans/tasks.md ## Plan 05.` with `Cross-turn (boot-replay) compaction is core/conversation-replay.ts (Plan 05 Ph3), hooked into the turn-audit seam by run.ts.`
-- [ ] **Step 3:** `bun run typecheck` → clean (comment-only). Commit: `git commit -am "Plan 20: engine comments match the code (otel header, compaction Ph3)"`
+- [x] **Step 1:** `otel.ts` header — replace the two stale claims: `(via the AI SDK's experimental_telemetry)` → `(taicho-native "chat <model> · iter N" spans opened in loop.ts — NOT the AI SDK's experimental_telemetry, which is unused)`; delete the final paragraph sentence `This is Plan 16 Phase 1 ("emit alongside") … are follow-ups.` and replace with `Since Plan 17 this export is the ONLY trace-visualization path (the internal /trace waterfall is retired).` Also fix the `Telemetry.captureContent` doc at otel.ts:51 to say "ON by default; opt out via OTEL_TAICHO_CAPTURE_CONTENT=0|false|no|off".
+- [x] **Step 2:** `compaction.ts:15-17` — replace `Cross-turn (boot-replay) compaction is Phase 3 and is deferred — it depends on … not yet built. See plans/tasks.md ## Plan 05.` with `Cross-turn (boot-replay) compaction is core/conversation-replay.ts (Plan 05 Ph3), hooked into the turn-audit seam by run.ts.`
+- [x] **Step 3:** `bun run typecheck` → clean (comment-only). Commit: `git commit -am "Plan 20: engine comments match the code (otel header, compaction Ph3)"`
 
 **PR 1 gate:** `bun run typecheck && bun test && bun run build` → open PR `plan-20-engine`.
 
@@ -290,7 +290,7 @@ And mirror it for the RETRY's check — after line 496's `ctx.verifications.push
 **Interfaces:**
 - Consumes: `settlePlanItemForTask(ws, db, taskId, status, note?)` from `../store/plans` (exists, zero callers today); `foldPlan(ws, planId)` (already imported at App.tsx:21).
 
-- [ ] **Step 1: Failing Layer-1 test** (App.test.tsx; follow the existing `dispatch_task runs in the BACKGROUND` branching-mock test — same setup, same waitFor idiom):
+- [x] **Step 1: Failing Layer-1 test** (App.test.tsx; follow the existing `dispatch_task runs in the BACKGROUND` branching-mock test — same setup, same waitFor idiom):
 
 ```ts
 test("a background task settle TICKS the plan item it was bound to (Plan 18 settle half)", async () => {
@@ -316,10 +316,10 @@ test("a background task settle TICKS the plan item it was bound to (Plan 18 sett
 
 (Note: after `write_plan` returns, the next root turn's prompt contains the tool RESULT — key the second branch on a distinctive substring of write_plan's result (inspect it in the failing run's logged prompt; adjust `"PLAN OK"` to the real marker). This branching-on-prior-tool-result pattern is exactly the dispatch test's.)
 
-- [ ] **Step 2: Run to verify failure** — `bun test src/ui/App.test.tsx -t "TICKS the plan item"`
+- [x] **Step 2: Run to verify failure** — `bun test src/ui/App.test.tsx -t "TICKS the plan item"`
 Expected: FAIL — item status stays `"in_progress"`.
 
-- [ ] **Step 3: Implement.** App.tsx:21 — extend the import: `import { currentPlanId, foldPlan, settlePlanItemForTask } from "../store/plans";`. In `settleTask` (after the `setTaskFields` line, before `say`):
+- [x] **Step 3: Implement.** App.tsx:21 — extend the import: `import { currentPlanId, foldPlan, settlePlanItemForTask } from "../store/plans";`. In `settleTask` (after the `setTaskFields` line, before `say`):
 
 ```ts
     // Plan 20 (Plan 18's settle half): tick whatever plan item this task was bound to, from the
@@ -341,15 +341,15 @@ In `failTask` (after its `setTaskFields`):
     if (settled) { const st = foldPlan(props.ws, settled.planId); if (st) setPlan(st); }
 ```
 
-- [ ] **Step 4: Run** — the new test PASSES; whole `bun test src/ui/App.test.tsx` PASSES.
-- [ ] **Step 5: Commit** — `git commit -am "Plan 20: background task settle ticks its bound plan item (settlePlanItemForTask wired)"`
+- [x] **Step 4: Run** — the new test PASSES; whole `bun test src/ui/App.test.tsx` PASSES.
+- [x] **Step 5: Commit** — `git commit -am "Plan 20: background task settle ticks its bound plan item (settlePlanItemForTask wired)"`
 
 ### Task 5: Honest `dispatch_task` criteria description
 
 **Files:** Modify `src/core/tools.ts:524-537` (description + criteria describe).
 
-- [ ] **Step 1:** In the `dispatch_task` description, replace `Hand inputs over with \`inputArtifacts\` and set \`criteria\` exactly as for delegate_task.` with `Hand inputs over with \`inputArtifacts\`. Unlike delegate_task, \`criteria\` here rides into the worker's brief but is NOT independently verified at settle (no checker, no retry on the background path).` And the `criteria` field describe → `"acceptance criteria, passed to the worker in its brief; NOT independently checked on the background path (unlike delegate_task)"`.
-- [ ] **Step 2:** `bun test src/core/tools.test.ts` (description strings can be asserted somewhere) → PASS. Commit: `git commit -am "Plan 20: dispatch_task stops claiming a checker it doesn't run"`
+- [x] **Step 1:** In the `dispatch_task` description, replace `Hand inputs over with \`inputArtifacts\` and set \`criteria\` exactly as for delegate_task.` with `Hand inputs over with \`inputArtifacts\`. Unlike delegate_task, \`criteria\` here rides into the worker's brief but is NOT independently verified at settle (no checker, no retry on the background path).` And the `criteria` field describe → `"acceptance criteria, passed to the worker in its brief; NOT independently checked on the background path (unlike delegate_task)"`.
+- [x] **Step 2:** `bun test src/core/tools.test.ts` (description strings can be asserted somewhere) → PASS. Commit: `git commit -am "Plan 20: dispatch_task stops claiming a checker it doesn't run"`
 
 ### Task 6: Focus-ring / Enter desync
 
@@ -357,7 +357,7 @@ In `failTask` (after its `setTaskFields`):
 - Modify: `src/ui/App.tsx:342-347` (focus-mode keys)
 - Test: `src/ui/App.test.tsx`
 
-- [ ] **Step 1: Failing test** — root streams text BEFORE delegating (so `blockFeed` gains root first), child block renders, focus mode + Enter must open the CHILD:
+- [x] **Step 1: Failing test** — root streams text BEFORE delegating (so `blockFeed` gains root first), child block renders, focus mode + Enter must open the CHILD:
 
 ```ts
 test("focus mode: Enter opens the run the ring HIGHLIGHTS (not blockFeed insertion order)", async () => {
@@ -377,8 +377,8 @@ test("focus mode: Enter opens the run the ring HIGHLIGHTS (not blockFeed inserti
 
 (Check OperationView's actual header text once in the failing run and pin the waitFor to it; `[Z` is shift+tab in ink.)
 
-- [ ] **Step 2: Run to verify failure** — the view opens root's run (or nothing), assertion fails.
-- [ ] **Step 3: Implement** — App.tsx focus-mode branch (lines 342-347) becomes ONE collection (`allBlocks`, already in scope from line 314):
+- [x] **Step 2: Run to verify failure** — the view opens root's run (or nothing), assertion fails.
+- [x] **Step 3: Implement** — App.tsx focus-mode branch (lines 342-347) becomes ONE collection (`allBlocks`, already in scope from line 314):
 
 ```ts
       if (key.downArrow) { setFocusIndex((i) => Math.min((allBlocks.length || 1) - 1, i + 1)); return; }
@@ -391,8 +391,8 @@ test("focus mode: Enter opens the run the ring HIGHLIGHTS (not blockFeed inserti
       }
 ```
 
-- [ ] **Step 4: Run** — new test + whole App.test.tsx PASS.
-- [ ] **Step 5: Commit** — `git commit -am "Plan 20: focus ring and Enter target read the same block collection"`
+- [x] **Step 4: Run** — new test + whole App.test.tsx PASS.
+- [x] **Step 5: Commit** — `git commit -am "Plan 20: focus ring and Enter target read the same block collection"`
 
 ### Task 7: Roster reindex — boot unconditional + `/agents reindex`
 
@@ -400,7 +400,7 @@ test("focus mode: Enter opens the run the ring HIGHLIGHTS (not blockFeed inserti
 - Modify: `src/index.tsx:66-67`, `src/ui/slash.ts:16` (usage), `src/ui/App.tsx` `runSlash` (new `agents` branch before the pure fallback), imports (`reindex` from `../store/roster`)
 - Test: `src/ui/App.test.tsx`
 
-- [ ] **Step 1:** `index.tsx:66-67` — replace both lines with:
+- [x] **Step 1:** `index.tsx:66-67` — replace both lines with:
 
 ```ts
 // Plan 20: files are canon, the registry is derived — rebuild EVERY boot (a scan of agents/*/agent.md,
@@ -410,8 +410,8 @@ await reindex(ws, db);
 
 (`loadIndex` stays imported — line 104 still uses it. Delete the now-unused `idx` binding.)
 
-- [ ] **Step 2:** `slash.ts:16` — `{ name: "agents", summary: "list the squad", usage: "[reindex]" },`
-- [ ] **Step 3:** App.tsx `runSlash` — add before the pure fallback (pattern of the `kb` branch):
+- [x] **Step 2:** `slash.ts:16` — `{ name: "agents", summary: "list the squad", usage: "[reindex]" },`
+- [x] **Step 3:** App.tsx `runSlash` — add before the pure fallback (pattern of the `kb` branch):
 
 ```ts
     if (cmd === "agents" && arg.trim() === "reindex") {
@@ -423,14 +423,14 @@ await reindex(ws, db);
 
 with `import { reindex } from "../store/roster";` added to App.tsx's roster import line.
 
-- [ ] **Step 4: Test** (App.test.tsx): create the workspace, append `team: news` to a worker's `agent.md` frontmatter on disk, `/agents reindex`, assert `loadIndex(db)` now carries `team: "news"` for it AND the frame shows `roster reindexed`.
-- [ ] **Step 5:** `bun test src/ui/App.test.tsx` + `bun test src/store/roster.test.ts` PASS. Commit: `git commit -am "Plan 20: registry rebuilds every boot; /agents reindex for mid-session hand-edits"`
+- [x] **Step 4: Test** (App.test.tsx): create the workspace, append `team: news` to a worker's `agent.md` frontmatter on disk, `/agents reindex`, assert `loadIndex(db)` now carries `team: "news"` for it AND the frame shows `roster reindexed`.
+- [x] **Step 5:** `bun test src/ui/App.test.tsx` + `bun test src/store/roster.test.ts` PASS. Commit: `git commit -am "Plan 20: registry rebuilds every boot; /agents reindex for mid-session hand-edits"`
 
 ### Task 8: One composed SIGTERM handler
 
 **Files:** Modify `src/index.tsx:130-133` and `:149`.
 
-- [ ] **Step 1:** Delete line 133 (`if (mcp) process.on("SIGTERM", …)`) and line 149 (`if (telemetry) process.on("SIGTERM", …)`). After the `initTelemetry` line insert:
+- [x] **Step 1:** Delete line 133 (`if (mcp) process.on("SIGTERM", …)`) and line 149 (`if (telemetry) process.on("SIGTERM", …)`). After the `initTelemetry` line insert:
 
 ```ts
 // Plan 20: ONE composed SIGTERM handler — reap MCP children, flush buffered spans, then EXIT.
@@ -447,8 +447,8 @@ process.on("SIGTERM", () => {
 
 Update the comment block at 130-132 to say SIGTERM is handled by the composed handler below.
 
-- [ ] **Step 2:** `bun run typecheck && bun run build` → clean (index.tsx has no unit harness; the build is the gate). Manual verify: `TAICHO_E2E_MODEL=agent-flow ./dist/taicho` in a scratch workspace, `kill -TERM <pid>`, process exits 0.
-- [ ] **Step 3: Commit** — `git commit -am "Plan 20: composed SIGTERM — close MCP, flush OTel, exit"`
+- [x] **Step 2:** `bun run typecheck && bun run build` → clean (index.tsx has no unit harness; the build is the gate). Manual verify: `TAICHO_E2E_MODEL=agent-flow ./dist/taicho` in a scratch workspace, `kill -TERM <pid>`, process exits 0.
+- [x] **Step 3: Commit** — `git commit -am "Plan 20: composed SIGTERM — close MCP, flush OTel, exit"`
 
 **PR 2 gate:** `bun run typecheck && bun test && bun run build` → open PR `plan-20-repl`.
 
@@ -458,18 +458,18 @@ Update the comment block at 130-132 to say SIGTERM is handled by the composed ha
 
 ### Task 9: Delete the dead e2e scenarios
 
-- [ ] `git rm e2e/scenarios/trace-inspector.ts e2e/scenarios/live-waterfall.ts` (they import the Plan-17-deleted `core/trace-tree` and fail at dynamic import; TESTING.md already flags them dead — remove that parenthetical note in TESTING.md:25-27 in the same commit). Commit: `git commit -m "Plan 20: delete the two dead waterfall e2e scenarios (Plan 17 leftovers)"`
+- [x] `git rm e2e/scenarios/trace-inspector.ts e2e/scenarios/live-waterfall.ts` (they import the Plan-17-deleted `core/trace-tree` and fail at dynamic import; TESTING.md already flags them dead — remove that parenthetical note in TESTING.md:25-27 in the same commit). Commit: `git commit -m "Plan 20: delete the two dead waterfall e2e scenarios (Plan 17 leftovers)"`
 
 ### Task 10: Phantom `search_knowledge` + SquadPanes comment
 
-- [ ] `src/core/tools.ts:875` — remove `"search_knowledge",` from the `untrustedSources` list (no tool by that name exists; `recall` is listed and arms the guard). Run `bun test src/core/tools.test.ts` → PASS.
-- [ ] `src/ui/SquadPanes.tsx:41` — comment `Panes hide in \`bar\`/\`waterfall\` mode` → `Panes hide in \`bar\` mode`. Commit both: `git commit -am "Plan 20: drop phantom untrustedSources entry; fix stale SquadPanes comment"`
+- [x] `src/core/tools.ts:875` — remove `"search_knowledge",` from the `untrustedSources` list (no tool by that name exists; `recall` is listed and arms the guard). Run `bun test src/core/tools.test.ts` → PASS.
+- [x] `src/ui/SquadPanes.tsx:41` — comment `Panes hide in \`bar\`/\`waterfall\` mode` → `Panes hide in \`bar\` mode`. Commit both: `git commit -am "Plan 20: drop phantom untrustedSources entry; fix stale SquadPanes comment"`
 
 ### Task 11: Atomic task-file writes
 
 **Files:** Modify `src/store/task-state.ts:72-76` (+ `renameSync` import). Test: `src/store/task-state.test.ts`.
 
-- [ ] **Step 1: Failing-ish test** (behavioral, not crash-simulating): assert no `.tmp` residue and round-trip integrity:
+- [x] **Step 1: Failing-ish test** (behavioral, not crash-simulating): assert no `.tmp` residue and round-trip integrity:
 
 ```ts
 test("writeTask is atomic: temp+rename, no .tmp residue, record round-trips", () => {
@@ -481,7 +481,7 @@ test("writeTask is atomic: temp+rename, no .tmp residue, record round-trips", ()
 });
 ```
 
-- [ ] **Step 2: Implement** — mirror `schedules.ts:29-35` exactly:
+- [x] **Step 2: Implement** — mirror `schedules.ts:29-35` exactly:
 
 ```ts
 function writeTask(ws: string, task: TaskState, db?: Database): void {
@@ -499,7 +499,7 @@ function writeTask(ws: string, task: TaskState, db?: Database): void {
 
 Add `renameSync` to the `node:fs` import at task-state.ts:7.
 
-- [ ] **Step 3:** `bun test src/store/task-state.test.ts` → ALL PASS. Commit: `git commit -am "Plan 20: atomic temp+rename task-file writes (matches schedules.ts)"`
+- [x] **Step 3:** `bun test src/store/task-state.test.ts` → ALL PASS. Commit: `git commit -am "Plan 20: atomic temp+rename task-file writes (matches schedules.ts)"`
 
 **PR 3 gate:** `bun run typecheck && bun test && bun run build` → open PR `plan-20-cleanup`.
 
@@ -507,5 +507,5 @@ Add `renameSync` to the `node:fs` import at task-state.ts:7.
 
 ## After all three PRs
 
-- [ ] Flip this plan's checkboxes + the `plans/tasks.md` Plan 20 entry in the final PR touched.
-- [ ] Adversarial review pass over all three diffs (review-the-fix discipline: exception wraps, guard placement, counter arithmetic are second-order-bug territory) before handing to the captain to merge.
+- [x] Flip this plan's checkboxes + the `plans/tasks.md` Plan 20 entry in the final PR touched.
+- [x] Adversarial review pass over all three diffs (review-the-fix discipline: exception wraps, guard placement, counter arithmetic are second-order-bug territory) before handing to the captain to merge.
