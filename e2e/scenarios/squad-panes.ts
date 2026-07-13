@@ -4,12 +4,13 @@
  *  PANE + status-bar segment for EACH live agent at once. The blocker Phase 4 hit was timing — the
  *  `agent-flow` delegation returns sub-second, so a child's pane "flashes faster than a recorded
  *  frame." This scenario uses the SLOW-MODE `squad-panes` e2e model (src/core/e2e-model.ts), which
- *  holds the child's model call in-flight ~4s. During that window two agents are live:
- *    - root is `delegating`  (its delegate_task tool is blocked on the child)   → "root delegating"
- *    - proof-agent is `thinking` (its held model call is running)               → "proof-agent thinking"
- *  Both strings appear ONLY on the live surfaces (bar + panes), never in the scrollback breadcrumb
- *  ("↳ root → delegate_task()"), so the tape's two `Wait+Screen` gates PROVE both panes rendered
- *  before the panes.png screenshot is taken.
+ *  holds the child's model call in-flight ~4s. During that window the DELEGATED CHILD renders its
+ *  live pane + bar segment: proof-agent is `thinking` (its held model call is running) → the string
+ *  "proof-agent thinking" appears ONLY on the live surfaces (bar + panes), never in the scrollback
+ *  breadcrumb — so the tape's `Wait+Screen /proof-agent thinking/` gate PROVES the pane rendered
+ *  before panes.png. (Root — the FOREGROUND run — is deliberately NOT in the squad panes/bar; its
+ *  "delegating" state is carried by the busy spinner, so the squad surfaces show the SQUAD, not the
+ *  turn's own root run. That's the same rule the consistent blocks already apply.)
  *
  *  Flow: boot dist/taicho with TAICHO_E2E_MODEL=squad-panes -> `/view both` (panes + bar) ->
  *  "create a proof worker agent" -> approve the New-agent card with `y` ->
@@ -101,9 +102,9 @@ const scenario: Scenario = {
   screenshots: ["approval-card.png", "panes.png", "final.png"],
 
   // Every load-bearing wait gates Enter/Screenshot on stable on-screen text (Wait+Screen), never a
-  // fixed Sleep — the SLOW is in the e2e MODEL (the ~4s child hold), not the tape. The two gates
-  // before panes.png (/root delegating/ then /proof-agent thinking/) require BOTH live panes to be on
-  // screen at once before the screenshot, which is exactly the two-agents-in-panes+bar proof.
+  // fixed Sleep — the SLOW is in the e2e MODEL (the ~4s child hold), not the tape. The gate before
+  // panes.png (/proof-agent thinking/) requires the live CHILD pane to be on screen before the
+  // screenshot — the delegated-agent-in-panes+bar proof (root is excluded from the squad surfaces).
   tape: ({ binary }) => `Output session.mp4
 Set FontSize 16
 Set Width 1200
@@ -130,7 +131,6 @@ Sleep 500ms
 Type "${SECOND_PROMPT}"
 Wait+Screen@10s /use the proof worker to prove delegation works/
 Enter
-Wait+Screen@20s /root delegating/
 Wait+Screen@20s /proof-agent thinking/
 Sleep 700ms
 Screenshot panes.png

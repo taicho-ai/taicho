@@ -326,6 +326,16 @@ export function App(props: {
   const { allBlocks } = useBlockSettle(liveBlocks);
   useBlockTicker(allBlocks.length > 0);
 
+  // The SQUAD surfaces (status bar + split panes) show the SQUAD — delegated/background agents — not
+  // the foreground turn's OWN run. The blocks already apply this rule (they skip foregroundRootRef
+  // above); the bar and panes never did, so a solo root turn rendered "root thinking" in BOTH the
+  // pane and the bar, on top of the busy spinner (which is root's real control surface: cancel/steer)
+  // and the scrollback breadcrumb. The foreground run (root, or an @agent turn — both are
+  // foregroundRootRef) is now filtered out of both, so a solo turn no longer duplicates itself and a
+  // delegation lights the surfaces for the CHILDREN. A background agent (never foregroundRootRef,
+  // even while it holds an approval) still shows — that's the "the squad is stalled on YOU" signal.
+  const squadStatuses = statuses.filter((s) => s.runId !== foregroundRootRef.current);
+
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
 
@@ -1128,7 +1138,7 @@ export function App(props: {
       {/* Plan 10 Phase 4: split panes (one per live agent) sit above the spinner + bar. The mode
           (bar/panes/both) and terminal size decide what shows; too small ⇒ degrade to bar-only. */}
       {!operationRunId && !browser && layout.showPanes && (
-        <SquadPanes statuses={statuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
+        <SquadPanes statuses={squadStatuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
       )}
       {/* Plan 13 (corrected): consistent agent blocks — the default squad view. Every agent (root and
           sub-agents) is rendered as a single block: header + fixed 2-line body. The block IS the record. */}
@@ -1179,7 +1189,7 @@ export function App(props: {
       {!pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
       {planPanelOn && plan && !operationRunId && !browser && <PlanPanel plan={plan} width={termSize.columns} />}
-      {layout.showBar && statuses.length > 0 && <StatusBar statuses={statuses} width={termSize.columns} />}
+      {layout.showBar && squadStatuses.length > 0 && <StatusBar statuses={squadStatuses} width={termSize.columns} />}
       {!pending && !operationRunId && !browser && (
         <>
           <Box>
