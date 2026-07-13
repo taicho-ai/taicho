@@ -872,7 +872,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
   // flips the guard for a tool that actually ran, so listing them all here is safe and future-proof.
   const untrustedSources = new Set<string>(mcpToolNames);
   for (const name of [
-    "read_url", "read_artifact", "recall", "search_knowledge", "read_source",
+    "read_url", "read_artifact", "recall", "read_source",
     "delegate_task", "await_task", "dispatch_task", "check_task",
     // list_annotations surfaces feedback bodies — an agent may have ingested a page then annotated, so
     // annotation text is attacker-influenceable content entering this run (same reasoning as read_artifact).
