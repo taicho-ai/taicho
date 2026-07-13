@@ -952,18 +952,20 @@ test("delegation with acceptance criteria: a twice-failed verdict is surfaced to
 
 // ── Plan 10: the live status bar (Layer-1, through the real App) ──
 
-test("status bar shows the agent's live state during a run and clears on completion", async () => {
+test("a SOLO foreground run is NOT duplicated into the squad bar — it's the spinner + scrollback, not a squad row", async () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(300); return finalText("done"); }) as any });
+  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(500); return finalText("done"); }) as any });
   const { props } = await setup({ model: slow });
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "go", ENTER);
-  await waitFor(lastFrame, "root thinking");          // the StatusBar segment (distinct from RunStatus's "root · thinking…")
-  await waitFor(lastFrame, "done");                   // run finishes
-  await waitForGone(lastFrame, "root thinking");      // …and the bar clears
+  await waitForPred(lastFrame, (f) => f.includes("❯"), "the run is live (busy spinner up)", 4000);
+  // The bar + panes are the SQUAD surfaces; root's own turn is the foreground run, so it never
+  // appears there (it's carried by the busy spinner + the scrollback breadcrumb).
+  expect(lastFrame()).not.toContain("root thinking");
+  await waitFor(lastFrame, "done");
 });
 
-test("status bar shows the current tool while an agent delegates (parent delegating + child live)", async () => {
+test("status bar shows the delegated CHILD, not the foreground root (the squad bar excludes the foreground run)", async () => {
   const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
     toolCall("delegate_task", { to: "writer", goal: "write the thing" }),
     finalText("root done"),
@@ -977,10 +979,10 @@ test("status bar shows the current tool while an agent delegates (parent delegat
   (props as any).resolveModel = (id: string) => id === "writer" ? { model: slowWriter, modelId: "m" } : { model: rootModel, modelId: "m" };
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "have writer do it", ENTER);
-  await waitFor(lastFrame, "root delegating");        // parent shows the delegate_task in flight
-  expect(lastFrame()).toContain("writer");            // the child agent is live in the bar at the same time
+  await waitFor(lastFrame, "writer thinking", 8000);  // the CHILD is live in the bar (its own squad row)
+  expect(lastFrame()).not.toContain("root delegating"); // the foreground root is NOT duplicated into the bar
   await waitFor(lastFrame, "root done");
-  await waitForGone(lastFrame, "root delegating");    // bar clears when the cascade completes
+  await waitForGone(lastFrame, "writer thinking");    // bar clears when the cascade completes
 });
 
 test("status bar shows 'waiting' while an approval card is up, then clears on approval", async () => {
@@ -993,23 +995,31 @@ test("status bar shows 'waiting' while an approval card is up, then clears on ap
   const { props } = await setup({ model });
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "make a scout", ENTER);
-  await waitFor(lastFrame, "New agent");              // the approval card is up…
-  expect(lastFrame()).toContain("waiting");           // …and the bar loudly shows the squad is blocked on the captain
+  await waitFor(lastFrame, "New agent");              // the approval card is up — THAT is the "stalled on you" signal…
+  expect(lastFrame()).not.toContain("waiting");       // …so the foreground root's wait is not ALSO duplicated into the bar
   await send(stdin, "y");                              // approve
   await waitFor(lastFrame, "Created scout");
-  await waitForGone(lastFrame, "waiting");             // bar clears after the run completes
 });
 
 // ── Plan 10 Phase 4: the split-pane view (Layer-1, through the real App) ──
 
-test("Plan 10 Phase 4: a pane appears on a delegation, streams the tool line with argsPreview, and collapses on completion", async () => {
+test("Plan 10 Phase 4: a delegation renders the CHILD's pane (not the foreground root's) and collapses on completion", async () => {
   const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
     toolCall("delegate_task", { to: "writer", goal: "write the fusion timeline" }),
     finalText("root done"),
   ) as any });
-  // A slow writer so the delegation is observable mid-flight (parent `delegating` + child live).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const slowWriter = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(350); return finalText("writer done"); }) as any });
+  // The child streams a tool line (list_artifacts — READ-only, so the turn produces no artifact and
+  // the Plan 21 browser does not auto-dock over the panes) then a slow final, so its pane is
+  // observable mid-flight WITH a tool line in the body — the squad-surface content the panes are for.
+  let wcall = 0;
+  const slowWriter = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async () => {
+      wcall += 1;
+      if (wcall === 1) return toolCall("list_artifacts", {});
+      await sleep(350); return finalText("writer done");
+    }) as any,
+  });
   const { ws, db, props } = await setup({ model: rootModel });
   await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1020,52 +1030,60 @@ test("Plan 10 Phase 4: a pane appears on a delegation, streams the tool line wit
   await waitFor(lastFrame, "live view → panes");
   await send(stdin, "have writer do it", ENTER);
 
-  await waitFor(lastFrame, "root delegating", 8000); // the PARENT pane shows delegate_task in flight (a pane-only status)
   const frame = () => lastFrame() ?? "";
-  const headerLine = (f: string) => f.split("\n").find((l) => l.includes("root delegating") && l.includes("fusion"));
-  // the pane BODY streams the tool line with its argsPreview ("→ …", distinct from the "↳" scrollback breadcrumb)
-  const bodyLine = (f: string) => f.split("\n").find((l) => l.includes("→ delegate_task") && l.includes("fusion") && !l.includes("↳"));
-  // These live surfaces settle over separate frames; gate on ALL of them together to kill the render-
-  // timing race BEFORE asserting (the assertion's intent is unchanged — every structural check remains).
+  // the child's pane body streams its tool line ("→ …", distinct from the "↳" scrollback breadcrumb)
+  const bodyLine = (f: string) => f.split("\n").find((l) => l.includes("→ list_artifacts") && !l.includes("↳"));
   await waitForPred(
     lastFrame,
-    (f) => !!headerLine(f) && !!bodyLine(f) && f.includes("writer thinking") && f.includes("▎"),
-    "the parent tool line (header + body with argsPreview) + the live child pane + split-pane accent",
+    (f) => f.includes("writer thinking") && !!bodyLine(f) && f.includes("▎"),
+    "the live CHILD pane (header + streamed tool line + split-pane accent)",
     8000,
   );
-  // the pane HEADER carries the current tool + its argsPreview on one line
-  expect(headerLine(frame())).toContain("fusion");
-  expect(bodyLine(frame())).toBeTruthy();
-  expect(frame()).toContain("writer thinking");      // the CHILD is live in its own pane at the same time
+  expect(bodyLine(frame())).toBeTruthy();            // the child pane streamed its tool line
   expect(frame()).toContain("▎");                    // left-accent split panes actually rendered
+  expect(frame()).not.toContain("root delegating");  // the foreground root is NOT a pane of its own
 
   await waitFor(lastFrame, "root done", 8000);
-  await waitForGone(lastFrame, "root delegating", 6000); // the pane collapses after completion (settle → gone)
+  await waitForGone(lastFrame, "writer thinking", 6000); // the child pane collapses after completion (settle → gone)
 });
 
 test("Plan 10 Phase 4: /view switches the live surfaces (bar / panes / both) and persists the choice", async () => {
-  let calls = 0;
+  // The squad surfaces show delegated CHILDREN (the foreground root is excluded), so drive a
+  // delegation on each run. A PANE is detected by its body tool-line "▎ … → list_artifacts" — unique
+  // to a pane (a block streams reply text; the "↳" scrollback breadcrumb is not "▎"-prefixed).
+  // list_artifacts is READ-only, so the turn produces no artifact and the browser never auto-docks.
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "one" }), finalText("root done 1"),
+    toolCall("delegate_task", { to: "writer", goal: "two" }), finalText("root done 2"),
+  ) as any });
+  let wc = 0;
+  const slowWriter = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async () => { wc += 1; return wc % 2 === 1 ? toolCall("list_artifacts", {}) : (await sleep(350), finalText(`writer ${wc}`)); }) as any,
+  });
+  const { ws, db, props } = await setup({ model: rootModel });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(300); calls++; return finalText(`reply ${calls}`); }) as any });
-  const { ws, props } = await setup({ model: slow });
+  (props as any).resolveModel = (id: string) => id === "writer" ? { model: slowWriter, modelId: "m" } : { model: rootModel, modelId: "m" };
+  const hasPaneBody = (f: string | undefined) => (f ?? "").split("\n").some((l) => l.includes("▎") && l.includes("→ list_artifacts"));
   const { stdin, lastFrame } = render(<App {...props} />);
 
-  // bar-only: a live run shows the bar's live state but NO bordered pane
+  // bar-only: the live child shows in the bar; NO pane body
   await send(stdin, "/view bar", ENTER);
   await waitFor(lastFrame, "live view → bar");
   expect(getViewMode(ws)).toBe("bar");               // persisted to disk (the mechanism prefs use)
-  await send(stdin, "run one", ENTER);
-  await waitFor(lastFrame, "root thinking");          // the bar renders the live status…
-  expect(lastFrame()).not.toContain("▎");             // …and the split panes are suppressed
-  await waitFor(lastFrame, "reply 1");                // run finishes → idle again
+  await send(stdin, "delegate one", ENTER);
+  await waitFor(lastFrame, "writer thinking", 8000);  // the bar renders the live child…
+  expect(hasPaneBody(lastFrame())).toBe(false);       // …and the split panes are suppressed
+  await waitFor(lastFrame, "root done 1", 8000);
 
-  // panes-only: a live run renders a bordered pane
+  // panes-only: the live child renders a pane with its streamed tool line
   await send(stdin, "/view panes", ENTER);
   await waitFor(lastFrame, "live view → panes");
   expect(getViewMode(ws)).toBe("panes");             // persisted
-  await send(stdin, "run two", ENTER);
-  await waitFor(lastFrame, "▎");                      // a split pane rendered
-  await waitFor(lastFrame, "reply 2");
+  await send(stdin, "delegate two", ENTER);
+  await waitForPred(lastFrame, hasPaneBody, "a split pane with its tool-line body rendered", 8000);
+  await waitFor(lastFrame, "root done 2", 8000);
 
   // both (the default): confirm the toggle + persistence round-trips back
   await send(stdin, "/view both", ENTER);
@@ -1074,16 +1092,30 @@ test("Plan 10 Phase 4: /view switches the live surfaces (bar / panes / both) and
 });
 
 test("Plan 10 Phase 4: below the minimum terminal size the panes degrade to bar-only", async () => {
+  // A delegation so a CHILD populates the squad surfaces (the foreground root is excluded). The child
+  // calls a read-only tool (list_artifacts), so a pane WOULD carry a "▎ … → list_artifacts" body line
+  // — its ABSENCE under a tiny terminal is the degrade proof; the bar still renders the child. (Read-
+  // only ⇒ no artifact ⇒ the browser never auto-docks over the surfaces.)
+  const rootModel = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("delegate_task", { to: "writer", goal: "go" }), finalText("root done"),
+  ) as any });
+  let wc = 0;
+  const slowWriter = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async () => { wc += 1; return wc === 1 ? toolCall("list_artifacts", {}) : (await sleep(400), finalText("writer done")); }) as any,
+  });
+  const { ws, db, props } = await setup({ model: rootModel });
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const slow = new MockLanguageModelV3({ doGenerate: (async () => { await sleep(400); return finalText("done"); }) as any });
-  const { props } = await setup({ model: slow });
+  (props as any).resolveModel = (id: string) => id === "writer" ? { model: slowWriter, modelId: "m" } : { model: rootModel, modelId: "m" };
   // An explicit tiny terminal (below MIN_PANE_COLS/ROWS) is authoritative over the live stdout.
   const small = { ...props, terminalSize: { columns: 40, rows: 8 } };
+  const hasPaneBody = (f: string | undefined) => (f ?? "").split("\n").some((l) => l.includes("▎") && l.includes("→ list_artifacts"));
   const { stdin, lastFrame } = render(<App {...small} />);
-  await send(stdin, "go", ENTER);
-  await waitFor(lastFrame, "root thinking");          // the bar (the complete summary) still renders…
-  expect(lastFrame()).not.toContain("▎");             // …but the panes are degraded away
-  await waitFor(lastFrame, "done");
+  await send(stdin, "have writer do it", ENTER);
+  await waitFor(lastFrame, "writer thinking", 8000);  // the bar (the complete summary) still renders the child…
+  expect(hasPaneBody(lastFrame())).toBe(false);       // …but the panes are degraded away
+  await waitFor(lastFrame, "root done", 8000);
 });
 
 // ── Plan 13 (corrected): consistent agent blocks — sub-agent reply NOT in scrollback ──
