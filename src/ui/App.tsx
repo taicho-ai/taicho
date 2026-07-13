@@ -336,14 +336,17 @@ export function App(props: {
       setCompletionArtifacts(null); setActionBarFocus(0); return;
     }
     // Plan 13: focus mode navigation. shift+tab enters, esc leaves, ↑↓ move, ⏎ opens operation view.
+    // Plan 20: the ring and the Enter target read the SAME collection — allBlocks is what RENDERS
+    // (root excluded, settling-first). The old Enter path indexed [...blockFeed.keys()] (insertion
+    // order, root INCLUDED since root's deltas populate the feed), so highlighting block 0 could
+    // open root's run instead of the highlighted child; ↑↓ also bounded on blockFeed.size.
     if (focusMode) {
       if (key.escape) { setFocusMode(false); setFocusIndex(0); return; }
       if (key.upArrow) { setFocusIndex((i) => Math.max(0, i - 1)); return; }
-      if (key.downArrow) { setFocusIndex((i) => Math.min((blockFeed.size || 1) - 1, i + 1)); return; }
+      if (key.downArrow) { setFocusIndex((i) => Math.min((allBlocks.length || 1) - 1, i + 1)); return; }
       if (key.return) {
-        const runIds = [...blockFeed.keys()];
-        const targetRunId = runIds[focusIndex];
-        if (targetRunId) setOperationRunId(targetRunId);
+        const target = allBlocks[focusIndex];
+        if (target) setOperationRunId(target.runId);
         return;
       }
       return; // consume other keys while in focus mode

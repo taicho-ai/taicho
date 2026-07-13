@@ -724,6 +724,67 @@ test("Plan 20 (Plan 18's settle half): a background task settle TICKS the plan i
   expect(item.note ?? "").toContain("completed");
 });
 
+test("Plan 20: focus-mode Enter opens the run the ring HIGHLIGHTS, not blockFeed insertion order", async () => {
+  // Root streams a delta BEFORE delegating, so root's runId enters blockFeed first. The rendered
+  // block list (allBlocks) EXCLUDES root — index 0 is the child — but the old Enter path indexed
+  // [...blockFeed.keys()], which included root: highlighting the child opened ROOT's run. The child
+  // streams slowly (chunkDelayInMs) so its block is live while we navigate; its trace isn't written
+  // yet, so the operation view renders "no data for run <childRunId>" — the run ID is the proof.
+  const su = { inputTokens: { total: 3 }, outputTokens: { total: 2 } } as const;
+  const stream = (chunks: unknown[], delay = 0) =>
+    ({ stream: simulateReadableStream({ initialDelayInMs: 0, chunkDelayInMs: delay, chunks: chunks as never[] }) });
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doStream: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("PROOF-CHILD-IDENTITY"))
+        return stream([
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "1" },
+          ...Array.from({ length: 6 }, () => ({ type: "text-delta", id: "1", delta: "child working… " })),
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: su },
+        ], 150);                                                     // ~900ms live window for the keys
+      if (s.includes("child working"))
+        return stream([
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "1" },
+          { type: "text-delta", id: "1", delta: "root all wrapped" },
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: su },
+        ]);
+      return stream([
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "1" },
+        { type: "text-delta", id: "1", delta: "handing off to the squad" },  // root's delta → root enters blockFeed FIRST
+        { type: "text-end", id: "1" },
+        { type: "tool-call", toolCallId: "d1", toolName: "delegate_task", input: JSON.stringify({ to: "proofchild", goal: "do the thing" }) },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_use" }, usage: su },
+      ]);
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "proofchild", role: "proves focus", identity: "PROOF-CHILD-IDENTITY — you stream slowly.", tools: [] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "child working");        // the child's live block is on screen
+  await send(stdin, "[Z");                    // shift+tab → focus mode (ring on block 0 = the child)
+  await waitFor(lastFrame, "navigate", 1500);       // the focus-mode footer proves focus engaged
+  await send(stdin, ENTER);                         // open the highlighted block
+  await waitFor(lastFrame, "esc to close");         // the operation view is open (live or settled)
+  // The view must identify the CHILD — "/ proofchild" in its esc line (settled) or its runId in the
+  // no-data line (still live). The OLD code opened ROOT's view here ("/ root").
+  await waitForPred(
+    lastFrame,
+    (f) => f.includes("/ proofchild") || f.includes("no data for run proofchild"),
+    "operation view identifies proofchild",
+    2000,
+  );
+  await send(stdin, "");                      // esc closes the operation view
+  await waitFor(lastFrame, "root all wrapped");     // drain the foreground turn cleanly
+});
+
 // ── Plan 04 Phase 6: /schedules add → list → remove (durable, from the REPL) ──
 
 test("/schedules add persists a durable schedule, /schedules list shows it, /schedules remove deletes it", async () => {
