@@ -4,7 +4,7 @@
  *  a task can outlive the turn that created it (a background `dispatch_task`), survives a restart
  *  (files under tasks/ are canon; a rebuildable SQLite `tasks` table is the query index), and is
  *  listable/cancellable via `/tasks`. A synchronous chat turn is just a task the captain watches. */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { paths } from "./files";
@@ -71,7 +71,13 @@ export function mkTaskId(): string {
 
 function writeTask(ws: string, task: TaskState, db?: Database): void {
   mkdirSync(paths.taskDir(ws), { recursive: true });
-  writeFileSync(taskFile(ws, task.taskId), JSON.stringify(task, null, 2));
+  // Plan 20: temp + rename (atomic on POSIX) — a crash mid-write used to truncate the .json, which
+  // reindexTasks then silently skipped (the record vanished from the index). The temp suffix isn't
+  // .json, so a leftover from a crashed write is ignored by the readdir filters. Mirrors schedules.ts.
+  const dest = taskFile(ws, task.taskId);
+  const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(task, null, 2));
+  renameSync(tmp, dest);
   if (db) indexTask(db, task);
 }
 
