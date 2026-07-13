@@ -1471,6 +1471,61 @@ test("Plan 21 Ph2: a background settle while docked HINTS instead of lying a row
   await waitFor(lastFrame, "bg-art@v1");
 }, 15000);
 
+test("Plan 21 Ph3: '/' search live-narrows the shelf and the honesty line admits it", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    {
+      content: [
+        { type: "tool-call", toolCallId: "a1", toolName: "save_artifact", input: JSON.stringify({ id: "fusion-notes", title: "Fusion Notes", body: "plasma" }) },
+        { type: "tool-call", toolCallId: "a2", toolName: "save_artifact", input: JSON.stringify({ id: "market-brief", title: "Market Brief", body: "money" }) },
+      ],
+      finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+    } as unknown as LanguageModelV3GenerateResult,
+    finalText("both saved."),
+  ) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make both", ENTER);
+  await waitFor(lastFrame, "2 artifacts");                // both on the shelf
+  await send(stdin, "/");                                 // open search (the browser's own input line)
+  await waitFor(lastFrame, "searching title");
+  await send(stdin, "f", "u", "s");                       // type to narrow, live
+  await waitFor(lastFrame, "1 of 2 match");               // the honesty line
+  expect(lastFrame()).toContain("fusion-notes@v1");
+  expect(lastFrame()).not.toContain("market-brief@v1");
+  await send(stdin, ESC);                                 // esc clears the query
+  await waitFor(lastFrame, "2 artifacts");
+});
+
+test("Plan 21 Ph3: the `f` chip row narrows by feedback:open, live", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    {
+      content: [
+        { type: "tool-call", toolCallId: "a1", toolName: "save_artifact", input: JSON.stringify({ id: "flagged", title: "Flagged", body: "needs work" }) },
+        { type: "tool-call", toolCallId: "a2", toolName: "save_artifact", input: JSON.stringify({ id: "clean", title: "Clean", body: "fine" }) },
+      ],
+      finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+    } as unknown as LanguageModelV3GenerateResult,
+    finalText("saved."),
+  ) as any });
+  const { ws, props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make both", ENTER);
+  await waitFor(lastFrame, "2 artifacts");
+  // Pin open feedback on one of them (the store call the `a` verb will make in Ph4).
+  annotateArtifact(ws, { target: "flagged@v1", author: "human", body: "tighten this up" });
+  await send(stdin, "f");                                 // open the chip row
+  await waitFor(lastFrame, "FILTER");
+  await send(stdin, RIGHT, RIGHT);                        // producer → type → feedback
+  await send(stdin, DOWN);                                // any → open (applies live)
+  await waitFor(lastFrame, "1 of 2 match");
+  expect(lastFrame()).toContain("flagged@v1");
+  expect(lastFrame()).not.toContain("clean@v1");
+  await send(stdin, "x");                                 // clear all chips
+  await waitFor(lastFrame, "2 artifacts");
+});
+
 test("Plan 21: a pending approval SUSPENDS the docked browser — the card owns 'y', the dock returns after", async () => {
   // Turn 1: root saves an artifact AND dispatches a background worker, then finishes → the dock
   // appears. The worker (slow start) then requests create_agent → the approval card must take the

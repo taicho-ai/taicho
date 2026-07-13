@@ -27,12 +27,32 @@ export interface BrowserUiState {
   sel: number;                  // indexes the ARTIFACT rows (headers are never selectable)
   reading: boolean;
   scroll: number;
-  search: string | null;        // "/" live query; null = closed (Phase 3 opens it)
+  search: string | null;        // "/" live query; null = closed
+  filterOpen: boolean;          // the `f` chip row
+  filterField: number;          // which chip ←/→ is on
   hint?: string;                // background-settle scope hint (Phase 2)
 }
 
 export function initialBrowserUi(): BrowserUiState {
-  return { scope: "run", sort: "run", filters: {}, sel: 0, reading: false, scroll: 0, search: null };
+  return { scope: "run", sort: "run", filters: {}, sel: 0, reading: false, scroll: 0, search: null, filterOpen: false, filterField: 0 };
+}
+
+/** The `f` chip row: each field cycles a small closed value set with ↑↓. producer/type values are
+ *  derived from the artifacts IN SCOPE (plus "any"), so the chips never offer a dead value. */
+const FILTER_FIELDS = ["producer", "type", "feedback", "verdict", "since"] as const;
+type FilterField = (typeof FILTER_FIELDS)[number];
+function fieldValues(field: FilterField, inScope: Artifact[]): (string | undefined)[] {
+  if (field === "producer") return [undefined, ...new Set(inScope.map((a) => a.producer))];
+  if (field === "type") return [undefined, ...new Set(inScope.map((a) => a.type))];
+  if (field === "feedback") return [undefined, "open"];
+  if (field === "verdict") return [undefined, "pass", "fail"];
+  return [undefined, "24h", "7d", "30d"];  // since ("all" is the undefined chip)
+}
+function cycleFilter(f: BrowserFilters, field: FilterField, dir: 1 | -1, inScope: Artifact[]): BrowserFilters {
+  const values = fieldValues(field, inScope);
+  const cur = values.indexOf(f[field] as string | undefined);
+  const next = values[(cur + dir + values.length) % values.length];
+  return { ...f, [field]: next };
 }
 
 const SCOPES: { key: BrowserScope; label: string }[] = [
@@ -83,7 +103,31 @@ export function ArtifactBrowser(props: {
       if (key.rightArrow) { onChange({ ...st, sel: Math.min(arts.length - 1, sel + 1), scroll: 0 }); return; }
       return; // reader consumes everything else (verbs arrive in Phase 4)
     }
+    // "/" search owns printable keys while open: type to narrow, ⏎ keeps the query, esc clears it.
+    if (st.search != null) {
+      if (key.escape) { onChange({ ...st, search: null }); return; }
+      if (key.return) { onChange({ ...st, search: st.search || null }); return; }
+      if (key.backspace || key.delete) { onChange({ ...st, search: st.search.slice(0, -1) }); return; }
+      if (input && !key.ctrl && !key.meta && !key.upArrow && !key.downArrow && !key.tab) {
+        onChange({ ...st, search: st.search + input, sel: 0 });
+        return;
+      }
+      return;
+    }
+    // the `f` chip row: ←/→ field, ↑↓ value (applies LIVE), x clear all, ⏎/esc close.
+    if (st.filterOpen) {
+      const field = FILTER_FIELDS[st.filterField]!;
+      if (key.escape || key.return) { onChange({ ...st, filterOpen: false }); return; }
+      if (key.leftArrow) { onChange({ ...st, filterField: (st.filterField + FILTER_FIELDS.length - 1) % FILTER_FIELDS.length }); return; }
+      if (key.rightArrow) { onChange({ ...st, filterField: (st.filterField + 1) % FILTER_FIELDS.length }); return; }
+      if (key.upArrow) { onChange({ ...st, filters: cycleFilter(st.filters, field, -1, inScope), sel: 0 }); return; }
+      if (key.downArrow) { onChange({ ...st, filters: cycleFilter(st.filters, field, 1, inScope), sel: 0 }); return; }
+      if (input === "x") { onChange({ ...st, filters: {}, sel: 0 }); return; }
+      return;
+    }
     if (key.escape) { props.onClose(); return; }
+    if (input === "/") { onChange({ ...st, search: "" }); return; }
+    if (input === "f") { onChange({ ...st, filterOpen: true, filterField: 0 }); return; }
     if (key.upArrow) { onChange({ ...st, sel: Math.max(0, sel - 1) }); return; }
     if (key.downArrow) { onChange({ ...st, sel: Math.min(Math.max(0, arts.length - 1), sel + 1) }); return; }
     if (key.return) { if (current) onChange({ ...st, reading: true, scroll: 0 }); return; }
@@ -183,8 +227,30 @@ export function ArtifactBrowser(props: {
       <Box>
         <Text color="cyan" bold>ARTIFACTS </Text>
         {scopeTabs}
-        <Text dimColor>   {countLine(matched.length, inScope.length)}{st.hint ? ` · ${st.hint}` : ""}</Text>
+        <Text dimColor>   </Text>
+        <Text color={matched.length === inScope.length ? undefined : "yellow"} dimColor={matched.length === inScope.length}>
+          {countLine(matched.length, inScope.length)}
+        </Text>
+        {st.hint && <Text color="yellow"> · {st.hint}</Text>}
       </Box>
+      {st.filterOpen && (
+        <Box>
+          <Text color="cyan" bold>FILTER  </Text>
+          {FILTER_FIELDS.map((field, i) => {
+            const on = i === st.filterField;
+            const value = (st.filters[field] as string | undefined) ?? "any";
+            return (
+              <Text key={field} color={on ? "cyan" : "gray"} bold={on}>
+                {field} <Text color={value === "any" ? "gray" : "yellow"}>{value}</Text>{i < FILTER_FIELDS.length - 1 ? " · " : ""}
+              </Text>
+            );
+          })}
+        </Box>
+      )}
+      {st.filterOpen && <Text dimColor>        ←/→ field · ↑↓ value (live) · x clear · ⏎/esc close</Text>}
+      {st.search != null && (
+        <Text><Text dimColor>/</Text>{st.search}<Text color="cyan">▏</Text><Text dimColor>  searching title + summary… (⏎ keep · esc clear)</Text></Text>
+      )}
       <Text> </Text>
       {twoPane ? (
         <Box>
@@ -196,7 +262,7 @@ export function ArtifactBrowser(props: {
         </Box>
       ) : list}
       <Text> </Text>
-      <Text dimColor>↑↓ move · ⏎ read · tab/1·2·3 scope{st.scope === "all" ? " · s sort" : ""} · esc chat</Text>
+      <Text dimColor>↑↓ move · ⏎ read · tab/1·2·3 scope · f filter · / search{st.scope === "all" ? " · s sort" : ""} · esc chat</Text>
     </Box>
   );
 }
