@@ -152,3 +152,13 @@ test("the /tasks default view hides completed chat turns but shows background + 
   // the unfiltered view still has both
   expect(listTaskIndex(db).length).toBe(2);
 });
+
+test("Plan 20: writeTask is atomic — temp+rename, no .tmp residue, record round-trips", () => {
+  const { w, db } = boot();
+  createBackgroundTask(w, db, { taskId: "task_bg_atomic", agent: "a", goal: "g" });
+  const dir = join(w, "tasks");
+  const files = require("node:fs").readdirSync(dir) as string[];
+  expect(files.filter((f) => f.endsWith(".tmp"))).toEqual([]);       // no temp residue after a write
+  expect(files).toContain("task_bg_atomic.json");
+  expect(readTaskState(w, "task_bg_atomic")!.goal).toBe("g");        // the renamed file round-trips
+});

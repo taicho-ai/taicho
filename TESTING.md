@@ -22,9 +22,6 @@ bun scripts/e2e-evidence.ts consistent-blocks # Layer 4 — Plan 13 agent blocks
 bun scripts/e2e-evidence.ts artifact-viewer   # Layer 4 — Plan 15 completion bar + artifact viewer
 bun scripts/otel-verify.ts                    # Layer 4b — real OTLP wire verification (see below)
 ```
-(The `trace-inspector` and `live-waterfall` scenarios are DEAD — Plan 17 retired the `/trace`
-waterfall they drove; their files still sit in `e2e/scenarios/` but import the deleted
-`core/trace-tree` and fail at import.)
 There is no `npm test` script — use `bun test` (Bun's built-in runner discovers `src/**/*.test.ts`).
 
 For the focused real-binary agent workflow and recording evidence, see [CLI_TESTING.md](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/CLI_TESTING.md).

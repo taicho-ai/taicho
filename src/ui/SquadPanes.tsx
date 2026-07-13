@@ -38,7 +38,7 @@ const RESERVED_ROWS = 6;  // rows kept for the banner/scrollback/bar/input when 
 const RULE = "▎";         // the left-accent that reads as a pane's column edge (cheap vs an Ink border)
 
 /** Pure layout decision shared by the App and its tests: which surfaces show for a mode + terminal
- *  size. Panes hide in `bar`/`waterfall` mode and whenever the terminal is too small (degrade
+ *  size. Panes hide in `bar` mode and whenever the terminal is too small (degrade
  *  to bar-only); the bar stays only in `bar`/`both` (and everywhere when too small to render panes).
  *  Plan 13's consistent-block view is the DEFAULT render — it replaces the panes as the primary squad view. */
 export function resolveLayout(viewMode: ViewMode, columns: number, rows: number): { showPanes: boolean; showBar: boolean } {
