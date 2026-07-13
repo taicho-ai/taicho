@@ -29,7 +29,7 @@ import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { getViewMode } from "../store/prefs";
 import { createTeam } from "../store/teams";
-import { writePlan, reindexPlans, currentPlanId } from "../store/plans";
+import { writePlan, reindexPlans, currentPlanId, foldPlan } from "../store/plans";
 import { readPrefs } from "../store/prefs";
 import { statusReducer } from "../core/agent-status";
 import { KbNode } from "../schemas/knowledge";
@@ -691,6 +691,37 @@ test("dispatch_task runs in the BACKGROUND: root returns immediately, the captai
   const bg = rows.find((r) => r.agent === "bgworker");
   expect(bg?.status).toBe("completed");
   expect(bg?.kind).toBe("background");
+});
+
+test("Plan 20 (Plan 18's settle half): a background task settle TICKS the plan item it was bound to", async () => {
+  // Root writes a plan, dispatches its item to a background worker, and finishes its turn. When the
+  // detached task settles, the REPL settle path must tick the bound item from the task's REAL outcome
+  // — the seam settlePlanItemForTask existed for but nothing called (the item used to stay
+  // in_progress forever, until boot's reconcilePlans wrongly marked it interrupted).
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("BACKGROUND-WORKER-IDENTITY")) { await sleep(200); return finalText("background item done"); } // the detached worker run
+      if (s.includes("task_bg_")) return finalText("dispatched the plan item");   // root, after dispatch returned a taskId
+      if (s.includes("minted")) return toolCall("dispatch_task", { to: "bgworker", goal: "do the bg item", itemId: "it_bg" }); // root, after write_plan's result
+      return toolCall("write_plan", { goal: "prove the settle half", items: [{ id: "it_bg", text: "background item" }] });     // root, first turn
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "bgworker", role: "Background worker", identity: "BACKGROUND-WORKER-IDENTITY — you do detached work.", tools: [] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "plan it and kick it off", ENTER);
+  await waitFor(lastFrame, "dispatched the plan item");          // root's turn finished; the task is in flight
+  await waitFor(lastFrame, "background task", 4000);             // the settle notification
+
+  const planId = currentPlanId(db, "root");
+  expect(planId).toBeTruthy();
+  const st = foldPlan(ws, planId!)!;
+  const item = st.items.find((i) => i.id === "it_bg")!;
+  expect(item.status).toBe("done");                              // ← the previously-unwired settle
+  expect(item.note ?? "").toContain("completed");
 });
 
 // ── Plan 04 Phase 6: /schedules add → list → remove (durable, from the REPL) ──

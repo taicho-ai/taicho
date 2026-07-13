@@ -18,7 +18,7 @@ import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/r
 import { listTeams } from "../store/teams";
 import { PlanPanel } from "./PlanPanel";
 import type { PlanState } from "../schemas/plan";
-import { currentPlanId, foldPlan } from "../store/plans";
+import { currentPlanId, foldPlan, settlePlanItemForTask } from "../store/plans";
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy, approvePolicy } from "../store/policy";
 import { updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
@@ -480,10 +480,23 @@ export function App(props: {
     const status = readTaskState(props.ws, taskId)?.status ?? "completed";
     const icon = status === "completed" ? "✓" : status === "cancelled" ? "⊗" : "⚠";
     say({ kind: "system", text: `  ${icon} background task ${taskId} (${agentId}) ${status} — /tasks or check_task` });
+    // Plan 20 (Plan 18's settle half): tick whatever plan item this task was bound to, from the
+    // task's REAL outcome — completed→done, blocked→blocked, else failed; cancelled counts as failed
+    // (the work did not happen). Then refresh the pinned plan panel from disk. Without this the item
+    // stayed in_progress forever and boot's reconcilePlans wrongly marked it interrupted.
+    settlePlanItem(taskId, wasCancelled ? "failed" : res.trace.outcome === "completed" ? "done" : res.trace.outcome === "blocked" ? "blocked" : "failed",
+      wasCancelled ? "task cancelled" : `task ${taskId} ${res.trace.outcome}`);
   };
   const failTask = (taskId: string, agentId: string, e: unknown) => {
     setTaskFields(props.ws, props.db, taskId, { status: "failed", stepStatus: "failed", summary: e instanceof Error ? e.message : String(e) });
     say({ kind: "system", text: `  ⚠ background task ${taskId} (${agentId}) failed — /tasks` });
+    settlePlanItem(taskId, "failed", e instanceof Error ? e.message : String(e));
+  };
+  // Shared by both settle paths: settle the bound item (no-op when the task bound none) and push the
+  // refreshed fold to the plan panel so the checkbox flips on screen, not just on disk.
+  const settlePlanItem = (taskId: string, status: "done" | "failed" | "blocked", note: string) => {
+    const settled = settlePlanItemForTask(props.ws, props.db, taskId, status, note);
+    if (settled) { const st = foldPlan(props.ws, settled.planId); if (st) setPlan(st); }
   };
 
   // Fire-and-forget a goal onto another agent (dispatch_task). Returns the taskId immediately; the
