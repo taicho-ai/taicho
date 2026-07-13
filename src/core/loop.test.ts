@@ -493,6 +493,45 @@ test("Plan 12 (reopened): a tool slower than the deadline still completes (shot-
 // Plan 20: PARALLEL tool calls in one turn. The disarm flag must be a COUNTER, not a boolean — the
 // first tool-result must not re-arm the timer while a second tool is still executing, or a slow
 // second tool with no intervening chunks is falsely killed (the exact class Plan 12 removed).
+// Plan 20 (review finding): a THROWING tool produces a `tool-error` stream part, which the AI SDK
+// never delivers to onChunk — chunk-based counting left the counter stuck ≥1, permanently disarming
+// the idle timer for the rest of that call. Tracking at the EXECUTE seam (finally) balances every
+// settle path, so a hung-open stream after a tool throw is still caught.
+test("a throwing tool does not wedge the idle timer: hung stream after tool-error is still caught", async () => {
+  const ran: string[] = [];
+  const mixedTools: ToolSet = {
+    boom_tool: tool({
+      description: "throws — its settle is invisible to onChunk (tool-error part)",
+      inputSchema: z.object({}),
+      // The explicit return type keeps tool()'s overload inference from collapsing to Promise<never>
+      execute: async (): Promise<{ ok: boolean }> => { ran.push("boom"); throw new Error("tool exploded"); },
+    }),
+    ok_tool: tool({
+      description: "succeeds shortly after",
+      inputSchema: z.object({}),
+      execute: async () => { await new Promise((r) => setTimeout(r, 50)); ran.push("ok"); return { ok: true }; },
+    }),
+  };
+  // A stream that emits both tool calls, then HANGS OPEN forever (never closes, no finish part) —
+  // the exact fetch-abort-ignoring hang the idle timer exists to catch.
+  const hangingAfterToolCalls = new ReadableStream({
+    start(controller) {
+      controller.enqueue({ type: "stream-start", warnings: [] });
+      controller.enqueue({ type: "tool-call", toolCallId: "x1", toolName: "boom_tool", input: "{}" });
+      controller.enqueue({ type: "tool-call", toolCallId: "x2", toolName: "ok_tool", input: "{}" });
+      // never close, never error — hang
+    },
+  });
+  const model = new MockLanguageModelV3({ doStream: async () => ({ stream: hangingAfterToolCalls as any }) });
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools: mixedTools,
+    modelRequestTimeoutMs: 200,
+  });
+  expect(ran.sort()).toEqual(["boom", "ok"]);   // both tools actually executed mid-stream
+  expect(res.error).toBeDefined();              // stuck counter ⇒ this wedged forever (test timeout)
+  expect(res.error).toContain("idle");
+}, 5000);
+
 test("parallel tool calls: the idle timer stays disarmed until the LAST tool finishes (counter, not boolean)", async () => {
   const ran: string[] = [];
   const parallelTools: ToolSet = {

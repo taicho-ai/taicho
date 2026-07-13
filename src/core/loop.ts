@@ -218,11 +218,14 @@ export async function runLoop(opts: {
       // execution. Tools execute INSIDE consumeStream(), so a simple Promise.race would kill any tool
       // longer than the deadline (the original watchdog bug). Instead:
       // - The timer resets on each chunk (text-delta, tool-call, tool-result, etc.)
-      // - Executing tools are COUNTED (Plan 20): a tool-call chunk increments and disarms, a
-      //   tool-result decrements, and the timer re-arms only at ZERO. With PARALLEL tool calls in
-      //   one turn, a boolean re-armed at the FIRST tool-result while a second tool still executed —
-      //   a slow second tool with no intervening chunks was falsely killed, the exact false-kill
-      //   class Plan 12 was written to remove.
+      // - Executing tools are COUNTED at the EXECUTE seam (Plan 20): each tool's execute() is wrapped
+      //   so entry increments + disarms, and a `finally` decrements — the timer re-arms only at ZERO.
+      //   Two subtleties both bit before: (a) with PARALLEL tool calls, a boolean re-armed at the
+      //   FIRST tool-result while a second tool still executed — a slow second tool with no
+      //   intervening chunks was falsely killed; (b) chunk-based counting never saw a THROWING tool
+      //   (the SDK's `tool-error` part is not delivered to onChunk), so the counter stuck ≥1 and the
+      //   timer stayed disarmed for the rest of the call. The execute-seam `finally` fires on every
+      //   settle path, success or throw.
       // - If no chunks arrive for `timeoutMs` while the timer is armed, the stream is hung
       // This catches a genuinely hung stream (no chunks, no tool execution) without killing long tools.
       let streamErr: unknown;
@@ -248,6 +251,22 @@ export async function runLoop(opts: {
         toolsExecuting = Math.max(0, toolsExecuting - 1);
         if (toolsExecuting === 0) resetIdleTimer();
       };
+      // Wrap each tool's execute() for THIS call: the entry/finally pair is the only seam that sees
+      // every settle path (a throw becomes a `tool-error` part onChunk never receives). Tools without
+      // an execute pass through untouched.
+      const trackedTools = Object.fromEntries(
+        Object.entries(opts.tools).map(([name, t]) => {
+          const orig = (t as { execute?: (...a: unknown[]) => unknown }).execute;
+          if (typeof orig !== "function") return [name, t];
+          return [name, {
+            ...t,
+            execute: async (...args: unknown[]) => {
+              onToolStart();
+              try { return await orig.apply(t, args); } finally { onToolEnd(); }
+            },
+          }];
+        }),
+      ) as typeof opts.tools;
       // Create a promise that rejects when the idle timer fires
       const idleTimeoutPromise = new Promise<never>((_, reject) => {
         rejectIdle = reject;
@@ -277,7 +296,7 @@ export async function runLoop(opts: {
       const s = streamText({
         model: opts.model,
         messages: callMessages, // Plan 18: conversation + the plan slot (slot never enters `messages`)
-        tools: opts.tools,
+        tools: trackedTools,    // Plan 20: execute-seam idle tracking (see the wrapper above)
         abortSignal: opts.signal,
         // Codex backend (subscription) requires the system prompt in the top-level `instructions`
         // field with store:false ("Instructions are required") — NOT a system message. Every other
@@ -290,15 +309,12 @@ export async function runLoop(opts: {
         // Surface each chunk so the UI can render the response live as it streams (instead of all
         // at once when the run returns). Also reset the idle timer on each chunk.
         onChunk: ({ chunk }) => {
+          // Any chunk is activity. Tool-execution disarm/re-arm lives at the EXECUTE seam (the
+          // trackedTools wrapper above) — chunks cannot carry it: the SDK never delivers a
+          // `tool-error` part here, so a throwing tool would leave a chunk-based counter stuck.
           resetIdleTimer();
           if (chunk.type === "text-delta") {
             opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text });
-          } else if (chunk.type === "tool-call") {
-            // Tool execution is about to start — count it and disarm the idle timer
-            onToolStart();
-          } else if (chunk.type === "tool-result") {
-            // One tool finished — re-arm only when NO tool is still executing
-            onToolEnd();
           }
         },
       });

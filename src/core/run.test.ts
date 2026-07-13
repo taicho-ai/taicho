@@ -946,6 +946,21 @@ test("non-subscription checker prices its real spend: runChecker returns a USD c
   expect(r.tokens).toBeGreaterThan(0);
 });
 
+test("Plan 20: a checker refused by BUDGET before any call is not a pass — checkerError verdict (review finding)", async () => {
+  const { ws } = await boot();
+  const agent = { ...(await loadAgent(ws, "root")), budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20, maxTokensPerRun: 0 } };
+  // maxTokensPerRun 0 ⇒ runLoop refuses at iteration 0 with { text: "[budget exhausted]", exhausted: true }
+  // — error undefined, aborted false. The first guard shipped only error||aborted, so this parsed to the
+  // advisory PASS and ticked plan items done as "independently verified". Exhaustion is a far more
+  // routine state than a provider outage (rolling ceilings persist across sessions).
+  const model = new MockLanguageModelV3({ doGenerate: (async () => text('{"pass": true, "reasons": []}')) as any });
+  const r = await runChecker({ model, agent, subscription: false, goal: "g", criteria: "c", output: "o" });
+  expect(r.checkerError).toBe(true);
+  expect(r.verdict.pass).toBe(false);
+  expect(r.verdict.reasons.join(" ")).toContain("checker unavailable");
+  expect((model as any).doGenerateCalls.length).toBe(0);   // the checker truly never ran
+});
+
 test("Plan 20: a checker that never RAN (model error) is not a pass — checkerError verdict, pass=false", async () => {
   const { ws } = await boot();
   const agent = await loadAgent(ws, "root");

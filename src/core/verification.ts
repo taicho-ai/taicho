@@ -74,15 +74,17 @@ export async function runChecker(params: {
     spendLedger: params.spendLedger, // Plan 09: commit + bound the checker call against the ceilings
     spendScopes: params.spendScopes,
   });
-  // Plan 20: a checker that NEVER RAN (transport error / cancel) must not pass. It used to parse
-  // "[error]"/"[cancelled]" into the advisory PASS — a squad relying on criteria got silent passes
-  // during a provider outage. Now it surfaces pass=false + checkerError:true, and tools.ts skips the
-  // retry (re-running the CHILD is pointless when the judge is down) and the annotation/coaching side
-  // effects (an outage verdict says nothing about the artifact). A GARBLED verdict from a checker
-  // that DID run still parses to the advisory pass in parseVerdict — that stays deliberate.
-  if (result.error || result.aborted) {
+  // Plan 20: a checker that NEVER RAN must not pass. It used to parse "[error]"/"[cancelled]"/
+  // "[… budget exhausted …]" into the advisory PASS — a squad relying on criteria got silent passes
+  // during a provider outage, and (the more routine trigger) whenever a spend ceiling or per-run cap
+  // refused the checker call before it was made. Now it surfaces pass=false + checkerError:true, and
+  // tools.ts skips the retry (re-running the CHILD is pointless when the judge can't run) and the
+  // annotation/coaching side effects (such a verdict says nothing about the artifact). A GARBLED
+  // verdict from a checker that DID run still parses to the advisory pass in parseVerdict — deliberate.
+  if (result.error || result.aborted || result.exhausted) {
+    const why = result.error ?? (result.aborted ? "cancelled" : result.text || "budget exhausted");
     return {
-      verdict: { pass: false, reasons: [`checker unavailable: ${result.error ?? "cancelled"}`] },
+      verdict: { pass: false, reasons: [`checker unavailable: ${why}`] },
       checkerError: true,
       tokens: result.tokens,
       costUsd: params.subscription ? null : result.costUsd,
