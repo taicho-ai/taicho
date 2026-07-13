@@ -531,7 +531,13 @@ export function App(props: {
         .then((res) => { settleTask(taskId, o.agent.id, res); return res; }, (e) => { failTask(taskId, o.agent.id, e); });
       return { controller, promise };
     };
-    scheduler.submit({ taskId, agentId: o.agent.id, cap: o.agent.budgets.maxConcurrentRuns, start });
+    // Plan 20 (review finding): a task cancelled while QUEUED never reaches settleTask/failTask —
+    // start() never ran — so its bound plan item stayed in_progress forever. The scheduler fires
+    // onCancelQueued for exactly this drop-from-queue transition; settle the item there.
+    scheduler.submit({
+      taskId, agentId: o.agent.id, cap: o.agent.budgets.maxConcurrentRuns, start,
+      onCancelQueued: () => settlePlanItem(taskId, "failed", "task cancelled while queued"),
+    });
     return { taskId };
   };
 
@@ -766,6 +772,7 @@ export function App(props: {
     // `/agents` list stays in runSlashPure.
     if (cmd === "agents" && arg.trim().toLowerCase() === "reindex") {
       await reindex(props.ws, props.db);
+      setRoster(loadIndex(props.db)); // review finding: /teach + approvePolicy read this state, not the DB
       say({ kind: "system", text: "  roster reindexed from agents/*/agent.md" });
       return;
     }

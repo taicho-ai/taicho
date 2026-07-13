@@ -158,7 +158,7 @@ process.on("SIGTERM", () => {
   void (async () => {
     try { await mcp?.closeAll(); } catch { /* best-effort on the way down */ }
     try { await telemetry?.shutdown(); } catch { /* best-effort on the way down */ }
-    process.exit(0);
+    process.exit(143); // 128+SIGTERM: signal-terminated, not success — what the default disposition reported
   })();
 });
 
