@@ -1224,112 +1224,150 @@ test("concurrent approval requests queue instead of clobbering: both are answere
 
 // ── Plan 01 Phase 4 — the /artifacts UI (view / annotate / approve) ──────────
 
-test("/artifacts list shows a stored artifact with its handle", async () => {
-  const { ws, props } = await setup();
-  saveArtifact(ws, { id: "dossier", title: "Foo dossier", type: "dossier", summary: "on foo", body: "BODY", producer: "root", runId: "root/1" });
+// ── Plan 21 Ph4: the /artifacts subcommands retired — the browser owns the verbs ──
+
+test("Plan 21 Ph4: any /artifacts subcommand points at the browser instead", async () => {
+  const { props } = await setup({ model: mockModel("hi") });
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "/artifacts list", ENTER);
-  await waitFor(lastFrame, "dossier@v1");
-  expect(lastFrame()).toContain("Foo dossier");
+  await waitFor(lastFrame, "the browser owns this now");
+  expect(lastFrame()).not.toContain("ARTIFACTS ");          // pointing, not opening
 });
 
-test("/artifacts on an empty store reports (no artifacts)", async () => {
-  const { props } = await setup();
+test("Plan 21 Ph4: reader verbs — `a` lands open feedback on the viewed version, `y` approves", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
+  saveArtifact(ws, { id: "verb-doc", title: "Verb Doc", body: "# body", producer: "root", runId: "root/1" });
   const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/artifacts", ENTER);                   // cold open: no runs yet → all-runs scope
+  await waitFor(lastFrame, "verb-doc@v1");
+  await send(stdin, ENTER);                                 // reader
+  await waitFor(lastFrame, "a annotate");
+  await send(stdin, "a");                                   // inline feedback input
+  await waitFor(lastFrame, "feedback ▸");
+  await send(stdin, "tighten the intro", ENTER);
+  await waitFor(lastFrame, "✎ feedback on verb-doc@v1");
+  const anns = listAnnotations(ws, "verb-doc@v1");
+  expect(anns.some((an) => an.kind === "feedback" && an.status === "open" && an.body === "tighten the intro")).toBe(true);
+
+  await send(stdin, "y");                                   // approve the viewed version
+  await waitFor(lastFrame, "✓ approved verb-doc@v1");
+  expect(listAnnotations(ws, "verb-doc@v1").some((an) => an.kind === "approval")).toBe(true);
+});
+
+test("Plan 21 review: a bad $EDITOR must not crash the REPL — `o` reports and shows the path", async () => {
+  const prevEditor = process.env.EDITOR;
+  process.env.EDITOR = "definitely-not-a-real-editor-xyz";   // spawn ENOENT arrives as an ASYNC error event
+  try {
+    const { ws, props } = await setup({ model: mockModel("hi") });
+    saveArtifact(ws, { id: "open-doc", title: "Open Doc", body: "# body", producer: "root", runId: "root/1" });
+    const { stdin, lastFrame } = render(<App {...props} />);
+    await send(stdin, "/artifacts", ENTER);
+    await waitFor(lastFrame, "open-doc@v1");
+    await send(stdin, ENTER);                                // reader
+    await waitFor(lastFrame, "a annotate");
+    await send(stdin, "o");
+    // Without the error listener this killed the whole process (exit 1) one tick later.
+    await waitFor(lastFrame, "$EDITOR failed", 4000);
+    expect(lastFrame()).toContain("body file:");             // the path — the always-usable part
+  } finally {
+    if (prevEditor === undefined) delete process.env.EDITOR; else process.env.EDITOR = prevEditor;
+  }
+});
+
+test("Plan 21 review: search ⏎ KEEPS the query as a filter and the found row can be OPENED", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    {
+      content: [
+        { type: "tool-call", toolCallId: "a1", toolName: "save_artifact", input: JSON.stringify({ id: "fusion-notes", title: "Fusion Notes", body: "plasma facts" }) },
+        { type: "tool-call", toolCallId: "a2", toolName: "save_artifact", input: JSON.stringify({ id: "market-brief", title: "Market Brief", body: "money facts" }) },
+      ],
+      finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+    } as unknown as LanguageModelV3GenerateResult,
+    finalText("both saved."),
+  ) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make both", ENTER);
+  await waitFor(lastFrame, "2 artifacts");
+  await send(stdin, "/");
+  await waitFor(lastFrame, "searching title");
+  await send(stdin, "f", "u", "s");
+  await waitFor(lastFrame, "1 of 2 match");
+  await send(stdin, ENTER);                                  // keep: query → filters.q, keys → shelf
+  await waitFor(lastFrame, "/fus");                          // the kept-query chip on the header
+  expect(lastFrame()).toContain("1 of 2 match");             // still narrowed — the hint was honest
+  await send(stdin, ENTER);                                  // ⏎ now OPENS the found row (the old trap)
+  await waitFor(lastFrame, "plasma facts");                  // the reader, on the match
+});
+
+test("Plan 21 review: the reader is pinned by HANDLE — a background save cannot swap it mid-read", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
+  saveArtifact(ws, { id: "steady-doc", title: "Steady Doc", body: "# steady content", producer: "root", runId: "root/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/artifacts", ENTER);                    // cold → all-runs
+  await waitFor(lastFrame, "steady-doc@v1");
+  await send(stdin, ENTER);                                  // read steady-doc
+  await waitFor(lastFrame, "steady content");
+  // A background run saves a NEWER artifact — its run group now tops the all-runs shelf, shifting
+  // every row index. An index-pinned reader swapped here (and `a`/`y` mis-targeted the ledger).
+  saveArtifact(ws, { id: "intruder", title: "Intruder", body: "# intruder content", producer: "worker", runId: "worker/99" });
+  await send(stdin, DOWN);                                   // any keystroke forces a re-render
+  await waitFor(lastFrame, "steady content");                // still reading the SAME artifact
+  expect(lastFrame()).toContain("steady-doc@v1");
+  expect(lastFrame()).not.toContain("intruder content");
+  await send(stdin, "y");                                    // the verb targets the PINNED handle
+  await waitFor(lastFrame, "✓ approved steady-doc@v1");
+  expect(listAnnotations(ws, "intruder@v1").length).toBe(0); // never the intruder
+});
+
+test("Plan 21 Ph5: `r` composes a revision request and submits it as a NORMAL turn", async () => {
+  let revisionPrompt = "";
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("revise rev-doc@v1")) { revisionPrompt = s; return finalText("revision underway"); }
+      return finalText("hi");
+    }) as any,
+  });
+  const { ws, props } = await setup({ model });
+  saveArtifact(ws, { id: "rev-doc", title: "Rev Doc", body: "# draft", producer: "root", runId: "root/1" });
+  annotateArtifact(ws, { target: "rev-doc@v1", author: "checker", body: "needs a cost table" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
   await send(stdin, "/artifacts", ENTER);
-  await waitFor(lastFrame, "no artifacts");
+  await waitFor(lastFrame, "rev-doc@v1");
+  await send(stdin, ENTER);                                // reader
+  await waitFor(lastFrame, "r revise");
+  await send(stdin, "r");                                  // one key: compose + submit
+  await waitFor(lastFrame, "revision underway");           // the turn ran through the NORMAL chat path
+  expect(lastFrame()).not.toContain("a annotate");         // the browser closed for the turn
+  expect(revisionPrompt).toContain("revise rev-doc@v1");   // the composed request named the handle…
+  expect(revisionPrompt).toContain("needs a cost table");  // …and carried the open feedback
 });
 
-test("/artifacts annotate attaches human feedback (asserted against the store)", async () => {
-  const { ws, props } = await setup();
-  saveArtifact(ws, { id: "dossier", title: "Dossier", body: "BODY", producer: "root", runId: "root/1" });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts annotate dossier tighten the intro", ENTER);
-  await waitFor(lastFrame, "annotated dossier@v1");
-  const open = listAnnotations(ws, "dossier", { status: "open" });
-  expect(open.length).toBe(1);
-  expect(open[0].author).toBe("human");
-  expect(open[0].body).toBe("tighten the intro");
-  expect(open[0].kind).toBe("feedback");
-});
-
-test("/artifacts approve records a captain sign-off", async () => {
-  const { ws, props } = await setup();
-  saveArtifact(ws, { id: "dossier", title: "Dossier", body: "BODY", producer: "root", runId: "root/1" });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts approve dossier@v1", ENTER);
-  await waitFor(lastFrame, "approved dossier@v1");
-  expect(listAnnotations(ws, "dossier").map((a) => a.kind)).toEqual(["approval"]);
-});
-
-test("/artifacts show surfaces provenance + the artifact BODY + the open feedback", async () => {
-  const { ws, props } = await setup();
-  saveArtifact(ws, { id: "dossier", title: "Dossier", type: "dossier", summary: "sum", body: "THE ACTUAL DELIVERABLE BODY", producer: "root", runId: "root/1" });
-  annotateArtifact(ws, { target: "dossier@v1", author: "human", body: "add dates" });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts show dossier", ENTER);
-  await waitFor(lastFrame, "add dates");
-  const frame = lastFrame() ?? "";
-  expect(frame).toContain("producer=root");
-  expect(frame).toContain("versions=[1]");
-  expect(frame).toContain("THE ACTUAL DELIVERABLE BODY"); // the BODY is rendered, not just the envelope
-});
-
-test("/artifacts annotate on a missing artifact reports the error (no dangling feedback)", async () => {
-  const { props } = await setup();
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts annotate ghost do something", ENTER);
-  await waitFor(lastFrame, "no artifact");
-});
-
-test("/artifacts gc archives old unreferenced versions and reports what it collected", async () => {
-  const { ws, props } = await setup();
+test("Plan 21 Ph4: shelf `g` (all-runs) previews gc with a dry run, ⏎ confirms — same code path", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
   for (let i = 1; i <= 5; i++) saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: "root/1" });
   const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts gc", ENTER);
-  await waitFor(lastFrame, "archived 2 version(s)");
-  expect(readArtifact(ws, "doc@v1")).toBeNull();        // v1/v2 archived out of the live store
-  expect(readArtifact(ws, "doc")!.version).toBe(5);     // latest untouched
-});
 
-// PRODUCTION CONDITION (PR #17 review): each version is pinned by its OWN producing trace.artifacts —
-// the real state after iterative revision. The handler must protect by the CONSUMPTION/hand-off graph,
-// not the producing record, or gc is a no-op (keep-latest-N shadowed). The pre-fix handler folded
-// t.artifacts into `referenced`, so every version was protected and nothing was ever archived.
-test("/artifacts gc still archives superseded versions when each is pinned by its producing trace", async () => {
-  const { ws, props } = await setup();
-  for (let i = 1; i <= 5; i++) {
-    saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: `root/2026-07-04-run${i}` });
-    writeTrace(ws, mkTrace({ id: `root/2026-07-04-run${i}`, agent: "root", artifacts: [`doc@v${i}`] }));
-  }
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts gc", ENTER);
-  await waitFor(lastFrame, "archived 2 version(s)"); // v1/v2 collected despite being trace-pinned
-  expect(readArtifact(ws, "doc@v1")).toBeNull();
-  expect(readArtifact(ws, "doc@v2")).toBeNull();
+  await send(stdin, "/artifacts", ENTER);                   // cold open → all-runs scope (g lives here)
+  await waitFor(lastFrame, "doc@v5");
+  await send(stdin, "g");
+  await waitFor(lastFrame, "gc would archive 2 version(s)");
+  expect(readArtifact(ws, "doc@v1")).not.toBeNull();        // the preview touched NOTHING
+  await send(stdin, ENTER);                                 // confirm
+  await waitFor(lastFrame, "gc: archived 2 version(s)");
+  expect(readArtifact(ws, "doc@v1")).toBeNull();            // now it archived exactly the previewed set
   expect(readArtifact(ws, "doc")!.version).toBe(5);
-});
-
-// A version CONSUMED via the hand-off graph (inputArtifacts/outputArtifacts) must survive gc, however
-// old — this is the safety invariant the re-scoped protected set must still honor.
-test("/artifacts gc never archives a version handed off across a delegation edge", async () => {
-  const { ws, props } = await setup();
-  for (let i = 1; i <= 5; i++) {
-    saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: `root/2026-07-04-run${i}` });
-    writeTrace(ws, mkTrace({ id: `root/2026-07-04-run${i}`, agent: "root", artifacts: [`doc@v${i}`] }));
-  }
-  // A later run handed old doc@v1 DOWN to a child and received doc@v2 UP — both are live references.
-  writeTrace(ws, mkTrace({ id: "root/2026-07-04-run9", agent: "root", inputArtifacts: ["doc@v1"], outputArtifacts: ["doc@v2"] }));
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts gc", ENTER);
-  await waitFor(lastFrame, "nothing to collect"); // v1+v2 protected by hand-off; v3/v4/v5 are keep-latest-3
-  expect(readArtifact(ws, "doc@v1")!.title).toBe("v1");
-  expect(readArtifact(ws, "doc@v2")!.title).toBe("v2");
 });
 
 // ── Plan 15: completion action bar + artifact viewer ──
 
-test("Plan 15: a turn that produces artifacts shows the completion action bar; ⏎ opens the viewer", async () => {
+test("Plan 21: a completed turn with artifacts DOCKS the browser; ⏎ opens the full-screen reader; esc chain", async () => {
   const model = new MockLanguageModelV3({ doGenerate: mockValues(
     toolCall("save_artifact", { id: "test-doc", title: "Test Document", body: "# Hello\n\nThis is the content." }),
     finalText("Done. See artifact test-doc@v1."),
@@ -1338,33 +1376,235 @@ test("Plan 15: a turn that produces artifacts shows the completion action bar; �
   const { stdin, lastFrame } = render(<App {...props} />);
 
   await send(stdin, "create a document", ENTER);
-  await waitFor(lastFrame, "View artifacts (1)");
-  expect(lastFrame()).toContain("Continue chatting");
-  expect(lastFrame()).toContain("←/→ move");
+  await waitFor(lastFrame, "ARTIFACTS");                 // the shelf docked itself — no bar, no command
+  expect(lastFrame()).toContain("test-doc@v1");          // the row is on the shelf
+  expect(lastFrame()).toContain("1 artifact");           // the honesty line
+  expect(lastFrame()).toContain("this run");             // scoped to the run that just ended
 
-  // ⏎ on "View artifacts" opens the viewer
-  await send(stdin, ENTER);
-  await waitFor(lastFrame, "Test Document");
-  expect(lastFrame()).toContain("test-doc@v1");
-  expect(lastFrame()).toContain("root");
-  expect(lastFrame()).toContain("↑/↓ scroll");
+  await send(stdin, ENTER);                              // ⏎ → the full-screen reader
+  await waitFor(lastFrame, "Hello");                     // the body renders
+  expect(lastFrame()).toContain("test-doc@v1 · root");   // reader header: handle · producer
+  expect(lastFrame()).toContain("a annotate");            // the verb row (its tail wraps at narrow widths)
 
-  // esc closes the viewer
-  await send(stdin, ESC);
-  await waitFor(lastFrame, "> ");
+  await send(stdin, ESC);                                // reader → shelf
+  await waitFor(lastFrame, "ARTIFACTS");
+  await send(stdin, ESC);                                // shelf → chat
+  await waitForGone(lastFrame, "ARTIFACTS");
+  await waitFor(lastFrame, "> ");                        // the input line is back
 });
 
-test("Plan 15: a turn with no artifacts shows no completion bar", async () => {
+test("Plan 21: a turn with no artifacts does not dock the browser", async () => {
   const model = new MockLanguageModelV3({ doGenerate: mockValues(finalText("just text, no artifacts")) as any });
   const { props } = await setup({ model });
   const { stdin, lastFrame } = render(<App {...props} />);
 
   await send(stdin, "say hi", ENTER);
   await waitFor(lastFrame, "just text, no artifacts");
-  // No completion bar should appear
-  expect(lastFrame()).not.toContain("View artifacts");
-  expect(lastFrame()).not.toContain("Continue chatting");
+  expect(lastFrame()).not.toContain("ARTIFACTS");
 });
+
+test("Plan 21: a FAILED turn never docks, even when it produced artifacts (spec §1 unifies the old two triggers)", async () => {
+  // The @agent path used to show the bar unconditionally; now both paths gate on completed.
+  let calls = 0;
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async () => {
+      calls += 1;
+      if (calls > 1) throw Object.assign(new Error("provider died"), { code: "ECONNREFUSED" });
+      return toolCall("save_artifact", { id: "orphan", title: "Orphan", body: "body" });
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "maker", role: "makes things", identity: "You make things." }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "@maker make a thing", ENTER);
+  await waitFor(lastFrame, "failed");                    // the run line reports the failure
+  expect(lastFrame()).not.toContain("ARTIFACTS");        // no dock on a failed turn
+});
+
+test("Plan 21: bare /artifacts re-enters the browser scoped to the latest run", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("save_artifact", { id: "re-doc", title: "Re Doc", body: "content" }),
+    finalText("saved."),
+  ) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make it", ENTER);
+  await waitFor(lastFrame, "ARTIFACTS");
+  await send(stdin, ESC);                                // leave the dock
+  await waitForGone(lastFrame, "ARTIFACTS");
+  await send(stdin, "/artifacts", ENTER);                // one command re-enters
+  await waitFor(lastFrame, "ARTIFACTS");
+  expect(lastFrame()).toContain("re-doc@v1");            // same latest-run scope
+});
+
+test("Plan 21 Ph2: scope round-trip — this run / conversation / all runs (grouped)", async () => {
+  // Two turns, two artifacts. Scope 1 shows only the latest turn's; scope 2 (ledger union) shows
+  // both; scope 3 shows both under run-group headers.
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("save_artifact", { id: "art-one", title: "Art One", body: "first" }),
+    finalText("one saved."),
+    toolCall("save_artifact", { id: "art-two", title: "Art Two", body: "second" }),
+    finalText("two saved."),
+  ) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make one", ENTER);
+  await waitFor(lastFrame, "art-one@v1");
+  await send(stdin, ESC);                                 // leave the first dock
+  await waitForGone(lastFrame, "ARTIFACTS");
+  await send(stdin, "make two", ENTER);
+  await waitFor(lastFrame, "art-two@v1");                 // second turn docked, scoped to ITS run
+  expect(lastFrame()).not.toContain("art-one@v1");        // scope 1 = this run only
+
+  await send(stdin, "2");                                 // conversation scope: every ledger turn
+  await waitFor(lastFrame, "art-one@v1");
+  expect(lastFrame()).toContain("art-two@v1");
+
+  await send(stdin, "3");                                 // all runs: grouped by producing run
+  await waitFor(lastFrame, "artifact");                   // a group header ("── … · 1 artifact · …")
+  expect(lastFrame()).toContain("──");
+  expect(lastFrame()).toContain("art-one@v1");
+  expect(lastFrame()).toContain("art-two@v1");
+
+  await send(stdin, "1");                                 // back to this run
+  await waitForGone(lastFrame, "art-one@v1");
+  expect(lastFrame()).toContain("art-two@v1");
+});
+
+test("Plan 21 Ph2: a background settle while docked HINTS instead of lying a row into scope 1", async () => {
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("bg-art")) return finalText("bg done");                  // worker AFTER its save (before
+      // the identity branch — the worker's prompt always carries its identity; identity-first loops it)
+      if (s.includes("HINT-WORKER-IDENTITY")) {
+        await sleep(300); // settle AFTER the dock is up
+        return toolCall("save_artifact", { id: "bg-art", title: "BG Art", body: "made off-turn" });
+      }
+      if (s.includes("task_bg_")) return finalText("dispatched and saved.");  // root after dispatch
+      return {
+        content: [
+          { type: "tool-call", toolCallId: "s1", toolName: "save_artifact", input: JSON.stringify({ id: "fg-art", title: "FG Art", body: "foreground" }) },
+          { type: "tool-call", toolCallId: "d1", toolName: "dispatch_task", input: JSON.stringify({ to: "hintworker", goal: "make one off-turn" }) },
+        ],
+        finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+      } as unknown as LanguageModelV3GenerateResult;
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "hintworker", role: "background maker", identity: "HINT-WORKER-IDENTITY — you save artifacts off-turn.", tools: [] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "save and dispatch", ENTER);
+  await waitFor(lastFrame, "ARTIFACTS");                  // docked (scope 1) with the foreground artifact
+  expect(lastFrame()).toContain("fg-art@v1");
+  await waitFor(lastFrame, "press 3", 6000);              // the settle hinted…
+  expect(lastFrame()).not.toContain("bg-art@v1");         // …and did NOT inject the out-of-scope row
+  await send(stdin, "3");                                 // one keystroke away, as promised
+  await waitFor(lastFrame, "bg-art@v1");
+}, 15000);
+
+test("Plan 21 Ph3: '/' search live-narrows the shelf and the honesty line admits it", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    {
+      content: [
+        { type: "tool-call", toolCallId: "a1", toolName: "save_artifact", input: JSON.stringify({ id: "fusion-notes", title: "Fusion Notes", body: "plasma" }) },
+        { type: "tool-call", toolCallId: "a2", toolName: "save_artifact", input: JSON.stringify({ id: "market-brief", title: "Market Brief", body: "money" }) },
+      ],
+      finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+    } as unknown as LanguageModelV3GenerateResult,
+    finalText("both saved."),
+  ) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make both", ENTER);
+  await waitFor(lastFrame, "2 artifacts");                // both on the shelf
+  await send(stdin, "/");                                 // open search (the browser's own input line)
+  await waitFor(lastFrame, "searching title");
+  await send(stdin, "f", "u", "s");                       // type to narrow, live
+  await waitFor(lastFrame, "1 of 2 match");               // the honesty line
+  expect(lastFrame()).toContain("fusion-notes@v1");
+  expect(lastFrame()).not.toContain("market-brief@v1");
+  await send(stdin, ESC);                                 // esc clears the query
+  await waitFor(lastFrame, "2 artifacts");
+});
+
+test("Plan 21 Ph3: the `f` chip row narrows by feedback:open, live", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    {
+      content: [
+        { type: "tool-call", toolCallId: "a1", toolName: "save_artifact", input: JSON.stringify({ id: "flagged", title: "Flagged", body: "needs work" }) },
+        { type: "tool-call", toolCallId: "a2", toolName: "save_artifact", input: JSON.stringify({ id: "clean", title: "Clean", body: "fine" }) },
+      ],
+      finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+    } as unknown as LanguageModelV3GenerateResult,
+    finalText("saved."),
+  ) as any });
+  const { ws, props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make both", ENTER);
+  await waitFor(lastFrame, "2 artifacts");
+  // Pin open feedback on one of them (the store call the `a` verb will make in Ph4).
+  annotateArtifact(ws, { target: "flagged@v1", author: "human", body: "tighten this up" });
+  await send(stdin, "f");                                 // open the chip row
+  await waitFor(lastFrame, "FILTER");
+  await send(stdin, RIGHT, RIGHT);                        // producer → type → feedback
+  await send(stdin, DOWN);                                // any → open (applies live)
+  await waitFor(lastFrame, "1 of 2 match");
+  expect(lastFrame()).toContain("flagged@v1");
+  expect(lastFrame()).not.toContain("clean@v1");
+  await send(stdin, "x");                                 // clear all chips
+  await waitFor(lastFrame, "2 artifacts");
+});
+
+test("Plan 21: a pending approval SUSPENDS the docked browser — the card owns 'y', the dock returns after", async () => {
+  // Turn 1: root saves an artifact AND dispatches a background worker, then finishes → the dock
+  // appears. The worker (slow start) then requests create_agent → the approval card must take the
+  // WHOLE keyboard (dock unmounted), 'y' answers the CARD (never approves an artifact), and when the
+  // queue drains the dock remounts from preserved state. This is the spec §1 blocker test.
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("minted-by-bg")) return finalText("bg worker done");         // worker AFTER approval (check
+      // BEFORE the identity branch — the worker's prompt always carries its identity, and matching it
+      // first would loop the worker into requesting create_agent forever)
+      if (s.includes("SUSPEND-WORKER-IDENTITY")) {
+        await sleep(250); // let the dock render first
+        return toolCall("create_agent", { id: "minted-by-bg", role: "background-minted", identity: "You were minted from a background approval." });
+      }
+      if (s.includes("task_bg_")) return finalText("dispatched and saved.");      // root after dispatch result
+      return {
+        content: [
+          { type: "tool-call", toolCallId: "s1", toolName: "save_artifact", input: JSON.stringify({ id: "sus-doc", title: "Sus Doc", body: "content" }) },
+          { type: "tool-call", toolCallId: "d1", toolName: "dispatch_task", input: JSON.stringify({ to: "susworker", goal: "mint an agent" }) },
+        ],
+        finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+      } as unknown as LanguageModelV3GenerateResult;
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "susworker", role: "suspends the dock", identity: "SUSPEND-WORKER-IDENTITY — you request approvals.", tools: ["create_agent"] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "save and dispatch", ENTER);
+  await waitFor(lastFrame, "ARTIFACTS");                 // docked after the completed foreground turn
+  await waitFor(lastFrame, "approve?", 6000);            // the background approval CARD is up (gate on the
+                                                         // card's own text — the ↳ breadcrumb fires earlier)
+  expect(lastFrame()).not.toContain("ARTIFACTS");        // …and it SUSPENDED the dock outright
+  await send(stdin, "y");                                // 'y' can only mean the card
+  await waitFor(lastFrame, "ARTIFACTS", 6000);           // queue drained → the dock remounted
+  await waitFor(lastFrame, "background task", 8000);     // the worker settled — its create_agent has run
+  expect(existsSync(join(ws, "agents", "minted-by-bg", "agent.md"))).toBe(true);  // the card was approved
+  expect(lastFrame()).toContain("sus-doc@v1");           // state preserved (same shelf)
+}, 15000);
 
 // --- Plan 19: /teams through the real REPL (Layer 1 — UI wiring never ships on typecheck alone) ----
 

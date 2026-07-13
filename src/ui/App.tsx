@@ -8,7 +8,8 @@ import { StatusBar } from "./StatusBar";
 import { SquadPanes, resolveLayout, type PaneEntry, type PaneFeedMap } from "./SquadPanes";
 import { AgentBlock, useBlockSettle, useBlockTicker, tailLines, type AgentBlockData } from "./AgentBlock";
 import { OperationView } from "./OperationView";
-import { ArtifactViewer } from "./ArtifactViewer";
+import { ArtifactBrowser, initialBrowserUi, type BrowserUiState } from "./ArtifactBrowser";
+import { latestRunFallback } from "./browser-model";
 import { parseInput } from "./input";
 import { BANNER } from "./banner";
 import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
@@ -42,10 +43,8 @@ import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
 import { addMcpServer, removeMcpServer } from "../store/mcp-store";
-import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand, parseArtifactsCommand, tokenize } from "./slash";
-import { listArtifacts, readArtifact, readArtifactBody, artifactVersions, gcArtifacts, collectReferencedArtifacts } from "../store/artifacts";
-import { annotateArtifact, listAnnotations } from "../store/annotations";
-import { artifactHandle } from "../schemas/artifact";
+import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand, tokenize } from "./slash";
+import { gcArtifacts, collectReferencedArtifacts } from "../store/artifacts";
 import { syncKnowledgeSources } from "../knowledge/sync";
 import { listNodeRows, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { listSkills, readSkill, deleteSkill, reindexSkills } from "../store/skills";
@@ -177,11 +176,13 @@ export function App(props: {
   // routine typing never remounts (only the deliberate programmatic sets below do).
   const [inputKey, setInputKey] = useState(0);
   const [inputSeed, setInputSeed] = useState("");
-  const setInputValue = (v: string) => { setInput(v); setInputSeed(v); setInputKey((k) => k + 1); };
+  const setInputValue = (v: string) => { inputLiveRef.current = v; setInput(v); setInputSeed(v); setInputKey((k) => k + 1); };
   // MUST be a stable reference: @inkjs/ui TextInput fires onChange from an effect whose deps include
   // `onChange` itself, and its `previousValue` lags one keystroke — so a fresh inline handler re-fires
   // onChange on every App re-render, which would reset `selected` and freeze the suggester highlight.
-  const onInputChange = useCallback((v: string) => { setInput(v); setSelected(0); }, []);
+  const inputLiveRef = useRef("");  // Plan 21: the live draft — the dock unmounts the TextInput, and a
+                                    // typed-but-unsent line must survive into the remount's seed.
+  const onInputChange = useCallback((v: string) => { inputLiveRef.current = v; setInput(v); setSelected(0); }, []);
   const [selected, setSelected] = useState(0);
   const [activity, setActivity] = useState("working…"); // live status shown by the run spinner
   const [busy, setBusy] = useState(false);
@@ -283,11 +284,22 @@ export function App(props: {
   const [focusIndex, setFocusIndex] = useState(0);
   const [operationRunId, setOperationRunId] = useState<string | null>(null);
 
-  // Plan 15: completion action bar + artifact viewer. When a user turn completes with artifacts, show
-  // the action bar; ⏎ on "View artifacts" opens the viewer. The viewer is cardKeyRef-owned.
-  const [completionArtifacts, setCompletionArtifacts] = useState<import("../schemas/artifact").Artifact[] | null>(null);
-  const [artifactViewerOpen, setArtifactViewerOpen] = useState(false);
-  const [actionBarFocus, setActionBarFocus] = useState(0); // 0 = View artifacts, 1 = Continue chatting
+  // Plan 21: the artifact browser. Runs END inside it — a COMPLETED foreground turn with ≥1 artifact
+  // docks the shelf over the chat (replacing Plan 15's completion action bar + viewer). ALL of its UI
+  // state lives HERE so a pending approval card can unmount the dock and remount it losslessly. The
+  // keyboard rides browserKeyRef — its own ref, never cardKeyRef — behind a fixed dispatch order in
+  // useInput (pending card → operation view → browser → chat), so `y` can only ever answer the
+  // surface that is actually on screen.
+  const [browser, setBrowser] = useState<{ rootRunId?: string; ui: BrowserUiState; bump: number } | null>(null);
+  const browserKeyRef = useRef<CardKeyHandler | null>(null);
+  const lastRunRef = useRef<string | undefined>(undefined); // last completed foreground run (bare /artifacts re-entry)
+  // Dock the browser, carrying any un-submitted draft into the TextInput's remount seed (the input
+  // unmounts while the browser owns the keyboard — without this, a line typed during the run vanishes).
+  const dockBrowser = (b: { rootRunId?: string; ui: BrowserUiState; bump: number }) => {
+    setInputSeed(inputLiveRef.current);
+    setInputKey((k) => k + 1);
+    setBrowser(b);
+  };
 
   // Plan 13 (corrected): compute block data from the block feed at the top level (hooks must not be
   // called inside conditionals or IIFEs). The consistent block view shows every AGENT (sub-agents,
@@ -322,19 +334,10 @@ export function App(props: {
     // when the captain's first keystroke arrives, so we forward it to the active card. (A card-owned
     // useInput registers a beat after its render commits and would drop that first key — the hang
     // we're fixing.) The card publishes its handler to cardKeyRef during render.
-    if (pending || operationRunId || artifactViewerOpen) { cardKeyRef.current?.(input, key); return; } // a card OR the operation view OR artifact viewer owns the keyboard
-    // Plan 15: completion action bar navigation. ←/→ move, ⏎ select, esc/type → dismiss.
-    if (completionArtifacts && completionArtifacts.length > 0) {
-      if (key.escape) { setCompletionArtifacts(null); setActionBarFocus(0); return; }
-      if (key.leftArrow || key.rightArrow) { setActionBarFocus((f) => f === 0 ? 1 : 0); return; }
-      if (key.return) {
-        if (actionBarFocus === 0) { setArtifactViewerOpen(true); }
-        else { setCompletionArtifacts(null); setActionBarFocus(0); }
-        return;
-      }
-      // Any other key dismisses the bar and returns to chat
-      setCompletionArtifacts(null); setActionBarFocus(0); return;
-    }
+    if (pending || operationRunId) { cardKeyRef.current?.(input, key); return; } // a card OR the operation view owns the keyboard
+    // Plan 21: the docked browser is NEXT in precedence — a pending card above suspends it entirely
+    // (its render is gated on !pending too), so a keystroke can never be ambiguous between surfaces.
+    if (browser) { browserKeyRef.current?.(input, key); return; }
     // Plan 13: focus mode navigation. shift+tab enters, esc leaves, ↑↓ move, ⏎ opens operation view.
     // Plan 20: the ring and the Enter target read the SAME collection — allBlocks is what RENDERS
     // (root excluded, settling-first). The old Enter path indexed [...blockFeed.keys()] (insertion
@@ -489,6 +492,7 @@ export function App(props: {
     // stayed in_progress forever and boot's reconcilePlans wrongly marked it interrupted.
     settlePlanItem(taskId, wasCancelled ? "failed" : res.trace.outcome === "completed" ? "done" : res.trace.outcome === "blocked" ? "blocked" : "failed",
       wasCancelled ? "task cancelled" : `task ${taskId} ${res.trace.outcome}`);
+    if (res.trace.artifacts.length > 0 || res.trace.outputArtifacts.length > 0) bumpBrowserForArtifacts();
   };
   const failTask = (taskId: string, agentId: string, e: unknown) => {
     setTaskFields(props.ws, props.db, taskId, { status: "failed", stepStatus: "failed", summary: e instanceof Error ? e.message : String(e) });
@@ -500,6 +504,20 @@ export function App(props: {
   const settlePlanItem = (taskId: string, status: "done" | "failed" | "blocked", note: string) => {
     const settled = settlePlanItemForTask(props.ws, props.db, taskId, status, note);
     if (settled) { const st = foldPlan(props.ws, settled.planId); if (st) setPlan(st); }
+  };
+  // Plan 21 §2: a background settle that PRODUCED artifacts, while the browser is open. Its run is
+  // structurally invisible to scopes 1–2 (no delegatedOut edge, no ledger turn), so injecting a row
+  // there would lie — the bump re-gathers the shelf's data (a real change only in all-runs) and
+  // scopes 1–2 get a one-keystroke hint. Set even while READING: the hint renders only on the shelf's
+  // mode line, so it simply surfaces on esc (dropping it there lost the signal permanently). Settles
+  // with NO artifacts (failed, cancelled, empty) never hint — the mode line must not promise a row
+  // that does not exist in any scope.
+  const bumpBrowserForArtifacts = () => {
+    setBrowser((b) => {
+      if (!b) return b;
+      const hint = b.ui.scope === "all" ? undefined : "+ new from background — press 3";
+      return { ...b, bump: b.bump + 1, ui: { ...b.ui, hint } };
+    });
   };
 
   // Fire-and-forget a goal onto another agent (dispatch_task). Returns the taskId immediately; the
@@ -738,9 +756,10 @@ export function App(props: {
         if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text, rendered: true });
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
-          // Plan 15: gather artifacts from the conversation's run tree and show the completion action bar
+          // Plan 21: the run ends INSIDE the browser — dock it when the turn produced artifacts.
+          lastRunRef.current = res.runId;
           const artifacts = gatherConversationArtifacts(props.ws, res.runId);
-          if (artifacts.length > 0) setCompletionArtifacts(artifacts);
+          if (artifacts.length > 0) dockBrowser({ rootRunId: res.runId, ui: initialBrowserUi(), bump: 0 });
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
           maybeSayAuthExpired(res.text);
@@ -755,9 +774,13 @@ export function App(props: {
         if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text, rendered: true });
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  run: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
-        // Plan 15: gather artifacts from the conversation's run tree and show the completion action bar
-        const artifacts = gatherConversationArtifacts(props.ws, res.runId);
-        if (artifacts.length > 0) setCompletionArtifacts(artifacts);
+        // Plan 21: dock the browser — like the chat path, gated on a COMPLETED run (the old bar's
+        // unconditional @agent gather was accidental; a failed turn never auto-enters — spec §1).
+        if (res.trace.outcome === "completed") {
+          lastRunRef.current = res.runId;
+          const artifacts = gatherConversationArtifacts(props.ws, res.runId);
+          if (artifacts.length > 0) dockBrowser({ rootRunId: res.runId, ui: initialBrowserUi(), bump: 0 });
+        }
       }
     } catch (e) {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
@@ -765,6 +788,18 @@ export function App(props: {
       say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` });
     } finally { setBusy(false); clearStatuses(); clearBlockFeed(); }
   };
+
+  // Plan 21: GC for the browser's `g` verb — protect a version by what CONSUMES it, never by its own
+  // producing run's record (folding trace.artifacts in would pin every version ever produced and
+  // shadow keep-latest-N). dryRun previews on the SAME code path the confirm then runs.
+  const gcRun = (dryRun: boolean) =>
+    gcArtifacts(props.ws, {
+      referenced: collectReferencedArtifacts({
+        traces: listTraces(props.ws),
+        taskResultRefs: listTaskIndex(props.db).map((t) => t.result_ref),
+      }),
+      dryRun,
+    });
 
   const runSlash = async (cmd: string, arg: string) => {
     // Plan 20: mid-session roster reindex, for hand-edits to agents/*/agent.md (e.g. `team: news`).
@@ -959,66 +994,14 @@ export function App(props: {
       return;
     }
     if (cmd === "artifacts") {
-      const parsed = parseArtifactsCommand(arg);
-      if (parsed.kind === "error") { say({ kind: "system", text: `  ${parsed.message}` }); return; }
-      if (parsed.kind === "list") {
-        const all = listArtifacts(props.ws, parsed.q ? { q: parsed.q } : {});
-        if (!all.length) { say({ kind: "system", text: "  (no artifacts)" }); return; }
-        all.forEach((a) => {
-          const open = listAnnotations(props.ws, artifactHandle(a), { status: "open" }).length;
-          say({ kind: "system", text: `  [${artifactHandle(a)}] ${a.title} (${a.type}, ${a.role}) · ${a.producer}${open ? ` · ${open} open feedback` : ""}${a.summary ? ` — ${a.summary}` : ""}` });
-        });
+      // Plan 21 Ph4: /artifacts IS the browser. The five subcommands retired — every verb lives on a
+      // key next to the thing it acts on (list→shelf, show→⏎ reader, annotate→a, approve→y, gc→g).
+      if (arg.trim()) {
+        say({ kind: "system", text: "  the browser owns this now — /artifacts opens it (⏎ read · a annotate · y approve · g gc in all-runs)" });
         return;
       }
-      if (parsed.kind === "show") {
-        const a = readArtifact(props.ws, parsed.handle);
-        if (!a) { say({ kind: "system", text: `  no artifact "${parsed.handle}"` }); return; }
-        say({ kind: "system", text: `  [${artifactHandle(a)}] ${a.title}` });
-        say({ kind: "system", text: `  type=${a.type} role=${a.role} producer=${a.producer} run=${a.runId} versions=[${artifactVersions(props.ws, a.id).join(", ")}]` });
-        if (a.parents.length) say({ kind: "system", text: `  parents: ${a.parents.join(", ")}` });
-        if (a.summary) say({ kind: "system", text: `  summary: ${a.summary}` });
-        // Render the artifact BODY (not just the envelope) so `/artifacts show` actually shows the
-        // content — the in-terminal complement to the full-screen viewer. readArtifactBody returns
-        // null for external (MCP-fronted) refs, so those just show the envelope + locator.
-        if (a.location.kind === "external") {
-          say({ kind: "system", text: `  external: ${a.location.uri}` });
-        } else {
-          const body = readArtifactBody(props.ws, artifactHandle(a));
-          if (body && body.length) {
-            say({ kind: "system", text: "  ───" });
-            renderMarkdown(body.toString("utf8"), mdWidth).split("\n").forEach((ln) => say({ kind: "system", text: `  ${ln}` }));
-          }
-        }
-        const anns = listAnnotations(props.ws, artifactHandle(a));
-        if (!anns.length) say({ kind: "system", text: "  (no annotations)" });
-        else anns.forEach((an) => say({ kind: "system", text: `  ✎ [${an.id}] (${an.status}) ${an.kind} · ${an.author}: ${an.body}${an.verdict ? ` [${an.verdict.pass ? "pass" : "FAIL"}]` : ""}` }));
-        return;
-      }
-      if (parsed.kind === "annotate") {
-        try {
-          const an = annotateArtifact(props.ws, { target: parsed.handle, author: "human", body: parsed.body, kind: "feedback" });
-          say({ kind: "system", text: `  ✎ annotated ${an.target} (${an.id}) — hand it to an agent to revise; the open feedback rides along.` });
-        } catch (e) { say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` }); }
-        return;
-      }
-      if (parsed.kind === "approve") {
-        try {
-          const an = annotateArtifact(props.ws, { target: parsed.handle, author: "human", body: "approved by captain", kind: "approval" });
-          say({ kind: "system", text: `  ✓ approved ${an.target}` });
-        } catch (e) { say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` }); }
-        return;
-      }
-      // gc — protect a version by what CONSUMES it, never by its own producing run's record. Every
-      // version an agent saves lands in that run's `trace.artifacts`, so folding that in would pin
-      // every version ever produced and shadow keep-latest-N (nothing would ever be archived). Draw
-      // the protected set from the hand-off graph (inputArtifacts/outputArtifacts) + task resultRefs;
-      // annotations + parent-closure are honored inside gcArtifacts.
-      const referenced = collectReferencedArtifacts({
-        traces: listTraces(props.ws),
-        taskResultRefs: listTaskIndex(props.db).map((t) => t.result_ref),
-      });
-      const r = gcArtifacts(props.ws, { referenced });
-      say({ kind: "system", text: `  gc: archived ${r.archived.length} version(s), kept ${r.kept}${r.archived.length ? ` — ${r.archived.join(", ")}` : " (nothing to collect)"}` });
+      const rootRunId = lastRunRef.current ?? latestRunFallback(props.ws);
+      dockBrowser({ rootRunId, ui: { ...initialBrowserUi(), scope: rootRunId ? "run" : "all" }, bump: 0 });
       return;
     }
     if (cmd === "tasks") {
@@ -1144,12 +1127,12 @@ export function App(props: {
       })()}
       {/* Plan 10 Phase 4: split panes (one per live agent) sit above the spinner + bar. The mode
           (bar/panes/both) and terminal size decide what shows; too small ⇒ degrade to bar-only. */}
-      {!operationRunId && layout.showPanes && (
+      {!operationRunId && !browser && layout.showPanes && (
         <SquadPanes statuses={statuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
       )}
       {/* Plan 13 (corrected): consistent agent blocks — the default squad view. Every agent (root and
           sub-agents) is rendered as a single block: header + fixed 2-line body. The block IS the record. */}
-      {!operationRunId && allBlocks.length > 0 && (() => {
+      {!operationRunId && !browser && allBlocks.length > 0 && (() => {
         const blockWidth = Math.min(termSize.columns - 4, 96);
         return (
           <Box flexDirection="column">
@@ -1176,36 +1159,28 @@ export function App(props: {
           onClose={() => { cardKeyRef.current = null; setOperationRunId(null); }}
         />
       )}
-      {/* Plan 15: completion action bar — shown when a user turn produces artifacts. */}
-      {!pending && !operationRunId && !artifactViewerOpen && completionArtifacts && completionArtifacts.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Box>
-            <Text color={actionBarFocus === 0 ? "cyan" : "gray"} bold={actionBarFocus === 0}>
-              {actionBarFocus === 0 ? "▸ " : "  "}View artifacts ({completionArtifacts.length})
-            </Text>
-            <Text dimColor>     </Text>
-            <Text color={actionBarFocus === 1 ? "cyan" : "gray"} bold={actionBarFocus === 1}>
-              {actionBarFocus === 1 ? "▸ " : "  "}Continue chatting
-            </Text>
-          </Box>
-          <Text dimColor>←/→ move · ⏎ select · esc/type to chat</Text>
-        </Box>
-      )}
-      {/* Plan 15: artifact viewer — full-screen card for browsing artifacts. */}
-      {artifactViewerOpen && completionArtifacts && (
-        <ArtifactViewer
+      {/* Plan 21: the artifact browser — docked shelf (or full-screen reader) after a completed
+          artifact-producing turn, or via /artifacts. A pending card SUSPENDS it (gate + key order). */}
+      {!pending && !operationRunId && browser && (
+        <ArtifactBrowser
           ws={props.ws}
-          artifacts={completionArtifacts}
           width={termSize.columns}
-          keyHandlerRef={cardKeyRef}
-          onClose={() => { cardKeyRef.current = null; setArtifactViewerOpen(false); }}
+          rows={termSize.rows}
+          rootRunId={browser.rootRunId}
+          st={browser.ui}
+          bump={browser.bump}
+          onChange={(next) => setBrowser((b) => (b ? { ...b, ui: typeof next === "function" ? next(b.ui) : next } : b))}
+          keyRef={browserKeyRef}
+          gcRun={gcRun}
+          onClose={() => { browserKeyRef.current = null; setBrowser(null); }}
+          onSubmitChat={(text) => { browserKeyRef.current = null; setBrowser(null); void submit(text); }}
         />
       )}
       {!pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
-      {planPanelOn && plan && !operationRunId && <PlanPanel plan={plan} width={termSize.columns} />}
+      {planPanelOn && plan && !operationRunId && !browser && <PlanPanel plan={plan} width={termSize.columns} />}
       {layout.showBar && statuses.length > 0 && <StatusBar statuses={statuses} width={termSize.columns} />}
-      {!pending && !operationRunId && (
+      {!pending && !operationRunId && !browser && (
         <>
           <Box>
             <Text color={busy ? "gray" : focusMode ? "gray" : "cyan"}>{busy ? "❯ " : focusMode ? "  " : "> "}</Text>

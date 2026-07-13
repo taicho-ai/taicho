@@ -5,8 +5,9 @@ import { join } from "node:path";
 import {
   saveArtifact, readArtifact, readArtifactBody, listArtifacts,
   artifactVersions, rebuildArtifactIndex, readManifest, gcArtifacts,
-  collectReferencedArtifacts,
+  collectReferencedArtifacts, artifactBodyPath,
 } from "./artifacts";
+import { artifactHandle } from "../schemas/artifact";
 import { annotateArtifact } from "./annotations";
 import { writeTrace, listTraces } from "./trace";
 import type { RunTrace } from "../schemas/trace";
@@ -317,4 +318,88 @@ test("PRODUCTION: a version pinned by a task resultRef / annotation / parent-clo
   expect(readArtifact(w, "doc@v2")!.title).toBe("Doc v2");
   expect(readArtifact(w, "doc@v3")!.title).toBe("Doc v3");
   expect(readArtifact(w, "doc@v4")).toBeNull();              // superseded + unreferenced ⇒ archived
+});
+
+test("Plan 21: gcArtifacts dryRun computes the would-archive list without touching anything", async () => {
+  const w = ws();
+  // four versions of one id; keepLatest 1 and nothing referenced ⇒ v1..v3 are candidates
+  for (let i = 0; i < 4; i++) saveArtifact(w, { id: "doc", title: "Doc", body: `v${i + 1}`, producer: "a", runId: "r/1" });
+  const dry = gcArtifacts(w, { keepLatest: 1, dryRun: true });
+  expect(dry.archived.sort()).toEqual(["doc@v1", "doc@v2", "doc@v3"]);
+  // nothing moved: every version still readable, no _archive dir
+  for (let v = 1; v <= 4; v++) expect(readArtifact(w, `doc@v${v}`)).not.toBeNull();
+  expect(existsSync(join(w, "artifacts", "doc", "_archive"))).toBe(false);
+  // the real run archives EXACTLY the previewed set — one code path, no disagreement possible
+  const real = gcArtifacts(w, { keepLatest: 1 });
+  expect(real.archived.sort()).toEqual(dry.archived.sort());
+  expect(readArtifact(w, "doc@v1")).toBeNull();
+});
+
+test("Plan 21: artifactBodyPath recomputes from ws (relocatable) and is null for external", async () => {
+  const w = ws();
+  const a = saveArtifact(w, { id: "local-doc", title: "L", body: "bytes", producer: "a", runId: "r/1" });
+  const p = artifactBodyPath(w, artifactHandle(a));
+  expect(p).not.toBeNull();
+  expect(p!.startsWith(join(w, "artifacts", "local-doc"))).toBe(true);   // ws-anchored, not the baked path
+  expect(readFileSync(p!, "utf8")).toBe("bytes");
+  const ext = saveArtifact(w, { id: "ext-doc", title: "E", external: "https://example.com/x", producer: "a", runId: "r/1" });
+  expect(artifactBodyPath(w, artifactHandle(ext))).toBeNull();           // external ⇒ no local file
+});
+
+// ── Plan 21 Ph4: the /artifacts gc REPL tests, ported to the store seam the browser's `g` verb
+// drives (collectReferencedArtifacts ∘ gcArtifacts). The protection semantics they encode:
+// protect by what CONSUMES a version (hand-off graph + task refs), never by its own producing
+// trace.artifacts — folding that in would pin every version ever produced and shadow keep-latest-N.
+function gcTrace(over: Record<string, unknown>) {
+  return {
+    id: "root/r", agent: "root", task: "t", triggeredBy: "user",
+    ledger: { retrieved: [], applied: [], skipped: [] }, toolCalls: [], artifacts: [],
+    inputArtifacts: [], outputArtifacts: [], delegatedOut: [], verification: [],
+    outcome: "completed", tokens: 0, contextTokens: 0, costUsd: 0, verifierTokens: 0, verifierCostUsd: 0,
+    notes: [], durationMs: 0, started: new Date().toISOString(), ...over,
+  } as unknown as RunTrace;
+}
+
+test("Plan 21 (ported): gc archives old unreferenced versions via the composed referenced set", () => {
+  const w = ws();
+  for (let i = 1; i <= 5; i++) saveArtifact(w, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: "root/1" });
+  const referenced = collectReferencedArtifacts({ traces: [], taskResultRefs: [] });
+  const r = gcArtifacts(w, { referenced });
+  expect(r.archived.sort()).toEqual(["doc@v1", "doc@v2"]);
+  expect(readArtifact(w, "doc@v1")).toBeNull();
+  expect(readArtifact(w, "doc")!.version).toBe(5);
+});
+
+// PRODUCTION CONDITION (PR #17 review): each version pinned by its OWN producing trace.artifacts —
+// the real state after iterative revision. collectReferencedArtifacts must NOT fold t.artifacts in,
+// or gc is a no-op forever.
+test("Plan 21 (ported): superseded versions still archive when each is pinned by its producing trace", () => {
+  const w = ws();
+  const traces = [];
+  for (let i = 1; i <= 5; i++) {
+    saveArtifact(w, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: `root/run${i}` });
+    traces.push(gcTrace({ id: `root/run${i}`, artifacts: [`doc@v${i}`] }));
+  }
+  const referenced = collectReferencedArtifacts({ traces, taskResultRefs: [] });
+  const r = gcArtifacts(w, { referenced });
+  expect(r.archived.sort()).toEqual(["doc@v1", "doc@v2"]);   // producing-trace pins do NOT protect
+  expect(readArtifact(w, "doc@v1")).toBeNull();
+  expect(readArtifact(w, "doc")!.version).toBe(5);
+});
+
+// A version CONSUMED via the hand-off graph (inputArtifacts/outputArtifacts) must survive gc,
+// however old — the safety invariant of the re-scoped protected set.
+test("Plan 21 (ported): a version handed off across a delegation edge never archives", () => {
+  const w = ws();
+  const traces = [];
+  for (let i = 1; i <= 5; i++) {
+    saveArtifact(w, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: `root/run${i}` });
+    traces.push(gcTrace({ id: `root/run${i}`, artifacts: [`doc@v${i}`] }));
+  }
+  traces.push(gcTrace({ id: "root/run9", inputArtifacts: ["doc@v1"], outputArtifacts: ["doc@v2"] }));
+  const referenced = collectReferencedArtifacts({ traces, taskResultRefs: [] });
+  const r = gcArtifacts(w, { referenced });
+  expect(r.archived).toEqual([]);                            // v1+v2 hand-off-pinned; v3-5 keep-latest-3
+  expect(readArtifact(w, "doc@v1")!.title).toBe("v1");
+  expect(readArtifact(w, "doc@v2")!.title).toBe("v2");
 });
