@@ -16,13 +16,15 @@ import { DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from "./providers/request-timeout";
  *  the original brief are kept separately). The oldest round-trips beyond this window are folded. */
 const DEFAULT_COMPACT_KEEP_RECENT = 3;
 
-// Plan 12: there is NO model-call watchdog here anymore. The old `guardModelCall` idle timer wrapped
-// `consumeStream`, but the AI SDK runs tools INSIDE `consumeStream` — so it timed our own tool
-// execution (the shot-planner bug) and only abandoned the wedged promise (leak). A hung request is
-// now bounded at the TRANSPORT layer instead: a per-request deadline on the provider fetch
-// (providers/request-timeout.ts) that can only ever see one model turn's HTTP exchange, never tool
-// execution. On a genuine hang it surfaces a retryable error routed through the AI SDK's own
-// maxRetries; the loop just consumes the stream directly and lets errors/cancellation flow normally.
+// Plan 12 (+ reopened): a hung model call is bounded TWICE. (1) A transport deadline on the provider
+// fetch (providers/request-timeout.ts) — it sees one model turn's HTTP exchange (never tool
+// execution), aborts the real connection on a hang, and surfaces a retryable ETIMEDOUT through the
+// AI SDK's own maxRetries. (2) A chunk-idle timer inside the loop below, raced against
+// consumeStream, for streams that hang AND ignore the fetch abort: it resets per chunk and is
+// disarmed while tools execute (a COUNTER — parallel tools re-arm only when the last one finishes),
+// so unlike the deleted `guardModelCall` watchdog it structurally cannot time our own tool
+// execution. Its rejection fires mid-consumption, where an SDK retry would mean double-generation —
+// failing the call without a retry there is deliberate.
 
 export interface LoopResult {
   text: string;
@@ -215,35 +217,56 @@ export async function runLoop(opts: {
       // Plan 12 (reopened): an idle timer that resets per stream chunk AND is disarmed during tool
       // execution. Tools execute INSIDE consumeStream(), so a simple Promise.race would kill any tool
       // longer than the deadline (the original watchdog bug). Instead:
-      // - The timer resets on each chunk (text-delta, tool-start, tool-end, etc.)
-      // - The timer is DISARMED when a tool-start chunk arrives (tool execution begins)
-      // - The timer is RE-ARMED when a tool-end chunk arrives (tool execution completes)
+      // - The timer resets on each chunk (text-delta, tool-call, tool-result, etc.)
+      // - Executing tools are COUNTED at the EXECUTE seam (Plan 20): each tool's execute() is wrapped
+      //   so entry increments + disarms, and a `finally` decrements — the timer re-arms only at ZERO.
+      //   Two subtleties both bit before: (a) with PARALLEL tool calls, a boolean re-armed at the
+      //   FIRST tool-result while a second tool still executed — a slow second tool with no
+      //   intervening chunks was falsely killed; (b) chunk-based counting never saw a THROWING tool
+      //   (the SDK's `tool-error` part is not delivered to onChunk), so the counter stuck ≥1 and the
+      //   timer stayed disarmed for the rest of the call. The execute-seam `finally` fires on every
+      //   settle path, success or throw.
       // - If no chunks arrive for `timeoutMs` while the timer is armed, the stream is hung
       // This catches a genuinely hung stream (no chunks, no tool execution) without killing long tools.
       let streamErr: unknown;
-      let toolExecuting = false;
+      let toolsExecuting = 0;
       const timeoutMs = opts.modelRequestTimeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS;
       // Timer state — per-run, not global (concurrency-safe)
       let idleTimer: ReturnType<typeof setTimeout> | null = null;
       let rejectIdle: ((err: Error) => void) | null = null;
       const resetIdleTimer = () => {
         if (idleTimer) clearTimeout(idleTimer);
-        if (toolExecuting) return; // disarmed during tool execution
+        if (toolsExecuting > 0) return; // disarmed while ANY tool executes
         idleTimer = setTimeout(() => {
           const err = new Error(`model stream idle for ${timeoutMs}ms (no chunks, no tool execution)`);
           (err as Error & { code?: string }).code = "ETIMEDOUT";
           rejectIdle?.(err);
         }, timeoutMs);
       };
-      const setToolExecuting = (executing: boolean) => {
-        toolExecuting = executing;
-        if (executing && idleTimer) {
-          clearTimeout(idleTimer);
-          idleTimer = null;
-        } else if (!executing) {
-          resetIdleTimer();
-        }
+      const onToolStart = () => {
+        toolsExecuting += 1;
+        if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
       };
+      const onToolEnd = () => {
+        toolsExecuting = Math.max(0, toolsExecuting - 1);
+        if (toolsExecuting === 0) resetIdleTimer();
+      };
+      // Wrap each tool's execute() for THIS call: the entry/finally pair is the only seam that sees
+      // every settle path (a throw becomes a `tool-error` part onChunk never receives). Tools without
+      // an execute pass through untouched.
+      const trackedTools = Object.fromEntries(
+        Object.entries(opts.tools).map(([name, t]) => {
+          const orig = (t as { execute?: (...a: unknown[]) => unknown }).execute;
+          if (typeof orig !== "function") return [name, t];
+          return [name, {
+            ...t,
+            execute: async (...args: unknown[]) => {
+              onToolStart();
+              try { return await orig.apply(t, args); } finally { onToolEnd(); }
+            },
+          }];
+        }),
+      ) as typeof opts.tools;
       // Create a promise that rejects when the idle timer fires
       const idleTimeoutPromise = new Promise<never>((_, reject) => {
         rejectIdle = reject;
@@ -273,7 +296,7 @@ export async function runLoop(opts: {
       const s = streamText({
         model: opts.model,
         messages: callMessages, // Plan 18: conversation + the plan slot (slot never enters `messages`)
-        tools: opts.tools,
+        tools: trackedTools,    // Plan 20: execute-seam idle tracking (see the wrapper above)
         abortSignal: opts.signal,
         // Codex backend (subscription) requires the system prompt in the top-level `instructions`
         // field with store:false ("Instructions are required") — NOT a system message. Every other
@@ -286,26 +309,26 @@ export async function runLoop(opts: {
         // Surface each chunk so the UI can render the response live as it streams (instead of all
         // at once when the run returns). Also reset the idle timer on each chunk.
         onChunk: ({ chunk }) => {
+          // Any chunk is activity. Tool-execution disarm/re-arm lives at the EXECUTE seam (the
+          // trackedTools wrapper above) — chunks cannot carry it: the SDK never delivers a
+          // `tool-error` part here, so a throwing tool would leave a chunk-based counter stuck.
           resetIdleTimer();
           if (chunk.type === "text-delta") {
             opts.onStep?.({ phase: "delta", delta: chunk.text, text: chunk.text });
-          } else if (chunk.type === "tool-call") {
-            // Tool execution is about to start — disarm the idle timer
-            setToolExecuting(true);
-          } else if (chunk.type === "tool-result") {
-            // Tool execution completed — re-arm the idle timer
-            setToolExecuting(false);
           }
         },
       });
       // Race consumeStream() against the idle timeout — with the chat span ACTIVE so the tool spans
       // opened during tool execution (inside consumeStream) nest under this model call.
       const consume = () => Promise.race([s.consumeStream(), idleTimeoutPromise]);
-      await (chatSpan
-        ? otelContext.with(otelTrace.setSpan(otelContext.active(), chatSpan), consume)
-        : consume());
-      // Clean up the timer
-      if (idleTimer) clearTimeout(idleTimer);
+      try {
+        await (chatSpan
+          ? otelContext.with(otelTrace.setSpan(otelContext.active(), chatSpan), consume)
+          : consume());
+      } finally {
+        // Plan 20: clear on EVERY path — a throw used to leak the armed setTimeout per failed iteration.
+        if (idleTimer) clearTimeout(idleTimer);
+      }
       if (streamErr) throw streamErr;
       out = {
         text: await s.text,

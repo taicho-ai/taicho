@@ -467,7 +467,17 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           const first = await ctx.checkCriteria({ goal, criteria, output: candidateOutput(child) });
           ctx.verifierSpend.tokens += first.tokens;
           ctx.verifierSpend.costUsd += first.costUsd ?? 0; // null (subscription) folds as 0 in the sum; recorded value stays null
-          ctx.verifications.push({ criteria, verdict: first.verdict, runId: child.runId, retried: false, tokens: first.tokens, costUsd: first.costUsd, costNote: first.costNote });
+          ctx.verifications.push({ criteria, verdict: first.verdict, runId: child.runId, retried: false, tokens: first.tokens, costUsd: first.costUsd, costNote: first.costNote, checkerError: first.checkerError });
+          // Plan 20: the judge never RAN — this verdict says nothing about the OUTPUT. Skip the retry
+          // (re-running the child is pointless when the checker is down and would burn a work item),
+          // skip annotation + coaching (they'd blame the artifact for an outage), settle the item from
+          // the child's REAL outcome like the no-criteria path, and surface the result UNVERIFIED.
+          if (first.checkerError) {
+            ctx.emit?.({ note: `⚠ verification checker unavailable — surfacing ${target} result UNVERIFIED (${first.verdict.reasons.join("; ")})` });
+            bind(child.trace.outcome === "completed" ? "done" : child.trace.outcome === "blocked" ? "blocked" : "failed",
+                 "verification checker unavailable — settled from run outcome", child.runId);
+            return { to: target, team: guard.team, runId: child.runId, outputArtifacts: child.trace.artifacts, summary: child.text, verification: first.verdict };
+          }
           let verdict = first.verdict;
 
           if (!verdict.pass) {
@@ -493,7 +503,15 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
             const second = await ctx.checkCriteria({ goal, criteria, output: candidateOutput(retry) });
             ctx.verifierSpend.tokens += second.tokens;
             ctx.verifierSpend.costUsd += second.costUsd ?? 0; // null (subscription) folds as 0 in the sum; recorded value stays null
-            ctx.verifications.push({ criteria, verdict: second.verdict, runId: retry.runId, retried: true, tokens: second.tokens, costUsd: second.costUsd, costNote: second.costNote });
+            ctx.verifications.push({ criteria, verdict: second.verdict, runId: retry.runId, retried: true, tokens: second.tokens, costUsd: second.costUsd, costNote: second.costNote, checkerError: second.checkerError });
+            // Plan 20: the checker went down BETWEEN the first (real) fail and the retry's check. The
+            // retry may well have fixed the output — an outage verdict must not annotate/coach it.
+            if (second.checkerError) {
+              ctx.emit?.({ note: `⚠ verification checker unavailable on the retry — surfacing ${target} result UNVERIFIED` });
+              bind(retry.trace.outcome === "completed" ? "done" : retry.trace.outcome === "blocked" ? "blocked" : "failed",
+                   "verification checker unavailable — settled from run outcome", retry.runId);
+              return { to: target, team: guard.team, runId: retry.runId, outputArtifacts: retry.trace.artifacts, summary: retry.text, verification: second.verdict };
+            }
             child = retry;
             verdict = second.verdict;
             if (verdict.pass) ctx.emit?.({ note: `✓ ${target} passed verification after one retry` });

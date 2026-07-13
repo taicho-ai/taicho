@@ -40,17 +40,21 @@ issues tsc won't).
   in-flight ~4s so the pane doesn't flash faster than a recorded frame — see TESTING.md's Squad UI section.
   `AgentBlock.tsx` + `OperationView.tsx` (Plan 13 corrected) are the **consistent agent blocks**: the
   default squad view for delegated work. Every sub-agent is rendered as a single block (header + fixed
-  2-line body) that NEVER changes shape across its lifecycle — live/done/failed variants change only
-  the state label, rail colour, and body content. The block IS the record: the block you watched live
-  is the exact block that settles into scrollback. Root's own direct reply still uses the scrollback
-  (the conversational reply channel); blocks are for the squad. `shift+tab` enters focus mode (↑↓
+  2-line body) that NEVER changes shape across its lifecycle — the component defines live/done/failed
+  variants that change only the state label, rail colour, and body content. Blocks live in the Ink
+  live region: a finished block lingers ~800ms (`useBlockSettle`) and then clears — the durable record
+  is the run record + the scrollback breadcrumbs, NOT a persisted block. (Known gaps vs the Plan 13
+  intent: App never feeds the `failed` variant / settled `summary` / `artifact` header fields — a
+  failed delegation renders as a plain done block — and nesting depth is hardcoded root=0/child=1.)
+  Root's own direct reply still uses the scrollback (the conversational reply channel); blocks are
+  for the squad. `shift+tab` enters focus mode (↑↓
   navigate, ⏎ opens the operation view drill-in, esc returns). The `/view stream` mode has been
   **deleted** — consistent blocks are the default, not an opt-in.
   `ArtifactViewer.tsx` (Plan 15) is the **artifact browser**: a full-screen card that renders the
   selected artifact's body as markdown, scrollable. The **completion action bar** appears when a user
   turn produces artifacts, offering "View artifacts (N)" and "Continue chatting". `gatherConversationArtifacts`
-  in `trace-tree.ts` walks the delegation subtree, collects artifact handles from each run's trace,
-  de-dups by handle, and returns them ordered by created desc (latest first).
+  in `core/conversation-artifacts.ts` walks the delegation subtree, collects artifact handles from each
+  run's trace, de-dups by handle, and returns them ordered by created desc (latest first).
 - **`src/core/`** — the engine:
   - `loop.ts` — the single metered agent loop. Model proposes, config disposes: budgets/caps and
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.
@@ -90,7 +94,7 @@ issues tsc won't).
     loop folds the OLDEST tool round-trips into ONE `user` summary message — keeping the system prompt,
     the original brief (`keepHead`), and the most recent `compactKeepRecent` round-trips VERBATIM — and
     emits a `compaction` transcript event (never invisible). Peak estimate is recorded as
-    `trace.contextTokens` and surfaced in the waterfall LLM-span detail. Cross-turn (boot-replay)
+    `trace.contextTokens` and stamped on the OTel run span as `taicho.context.tokens`. Cross-turn (boot-replay)
     compaction is `conversation-replay.ts` (Plan 05 Ph3) — it hooks the `turn-audit.ts` seam.
   - `scheduler.ts` — Plan 04 Phase 6 scheduled/triggered runs. A PURE engine (clock, file-stat, and the
     fire action are all INJECTED — deterministic + unit-tested with no real timers): cron eval (5-field,
@@ -204,16 +208,22 @@ no provider, no network). Since Plan 17 this is the ONLY trace-visualization pat
 waterfall was retired). **User-facing setup + copy-paste backend configs: `docs/observability.md`.**
 Design/rationale: `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`.
 
-- **`src/core/otel.ts`** — `initTelemetry` builds a `NodeTracerProvider` +
+- **`src/core/otel.ts`** — `initTelemetry` builds tracer providers +
   `AsyncLocalStorageContextManager` (context propagation across the delegation's await boundaries — Bun
-  implements `AsyncLocalStorage`) + a `MeterProvider`, both OTLP. Returns a `Telemetry` handle threaded
-  through `RunDeps` like the spend ledger (undefined ⇒ disabled). Test seam: inject `spanExporter` /
-  `metricReader` (in-memory, no network). The OTLP exporters read the STANDARD `OTEL_*` env vars
-  themselves (endpoint/headers/protocol) — nothing bespoke.
-- **`loop.ts`** — every `streamText` gets `experimental_telemetry: { isEnabled, tracer, … }`, so the AI
-  SDK emits the gen_ai spans (`ai.streamText` → `ai.streamText.doStream`). `recordInputs`/`recordOutputs`
-  are gated by `OTEL_TAICHO_CAPTURE_CONTENT` — **on by default; opt OUT with `0|false|no|off`**. Per call, `onModelCall` feeds the token/duration/cost metrics.
-- **`run.ts`** — `executeRun` opens a `run <agent>` span BEFORE the try (so a pre-loop throw still closes
+  implements `AsyncLocalStorage`) + a `MeterProvider`, both OTLP. **One tracer provider per agent**
+  (`tracerFor(agentId)`, `service.name` = the agent id) so backends group/colour the delegation graph
+  by agent. Returns a `Telemetry` handle threaded through `RunDeps` like the spend ledger (undefined ⇒
+  disabled). Test seam: inject `spanExporter` / `metricReader` (in-memory, no network). The OTLP
+  exporters read the STANDARD `OTEL_*` env vars themselves (endpoint/headers) — nothing bespoke; the
+  wire format is hardwired OTLP/HTTP **JSON** (the `-http` exporters — protobuf is not selectable).
+- **`loop.ts`** — taicho emits its OWN per-iteration span, `chat <model> · iter N`, carrying
+  `gen_ai.*` semantic-convention attributes including the GenAI-convention message list (NOT the AI
+  SDK's `experimental_telemetry`, which is not used — its `ai.streamText` spans were replaced by these
+  native spans for meaningful labels + I/O). Prompt/completion content capture is gated by
+  `telemetry.captureContent` from `OTEL_TAICHO_CAPTURE_CONTENT` — **on by default; opt OUT with
+  `0|false|no|off`**. Per call, `onModelCall` feeds the token/duration/cost metrics.
+- **`run.ts`** — `executeRun` opens a `<agentId> · <runKind>` span (e.g. `root · user turn`,
+  `researcher · delegated`) BEFORE the try (so a pre-loop throw still closes
   it) and makes it ACTIVE around `runLoop` via `context.with`, so the gen_ai spans AND delegated child
   runs nest under it — a delegation is ONE distributed trace. `finishRunSpan` is idempotent (finalize +
   catch), stamps tokens/cost/context/outcome, and decrements the active-run gauge exactly once. A
@@ -221,8 +231,10 @@ Design/rationale: `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`.
   advisory USD, context tokens). The OTel `trace` import is aliased `otelTrace` to avoid colliding with
   the local `RunTrace` object named `trace`.
 - **Boot (`index.tsx`)** — `initTelemetry()` once; threaded into headless, the REPL (`App` props), and
-  the schedule-fire path. Every exit path awaits `telemetry.shutdown()` so the `BatchSpanProcessor`
-  flushes buffered spans before the process dies (a SIGTERM handler too).
+  the schedule-fire path. Normal exit paths await `telemetry.shutdown()` so the `BatchSpanProcessor`
+  flushes buffered spans before the process dies. (Known gap: the SIGTERM handler fires `shutdown()`
+  without awaiting or exiting — spans can drop on SIGTERM, and with MCP disabled the handler swallows
+  the signal entirely.)
 - **Metrics** — `gen_ai.client.token.usage` + `gen_ai.client.operation.duration` histograms,
   `taicho.cost.usd` counter (0/absent for subscription — never a fabricated price), `taicho.run.active`
   gauge, `taicho.run.duration` histogram.
@@ -248,23 +260,27 @@ resolution).
 
 ### Gotchas
 - **Codex backend** (subscription) rejects non-streaming requests and requires the system prompt in
-  the top-level `instructions` field with `store:false` — `loop.ts` streams (`codexBackend`) and
-  routes `system → providerOptions.openai.instructions`. The env (api.openai.com / Anthropic /
-  OpenRouter) path uses plain `generateText` with a normal `system`.
+  the top-level `instructions` field with `store:false` — `codexBackend` routes
+  `system → providerOptions.openai.instructions`. Since Plan 07 there is ONE streaming path for EVERY
+  provider (`streamText` always; `generateText` is imported only for its result type) — the env
+  (api.openai.com / Anthropic / OpenRouter) path just keeps a normal `system`.
 - **OpenRouter** model must be namespaced (`vendor/model`); `model.ts` throws an actionable error
   otherwise (this also catches a first-party default bleeding into a per-agent override).
 - **Cost honesty**: subscription runs record `costUsd: null` + `costNote:"subscription"`; OpenRouter
   records its real returned cost; other env-key runs use the static `pricing.ts` table (tokens are
   the hard budget — unknown models price to 0, never throw).
 - Tokens are always metered (budgets/caps still enforced) regardless of provider.
-- **Model-call timeout is a TRANSPORT deadline, not a loop watchdog** (Plan 12). There is NO idle
-  timer in `loop.ts`. A per-request deadline lives on the provider `fetch`
-  (`core/providers/request-timeout.ts` `withRequestTimeout`), applied to EVERY provider path (codex +
-  env-key anthropic/openai/openrouter). It can only ever see one model turn's HTTP exchange — never
-  tool execution (which runs inside `consumeStream`, after the HTTP stream closes; timing that was the
-  old watchdog's bug). A genuine hang aborts the real connection and surfaces a retryable `ETIMEDOUT`
-  routed through the AI SDK's own `maxRetries` (no hand-rolled retry); on exhaustion the run fails with
-  the REAL error. Config-disposed via `defaults.modelRequestTimeoutMs` (default 120s).
+- **Model-call hangs are bounded twice** (Plan 12, then reopened). (1) A per-request TRANSPORT
+  deadline lives on the provider `fetch` (`core/providers/request-timeout.ts` `withRequestTimeout`),
+  applied to EVERY provider path (codex + env-key anthropic/openai/openrouter); it sees one model
+  turn's HTTP exchange, aborts the real connection on a hang, and surfaces a retryable `ETIMEDOUT`
+  routed through the AI SDK's own `maxRetries`. (2) `loop.ts` additionally runs a **chunk-idle timer**
+  ("Plan 12 (reopened)"): reset on every stream chunk, DISARMED while a tool executes and re-armed on
+  the tool-result chunk, raced against `consumeStream` — so unlike the old deleted `guardModelCall`
+  watchdog it cannot time our own tool execution. Caveats: its rejection fires at the loop (not in
+  fetch), so it fails the call without the SDK retry; and the disarm flag is a boolean, not a counter,
+  so parallel tool calls can re-arm it early (loop.ts's header comment still claiming "NO watchdog"
+  is stale). Both use `defaults.modelRequestTimeoutMs` (default 120s, config-disposed).
 
 ## Conventions
 
@@ -276,9 +292,10 @@ resolution).
   <scenario>` records a true session video + workspace-file assertions, see `CLI_TESTING.md`) and
   the non-obvious gotchas (separate keystroke writes, ANSI escapes, the `bun test` vs `tui-test`
   file split).
-- Keep the resolver return shape (`{ model, modelId, subscription?, captureCost? }`) in sync across
-  its mirrors: `model.ts` (`ResolvedModel`), `run.ts` (`RunDeps`), `index.tsx` (`BuiltAuth`),
-  `ui/App.tsx` (`ResolveModelFn`).
+- Keep the resolver return shape in sync across its mirrors — but note they have already forked:
+  `model.ts`'s `ResolvedModel` is `{ model, modelId, provider, captureCost? }`, while `run.ts`
+  (`RunDeps`), `index.tsx` (`BuiltAuth`), and `ui/App.tsx` (`ResolveModelFn`) carry
+  `{ model, modelId, subscription?, captureCost? }`. Touch one, check all four.
 - **Delegation verification is criteria-gated (Plan 06):** `delegate_task` runs a checker + one
   bounded retry ONLY when the model passes `criteria`. No criteria ⇒ no extra model call, zero cost,
   today's trust-everything behavior — keep it that way (the agent-flow e2e delegates without criteria
@@ -298,7 +315,10 @@ resolution).
   non-empty grants (and root/librarian) untouched.
 - **The checkbox cannot lie (Plan 18):** `delegate_task`/`dispatch_task` take an optional `itemId`. The
   engine binds the item `in_progress` BEFORE the child runs, then settles it from the child's REAL
-  outcome — and, when `criteria` is set, only when the INDEPENDENT Plan 06 checker agrees. Once an item
+  outcome — and, when `criteria` is set, only when the INDEPENDENT Plan 06 checker agrees. (KNOWN BUG:
+  the settle half is only wired for `delegate_task` — `dispatch_task` binds the item but
+  `settlePlanItemForTask` (`store/plans.ts`) has no callers, so a background task's item stays
+  `in_progress` until boot's `reconcilePlans` wrongly marks it `interrupted`.) Once an item
   carries a `boundRunId`, only the engine may set its terminal status; a model that tries is refused, and
   the attempt is appended with `rejected: true` because a model marking a failed delegation done is a
   fact worth having. Plan tools are NOT in `DEFAULT_WORKER_TOOLS` (a plan is not needed to produce an

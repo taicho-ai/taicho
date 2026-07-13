@@ -55,7 +55,7 @@ export async function runChecker(params: {
   goal: string;
   criteria: string;
   output: string;
-}): Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string }> {
+}): Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string; checkerError?: boolean }> {
   const user =
     `GOAL:\n${params.goal}\n\n` +
     `ACCEPTANCE CRITERIA:\n${params.criteria}\n\n` +
@@ -74,10 +74,23 @@ export async function runChecker(params: {
     spendLedger: params.spendLedger, // Plan 09: commit + bound the checker call against the ceilings
     spendScopes: params.spendScopes,
   });
-  // We read only result.text, never result.error: a checker that NEVER RAN (transport error/cancel ⇒
-  // result.text like "[error]"/"[cancelled]") parses to the SAME non-blocking advisory PASS as a
-  // garbled verdict. Deliberate for now — the checker is advisory, never a hard gate — so a broken or
-  // unreachable verifier must not wedge delegation. Louder surfacing of a never-ran verifier is a follow-up.
+  // Plan 20: a checker that NEVER RAN must not pass. It used to parse "[error]"/"[cancelled]"/
+  // "[… budget exhausted …]" into the advisory PASS — a squad relying on criteria got silent passes
+  // during a provider outage, and (the more routine trigger) whenever a spend ceiling or per-run cap
+  // refused the checker call before it was made. Now it surfaces pass=false + checkerError:true, and
+  // tools.ts skips the retry (re-running the CHILD is pointless when the judge can't run) and the
+  // annotation/coaching side effects (such a verdict says nothing about the artifact). A GARBLED
+  // verdict from a checker that DID run still parses to the advisory pass in parseVerdict — deliberate.
+  if (result.error || result.aborted || result.exhausted) {
+    const why = result.error ?? (result.aborted ? "cancelled" : result.text || "budget exhausted");
+    return {
+      verdict: { pass: false, reasons: [`checker unavailable: ${why}`] },
+      checkerError: true,
+      tokens: result.tokens,
+      costUsd: params.subscription ? null : result.costUsd,
+      costNote: params.subscription ? "subscription" : undefined,
+    };
+  }
   // Cost honesty (mirrors run.ts/loop.ts): a subscription checker has NO measurable USD, so costUsd is
   // null + costNote:"subscription" — never a fabricated 0 that claims an unmeasured price. Tokens always meter.
   return {

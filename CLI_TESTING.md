@@ -102,10 +102,12 @@ workspace, so pass/fail comes only from the file assertions — the video shows 
 
 ## Adding a scenario
 
-Each new headline flow that needs proof adds: one `e2e-model.ts` mode (a scripted `doGenerate`
-sequence), one `e2e/scenarios/<name>.ts` (tape + assertions), then `bun scripts/e2e-evidence.ts
-<name>`. Real-model evidence runs are possible (same tape, drop `TAICHO_E2E_MODEL`) but stay
-manual/off-CI like Layer 3 — they cost tokens and vary.
+Each new headline flow that needs proof adds: one `e2e-model.ts` mode (a scripted **`doStream`**
+stream-parts sequence built with the `stream()`/`text()`/`call()` helpers — the loop streams every
+provider since Plan 07), one `e2e/scenarios/<name>.ts` (tape + assertions), then
+`bun scripts/e2e-evidence.ts <name>`. Real-model evidence runs need a tape edit, not just an env
+change — the tape itself types `TAICHO_E2E_MODEL=<mode>` into the launch command (gotcha 3's
+belt-and-braces) — and stay manual/off-CI like Layer 3: they cost tokens and vary.
 
 ## CI (later)
 

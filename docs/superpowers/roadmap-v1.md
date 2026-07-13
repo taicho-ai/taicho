@@ -1,7 +1,13 @@
 # taicho — v1 Roadmap
 
 **Date:** 2026-06-11
-**Status:** proposed (grounded in a per-item scan of the current `main`)
+**Status:** HISTORICAL (2026-07-13) — essentially built. Plans 01–19 absorbed items #1–#7
+(safety, budgets, config, persistence, coaching, ux, semantic retrieval) and went far beyond.
+Still open from this list: **#8 exemplars** (schema remains unwired scaffolding) and
+**#9 distribution** (no CI/release pipeline, no `--version`, no published assets). No
+forward-looking roadmap has superseded this document yet.
+
+**Original status:** proposed (grounded in a per-item scan of the then-current `main`)
 **Premise:** v1 = the README's **five control surfaces** working end-to-end + **installable** + **safe to run autonomously**. The first slice shipped 4 of the 5 surfaces' runtime spine; this roadmap is what remains.
 
 Each work-item below was scoped against the actual code (built vs scaffolded-but-inert vs absent). Sizes: small / medium / large. The v1 line and build order follow.

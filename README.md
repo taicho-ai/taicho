@@ -11,7 +11,7 @@ re-task it, and make corrections stick.
 curl -fsSL https://taicho.ai/install.sh | bash
 ```
 
-Status: pre-alpha, under active development. See SPEC for design.
+Status: pre-alpha, under active development. Design docs live in `docs/superpowers/specs/`.
 
 ## Five control surfaces
 
@@ -56,12 +56,15 @@ Override the model with `TAICHO_MODEL`. For per-agent providers/models and budge
 
 ## MCP servers
 
-Agents can use [MCP](https://modelcontextprotocol.io) tools. **Every agent automatically gets
-every connected server's tools** — the built-in defaults plus anything you add. Manage servers
-with `/mcp` (`/mcp add <name> <command…>`, `/mcp list`, `/mcp remove <name>`).
+Agents can use [MCP](https://modelcontextprotocol.io) tools. **Grants are per-agent, least
+privilege**: an agent only gets a server's tools if its tool list carries `mcp:<server>` (the whole
+server) or `mcp:<server>/<tool>` (one tool) — root grants these when creating workers, or you edit
+`agents/<id>/agent.md`. Manage servers with `/mcp` (`/mcp add <name> <command…>`, `/mcp list`,
+`/mcp remove <name>`).
 
 **Firecrawl is built in.** Set a [Firecrawl](https://firecrawl.dev) key and the Firecrawl MCP
-(scrape / crawl / search / map / extract) connects on every squad, available to all agents:
+server (scrape / crawl / search / map / extract) connects on every squad — grant `mcp:firecrawl`
+to the agents that should use it (root's own `read_url` docs reader uses the same key directly):
 
 ```
 export FIRECRAWL_API_KEY=fc-...     # the Firecrawl MCP server + root's docs reader
@@ -94,8 +97,10 @@ teams:
   trading:
     model: claude-opus-4-8
     ceilings: { dailyCostUsd: 25 }   # this team's own spend cap
-    tools: { deny: [run_command] }
 ```
+
+A team's tool policy (grant extra tools to members, or deny some) lives in the team's charter file
+`teams/<id>/team.md`, not in `taicho.yaml`.
 
 ## Knowledge (shared squad memory)
 
@@ -105,12 +110,13 @@ typed edges. Any agent granted `remember` / `recall` can save durable knowledge 
 auto-injected into an agent's prompt (like coaching notes). Nodes are files (`kb/nodes/*.md`,
 git-diffable); the SQLite index rebuilds from them.
 
-**Semantic search** uses a local model by default — `all-MiniLM-L6-v2` via transformers.js, **no API
-key**. Configure in `taicho.yaml`:
+**Semantic search** auto-detects its embedder: `openai` (text-embedding-3-small) when
+`OPENAI_API_KEY` is set, otherwise a local model — `all-MiniLM-L6-v2` via transformers.js, **no API
+key**. Configure explicitly in `taicho.yaml`:
 
 ```
 embeddings:
-  provider: local    # local (default, no key) | openai (needs OPENAI_API_KEY) | off (keyword+graph only)
+  provider: local    # local (no key) | openai (needs OPENAI_API_KEY) | off (keyword+graph only)
 ```
 
 The local model runs the native ONNX runtime, which can't bundle into the single binary — so on first
@@ -158,12 +164,17 @@ The root orchestrator has two extra, captain-gated powers:
 - **`run_command`** — root can run shell commands. This is always on: `run_command` is a built-in
   root tool that every squad's root gets on boot, not something you enable per squad. Each command is
   checked by the external [`dcg`](https://github.com/Dicklesworthstone/destructive_command_guard)
-  guard: commands it clears run automatically; anything it flags — or any command at all if `dcg`
-  isn't installed — is sent to you for approval first. Output is captured (capped) and returned.
-  Install `dcg` to reduce approval prompts; without it, every command asks (fail-safe).
+  guard, then runs **sandbox-first**: dcg-cleared commands execute inside a macOS Seatbelt sandbox
+  (deny-by-default — no network, writes confined to the workspace); a command the sandbox can't
+  complete, anything dcg flags, or any command at all if `dcg`/the sandbox aren't available, escalates
+  to you for approval first. If an agent has read untrusted content (web pages, MCP results) earlier
+  in the run, every `run_command` requires approval — prompt-injection can't silently reach the shell.
+  Output is captured (capped) and returned.
 
-Both are root-only. There's no sandbox in this version — the guard, the fail-safe (when in doubt,
-ask), and your approval on every blocked command are the guardrails, not a per-squad toggle.
+Root holds both by default; like every privileged tool they are grant-gated, so root can extend
+`run_command` to a worker it creates (you approve the agent card that grants it). The Seatbelt
+sandbox, the guard, the injection taint-check, and your approval on anything escalated are the
+guardrails.
 
 ## Observability
 

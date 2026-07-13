@@ -13,8 +13,8 @@
  *       message. No LLM call (predictable, free, testable). The system prompt, the original brief, and
  *       the most recent N iterations are kept VERBATIM by the caller; only the middle is condensed.
  *
- *  Cross-turn (boot-replay) compaction is Phase 3 and is deferred — it depends on Plan 01 Phase 5's
- *  `recordTurnOutcome` single write seam, which is not yet built. See plans/tasks.md ## Plan 05. */
+ *  Cross-turn (boot-replay) compaction is core/conversation-replay.ts (Plan 05 Ph3), hooked into the
+ *  turn-audit seam (core/turn-audit.ts) by run.ts — built; it reuses this module's estimator. */
 import type { ModelMessage } from "ai";
 
 /** chars/4 heuristic — a gate, not a bill. */

@@ -490,6 +490,80 @@ test("Plan 12 (reopened): a tool slower than the deadline still completes (shot-
   expect(res.error).toBeUndefined();
 }, 5000);
 
+// Plan 20: PARALLEL tool calls in one turn. The disarm flag must be a COUNTER, not a boolean — the
+// first tool-result must not re-arm the timer while a second tool is still executing, or a slow
+// second tool with no intervening chunks is falsely killed (the exact class Plan 12 removed).
+// Plan 20 (review finding): a THROWING tool produces a `tool-error` stream part, which the AI SDK
+// never delivers to onChunk — chunk-based counting left the counter stuck ≥1, permanently disarming
+// the idle timer for the rest of that call. Tracking at the EXECUTE seam (finally) balances every
+// settle path, so a hung-open stream after a tool throw is still caught.
+test("a throwing tool does not wedge the idle timer: hung stream after tool-error is still caught", async () => {
+  const ran: string[] = [];
+  const mixedTools: ToolSet = {
+    boom_tool: tool({
+      description: "throws — its settle is invisible to onChunk (tool-error part)",
+      inputSchema: z.object({}),
+      // The explicit return type keeps tool()'s overload inference from collapsing to Promise<never>
+      execute: async (): Promise<{ ok: boolean }> => { ran.push("boom"); throw new Error("tool exploded"); },
+    }),
+    ok_tool: tool({
+      description: "succeeds shortly after",
+      inputSchema: z.object({}),
+      execute: async () => { await new Promise((r) => setTimeout(r, 50)); ran.push("ok"); return { ok: true }; },
+    }),
+  };
+  // A stream that emits both tool calls, then HANGS OPEN forever (never closes, no finish part) —
+  // the exact fetch-abort-ignoring hang the idle timer exists to catch.
+  const hangingAfterToolCalls = new ReadableStream({
+    start(controller) {
+      controller.enqueue({ type: "stream-start", warnings: [] });
+      controller.enqueue({ type: "tool-call", toolCallId: "x1", toolName: "boom_tool", input: "{}" });
+      controller.enqueue({ type: "tool-call", toolCallId: "x2", toolName: "ok_tool", input: "{}" });
+      // never close, never error — hang
+    },
+  });
+  const model = new MockLanguageModelV3({ doStream: async () => ({ stream: hangingAfterToolCalls as any }) });
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools: mixedTools,
+    modelRequestTimeoutMs: 200,
+  });
+  expect(ran.sort()).toEqual(["boom", "ok"]);   // both tools actually executed mid-stream
+  expect(res.error).toBeDefined();              // stuck counter ⇒ this wedged forever (test timeout)
+  expect(res.error).toContain("idle");
+}, 5000);
+
+test("parallel tool calls: the idle timer stays disarmed until the LAST tool finishes (counter, not boolean)", async () => {
+  const ran: string[] = [];
+  const parallelTools: ToolSet = {
+    fast_tool: tool({
+      description: "resolves fast — its tool-result re-armed the OLD boolean timer",
+      inputSchema: z.object({}),
+      execute: async () => { await new Promise((r) => setTimeout(r, 10)); ran.push("fast"); return { ok: true }; },
+    }),
+    slow_tool: tool({
+      description: "keeps executing past the deadline with no chunks",
+      inputSchema: z.object({}),
+      execute: async () => { await new Promise((r) => setTimeout(r, 400)); ran.push("slow"); return { ok: true }; },
+    }),
+  };
+  const twoCallChunks = [
+    { type: "stream-start", warnings: [] },
+    { type: "tool-call", toolCallId: "p1", toolName: "fast_tool", input: "{}" },
+    { type: "tool-call", toolCallId: "p2", toolName: "slow_tool", input: "{}" },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_use" }, usage },
+  ];
+  const model = new MockLanguageModelV3({ doStream: streamSeq(twoCallChunks, finalChunks) });
+  // Deadline 150ms sits between fast_tool (10ms) and slow_tool (400ms): the boolean re-armed at
+  // fast_tool's result and fired mid-slow_tool; the counter re-arms only when BOTH are done.
+  const res = await runLoop({
+    model, agent, system: "S", messages: [{ role: "user", content: "go" }], tools: parallelTools,
+    modelRequestTimeoutMs: 150,
+  });
+  expect(ran.sort()).toEqual(["fast", "slow"]);
+  expect(res.error).toBeUndefined();     // OLD code: "model stream idle for 150ms…"
+  expect(res.text).toBe("all done");
+}, 5000);
+
 // Plan 12 (reopened): two CONCURRENT runs must not interfere with each other's idle timers.
 // The timer state must be per-run, not global.
 test("Plan 12 (reopened): two concurrent runs with long tools both complete (no timer cross-wiring)", async () => {
