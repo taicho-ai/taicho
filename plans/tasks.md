@@ -656,3 +656,28 @@ merged PRs. Recorded here so this file stays the one plan index:
 - [x] **Plan 19 — teams.** `teams/<id>/team.md` canon; membership via agent frontmatter `team:`;
   `team:<id>` ACL grammar; delegate-to-team routing (lead or ranked member); per-team spend ceilings
   + tool policy; roster renders teams. Spec: `docs/superpowers/specs/2026-07-10-teams-design.md`.
+
+---
+
+## Plan 20 — Hardening (2026-07-13)
+
+Fix the confirmed defects from the 2026-07-13 state review — no new features, make existing claims
+true. Spec: `docs/superpowers/specs/2026-07-13-plan-20-hardening-design.md`. Step-by-step plan:
+`docs/superpowers/plans/2026-07-13-plan-20-hardening.md`. Three PRs off worktrees.
+
+### PR 1 — engine (`plan-20-engine`)
+- [ ] Idle timer: `toolExecuting` boolean → executing COUNTER (parallel-tool false-kill); clear the timer on the error path; fix loop.ts's lying header.
+- [ ] Checker honesty: a checker that never RAN surfaces `{pass:false, checkerError:true}` — no retry, no annotation/coaching, plan item settles from the child's real outcome.
+- [ ] Stale engine comments: otel.ts header (experimental_telemetry / "/trace unchanged"), compaction.ts "Ph3 deferred".
+
+### PR 2 — REPL (`plan-20-repl`)
+- [ ] Wire `settlePlanItemForTask` into App's settleTask/failTask (the Plan 18 background-settle bug) + refresh the plan panel.
+- [ ] `dispatch_task` stops claiming a checker it doesn't run (description honesty).
+- [ ] Focus ring + Enter read ONE collection (`allBlocks`) — drill-in opens the highlighted run.
+- [ ] Roster reindex: unconditional at boot; `/agents reindex` for mid-session hand-edits.
+- [ ] One composed SIGTERM handler: close MCP → flush OTel → exit(0).
+
+### PR 3 — cleanup (`plan-20-cleanup`)
+- [ ] Delete dead e2e scenarios `trace-inspector.ts` + `live-waterfall.ts` (import deleted trace-tree).
+- [ ] Drop phantom `search_knowledge` from untrustedSources; fix SquadPanes "waterfall" comment.
+- [ ] Atomic temp+rename writes for `tasks/*.json` (matches schedules.ts).

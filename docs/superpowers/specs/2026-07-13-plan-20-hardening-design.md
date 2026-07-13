@@ -91,7 +91,10 @@ non-blocking advisory PASS (`verification.ts:77-81`, acknowledged in-code). A sq
 `checkerError: true` on `VerificationRecord` (schema-additive; old records parse). **Skip the
 retry** when `checkerError` — the retry exists to fix the CHILD's output, and re-running the child
 is pointless when the judge is down; it would burn a work item for nothing. The parent model sees
-the verdict + reason and decides. Trace/annotation recording stays as today.
+the verdict + reason and decides. Refinement (implementation): a checker-outage verdict says
+nothing about the OUTPUT, so it must also skip the annotation + coaching side effects (they'd
+blame the artifact for an outage), and the bound plan item settles from the child's REAL outcome
+(like the no-criteria path) with a "checker unavailable" note — never from the outage verdict.
 
 ## 5. Roster reindex: hand-edits must take effect
 
