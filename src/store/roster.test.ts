@@ -168,3 +168,20 @@ test("seedLibrarian creates the librarian with its toolset; reconciles missing t
   await seedLibrarian(w);
   expect((await loadAgent(w, LIBRARIAN_ID)).tools).toContain("forget");
 });
+
+test("Plan 20: reindex removes ghost rows for deleted agent.md files (delete-then-rebuild)", async () => {
+  const { rmSync } = await import("node:fs");
+  const ws = mkdtempSync(join(tmpdir(), "taicho-roster-"));
+  await ensureWorkspace(ws);
+  await seedRoot(ws);
+  const db = openDb(ws);
+  await reindex(ws, db);
+  await createAgent(ws, db, { id: "ghostagent", role: "soon deleted", identity: "You vanish." }, "root");
+  expect(loadIndex(db).some((r) => r.id === "ghostagent")).toBe(true);
+  // The captain hand-deletes the agent (files are canon) — the derived row must go on the next rebuild.
+  rmSync(join(ws, "agents", "ghostagent"), { recursive: true, force: true });
+  await reindex(ws, db);
+  const ids = loadIndex(db).map((r) => r.id);
+  expect(ids).not.toContain("ghostagent");   // upsert-only reindex left this ghost forever
+  expect(ids).toContain("root");             // survivors are rebuilt, not lost
+});

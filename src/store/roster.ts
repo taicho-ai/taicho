@@ -158,6 +158,10 @@ export async function reindex(ws: string, db: Database): Promise<void> {
     try { agents.push(parseAgent(await readFile(file, "utf8"))); }
     catch (e) { log.warn(`skipping agent ${id}`, e); }
   }
+  // Plan 20 (review finding): delete-then-rebuild, like every sibling reindex (plans/tasks/skills/kb).
+  // syncRegistry alone is upsert-only, so a hand-DELETED agent.md left a ghost registry row that no
+  // boot or /agents reindex ever removed. Files are canon; the whole table is derived.
+  db.query("DELETE FROM registry").run();
   if (agents.length) syncRegistry(db, agents);
 }
 

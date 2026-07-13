@@ -14,11 +14,11 @@ import { BANNER } from "./banner";
 import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
 import { gatherConversationArtifacts } from "../core/conversation-artifacts";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
-import { loadAgent, loadIndex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
+import { loadAgent, loadIndex, reindex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTeams } from "../store/teams";
 import { PlanPanel } from "./PlanPanel";
 import type { PlanState } from "../schemas/plan";
-import { currentPlanId, foldPlan } from "../store/plans";
+import { currentPlanId, foldPlan, settlePlanItemForTask } from "../store/plans";
 import { listTraces, readTrace } from "../store/trace";
 import { listPolicies, deletePolicy, approvePolicy } from "../store/policy";
 import { updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
@@ -336,14 +336,17 @@ export function App(props: {
       setCompletionArtifacts(null); setActionBarFocus(0); return;
     }
     // Plan 13: focus mode navigation. shift+tab enters, esc leaves, ↑↓ move, ⏎ opens operation view.
+    // Plan 20: the ring and the Enter target read the SAME collection — allBlocks is what RENDERS
+    // (root excluded, settling-first). The old Enter path indexed [...blockFeed.keys()] (insertion
+    // order, root INCLUDED since root's deltas populate the feed), so highlighting block 0 could
+    // open root's run instead of the highlighted child; ↑↓ also bounded on blockFeed.size.
     if (focusMode) {
       if (key.escape) { setFocusMode(false); setFocusIndex(0); return; }
       if (key.upArrow) { setFocusIndex((i) => Math.max(0, i - 1)); return; }
-      if (key.downArrow) { setFocusIndex((i) => Math.min((blockFeed.size || 1) - 1, i + 1)); return; }
+      if (key.downArrow) { setFocusIndex((i) => Math.min((allBlocks.length || 1) - 1, i + 1)); return; }
       if (key.return) {
-        const runIds = [...blockFeed.keys()];
-        const targetRunId = runIds[focusIndex];
-        if (targetRunId) setOperationRunId(targetRunId);
+        const target = allBlocks[focusIndex];
+        if (target) setOperationRunId(target.runId);
         return;
       }
       return; // consume other keys while in focus mode
@@ -480,10 +483,23 @@ export function App(props: {
     const status = readTaskState(props.ws, taskId)?.status ?? "completed";
     const icon = status === "completed" ? "✓" : status === "cancelled" ? "⊗" : "⚠";
     say({ kind: "system", text: `  ${icon} background task ${taskId} (${agentId}) ${status} — /tasks or check_task` });
+    // Plan 20 (Plan 18's settle half): tick whatever plan item this task was bound to, from the
+    // task's REAL outcome — completed→done, blocked→blocked, else failed; cancelled counts as failed
+    // (the work did not happen). Then refresh the pinned plan panel from disk. Without this the item
+    // stayed in_progress forever and boot's reconcilePlans wrongly marked it interrupted.
+    settlePlanItem(taskId, wasCancelled ? "failed" : res.trace.outcome === "completed" ? "done" : res.trace.outcome === "blocked" ? "blocked" : "failed",
+      wasCancelled ? "task cancelled" : `task ${taskId} ${res.trace.outcome}`);
   };
   const failTask = (taskId: string, agentId: string, e: unknown) => {
     setTaskFields(props.ws, props.db, taskId, { status: "failed", stepStatus: "failed", summary: e instanceof Error ? e.message : String(e) });
     say({ kind: "system", text: `  ⚠ background task ${taskId} (${agentId}) failed — /tasks` });
+    settlePlanItem(taskId, "failed", e instanceof Error ? e.message : String(e));
+  };
+  // Shared by both settle paths: settle the bound item (no-op when the task bound none) and push the
+  // refreshed fold to the plan panel so the checkbox flips on screen, not just on disk.
+  const settlePlanItem = (taskId: string, status: "done" | "failed" | "blocked", note: string) => {
+    const settled = settlePlanItemForTask(props.ws, props.db, taskId, status, note);
+    if (settled) { const st = foldPlan(props.ws, settled.planId); if (st) setPlan(st); }
   };
 
   // Fire-and-forget a goal onto another agent (dispatch_task). Returns the taskId immediately; the
@@ -515,7 +531,13 @@ export function App(props: {
         .then((res) => { settleTask(taskId, o.agent.id, res); return res; }, (e) => { failTask(taskId, o.agent.id, e); });
       return { controller, promise };
     };
-    scheduler.submit({ taskId, agentId: o.agent.id, cap: o.agent.budgets.maxConcurrentRuns, start });
+    // Plan 20 (review finding): a task cancelled while QUEUED never reaches settleTask/failTask —
+    // start() never ran — so its bound plan item stayed in_progress forever. The scheduler fires
+    // onCancelQueued for exactly this drop-from-queue transition; settle the item there.
+    scheduler.submit({
+      taskId, agentId: o.agent.id, cap: o.agent.budgets.maxConcurrentRuns, start,
+      onCancelQueued: () => settlePlanItem(taskId, "failed", "task cancelled while queued"),
+    });
     return { taskId };
   };
 
@@ -745,6 +767,15 @@ export function App(props: {
   };
 
   const runSlash = async (cmd: string, arg: string) => {
+    // Plan 20: mid-session roster reindex, for hand-edits to agents/*/agent.md (e.g. `team: news`).
+    // Boot also reindexes unconditionally; this covers edits made while the REPL is open. The bare
+    // `/agents` list stays in runSlashPure.
+    if (cmd === "agents" && arg.trim().toLowerCase() === "reindex") {
+      await reindex(props.ws, props.db);
+      setRoster(loadIndex(props.db)); // review finding: /teach + approvePolicy read this state, not the DB
+      say({ kind: "system", text: "  roster reindexed from agents/*/agent.md" });
+      return;
+    }
     if (cmd === "view") {
       const mode = arg.trim().toLowerCase();
       if (!mode) { say({ kind: "system", text: `  live view: ${viewMode} (usage: /view ${VIEW_MODES.join("|")})` }); return; }

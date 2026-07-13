@@ -29,7 +29,7 @@ import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { getViewMode } from "../store/prefs";
 import { createTeam } from "../store/teams";
-import { writePlan, reindexPlans, currentPlanId } from "../store/plans";
+import { writePlan, reindexPlans, currentPlanId, foldPlan } from "../store/plans";
 import { readPrefs } from "../store/prefs";
 import { statusReducer } from "../core/agent-status";
 import { KbNode } from "../schemas/knowledge";
@@ -691,6 +691,185 @@ test("dispatch_task runs in the BACKGROUND: root returns immediately, the captai
   const bg = rows.find((r) => r.agent === "bgworker");
   expect(bg?.status).toBe("completed");
   expect(bg?.kind).toBe("background");
+});
+
+test("Plan 20 (Plan 18's settle half): a background task settle TICKS the plan item it was bound to", async () => {
+  // Root writes a plan, dispatches its item to a background worker, and finishes its turn. When the
+  // detached task settles, the REPL settle path must tick the bound item from the task's REAL outcome
+  // — the seam settlePlanItemForTask existed for but nothing called (the item used to stay
+  // in_progress forever, until boot's reconcilePlans wrongly marked it interrupted).
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("BACKGROUND-WORKER-IDENTITY")) { await sleep(200); return finalText("background item done"); } // the detached worker run
+      if (s.includes("task_bg_")) return finalText("dispatched the plan item");   // root, after dispatch returned a taskId
+      if (s.includes("minted")) return toolCall("dispatch_task", { to: "bgworker", goal: "do the bg item", itemId: "it_bg" }); // root, after write_plan's result
+      return toolCall("write_plan", { goal: "prove the settle half", items: [{ id: "it_bg", text: "background item" }] });     // root, first turn
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "bgworker", role: "Background worker", identity: "BACKGROUND-WORKER-IDENTITY — you do detached work.", tools: [] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "plan it and kick it off", ENTER);
+  await waitFor(lastFrame, "dispatched the plan item");          // root's turn finished; the task is in flight
+  await waitFor(lastFrame, "background task", 4000);             // the settle notification
+
+  const planId = currentPlanId(db, "root");
+  expect(planId).toBeTruthy();
+  const st = foldPlan(ws, planId!)!;
+  const item = st.items.find((i) => i.id === "it_bg")!;
+  expect(item.status).toBe("done");                              // ← the previously-unwired settle
+  expect(item.note ?? "").toContain("completed");
+});
+
+test("Plan 20 (review finding): cancelling a QUEUED task settles its bound plan item too", async () => {
+  // Two dispatches to a maxConcurrentRuns:1 worker: one runs (holds the slot ~800ms), one QUEUES.
+  // Cancelling the queued one never reaches settleTask/failTask (start() never ran) — the scheduler's
+  // onCancelQueued hook is the only seam for that transition, and it was unwired.
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("QUEUE-WORKER-IDENTITY")) { await sleep(800); return finalText("bg slot freed"); }
+      if (s.includes("task_bg_")) return finalText("both dispatched");
+      if (s.includes("minted")) return {
+        content: [
+          { type: "tool-call", toolCallId: "d_a", toolName: "dispatch_task", input: JSON.stringify({ to: "queueworker", goal: "task A", itemId: "it_a" }) },
+          { type: "tool-call", toolCallId: "d_b", toolName: "dispatch_task", input: JSON.stringify({ to: "queueworker", goal: "task B", itemId: "it_b" }) },
+        ],
+        finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+      } as unknown as LanguageModelV3GenerateResult;
+      return toolCall("write_plan", { goal: "queue cancel proof", items: [{ id: "it_a", text: "task A" }, { id: "it_b", text: "task B" }] });
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "queueworker", role: "queued worker", identity: "QUEUE-WORKER-IDENTITY — one at a time.", tools: [] }, "root");
+  // Cap the worker to ONE concurrent run (budgets are config/frontmatter-disposed, not a draft field).
+  const af = join(ws, "agents", "queueworker", "agent.md");
+  // createAgent already serializes a budgets block — patch INSIDE it (a duplicate budgets: key would
+  // lose to the original under YAML last-key-wins, silently leaving the cap unbounded).
+  writeFileSync(af, readFileSync(af, "utf8").replace("  maxIterationsPerRun: 30", "  maxConcurrentRuns: 1\n  maxIterationsPerRun: 5"));
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "plan then dispatch both", ENTER);
+  await waitFor(lastFrame, "both dispatched");
+  // One task runs, the other sits queued (order between A/B is SDK execution order — read the truth).
+  const queued = listTaskIndex(db, { activeOrBackground: true }).find((r) => r.status === "queued");
+  expect(queued).toBeTruthy();
+  const queuedItem = queued!.goal === "task A" ? "it_a" : "it_b";
+  const runningItem = queuedItem === "it_a" ? "it_b" : "it_a";
+
+  await send(stdin, `/tasks cancel ${queued!.id}`, ENTER);
+  await waitFor(lastFrame, "cancelled");
+  const planId = currentPlanId(db, "root")!;
+  const afterCancel = foldPlan(ws, planId)!;
+  const dropped = afterCancel.items.find((i) => i.id === queuedItem)!;
+  expect(dropped.status).toBe("failed");                          // ← was stranded in_progress forever
+  expect(dropped.note ?? "").toContain("queued");
+
+  await waitFor(lastFrame, "background task", 4000);              // the running task settles normally
+  const st = foldPlan(ws, planId)!;
+  expect(st.items.find((i) => i.id === runningItem)!.status).toBe("done");
+});
+
+test("Plan 20 (review finding): /agents reindex refreshes App's roster STATE — /teach sees a hand-added agent", async () => {
+  const { ws, props } = await setup({ model: mockModel('{"when":"citing facts","do":"always cite sources","scope":"agent"}') });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/teach ghostcoach cite your sources", ENTER);
+  await waitFor(lastFrame, 'No agent "ghostcoach"');              // gate reads the (stale) roster state
+
+  // Hand-author the agent file, then reindex mid-session — the DB refresh alone was not enough,
+  // because /teach's gate reads App's in-memory roster state, not the DB.
+  mkdirSync(join(ws, "agents", "ghostcoach"), { recursive: true });
+  writeFileSync(join(ws, "agents", "ghostcoach", "agent.md"),
+    '---\nid: ghostcoach\nrole: cites sources\ntools: []\ncanSee: ["*"]\ncanDelegateTo: []\nisRoot: false\ncreated: "2026-07-13T00:00:00.000Z"\n---\nYou cite sources.\n');
+  await send(stdin, "/agents reindex", ENTER);
+  await waitFor(lastFrame, "roster reindexed");
+
+  await send(stdin, "/teach ghostcoach cite your sources", ENTER);
+  await waitFor(lastFrame, "always cite sources");                // the distilled draft card — the gate passed
+  expect((lastFrame()!.match(/No agent "ghostcoach"/g) ?? []).length).toBe(1); // no SECOND refusal
+  await send(stdin, "n");                                         // reject the proposal, drain cleanly
+  await waitFor(lastFrame, "discarded");
+});
+
+test("Plan 20: /agents reindex picks up a hand-edit to agent.md (team: takes effect mid-session)", async () => {
+  const { ws, db, props } = await setup({ model: mockModel("hi") });
+  await createAgent(ws, db, { id: "member", role: "member role", identity: "You are a member." }, "root");
+  expect(loadIndex(db).find((r) => r.id === "member")!.team ?? null).toBeNull();
+
+  // The documented membership mechanism: hand-edit the agent's own frontmatter.
+  const file = join(ws, "agents", "member", "agent.md");
+  writeFileSync(file, readFileSync(file, "utf8").replace("id: member", "id: member\nteam: news"));
+
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/agents reindex", ENTER);
+  await waitFor(lastFrame, "roster reindexed");
+  expect(loadIndex(db).find((r) => r.id === "member")!.team).toBe("news");   // the derived row refreshed
+});
+
+test("Plan 20: focus-mode Enter opens the run the ring HIGHLIGHTS, not blockFeed insertion order", async () => {
+  // Root streams a delta BEFORE delegating, so root's runId enters blockFeed first. The rendered
+  // block list (allBlocks) EXCLUDES root — index 0 is the child — but the old Enter path indexed
+  // [...blockFeed.keys()], which included root: highlighting the child opened ROOT's run. The child
+  // streams slowly (chunkDelayInMs) so its block is live while we navigate; its trace isn't written
+  // yet, so the operation view renders "no data for run <childRunId>" — the run ID is the proof.
+  const su = { inputTokens: { total: 3 }, outputTokens: { total: 2 } } as const;
+  const stream = (chunks: unknown[], delay = 0) =>
+    ({ stream: simulateReadableStream({ initialDelayInMs: 0, chunkDelayInMs: delay, chunks: chunks as never[] }) });
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doStream: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("PROOF-CHILD-IDENTITY"))
+        return stream([
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "1" },
+          ...Array.from({ length: 6 }, () => ({ type: "text-delta", id: "1", delta: "child working… " })),
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: su },
+        ], 150);                                                     // ~900ms live window for the keys
+      if (s.includes("child working"))
+        return stream([
+          { type: "stream-start", warnings: [] },
+          { type: "text-start", id: "1" },
+          { type: "text-delta", id: "1", delta: "root all wrapped" },
+          { type: "text-end", id: "1" },
+          { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: su },
+        ]);
+      return stream([
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "1" },
+        { type: "text-delta", id: "1", delta: "handing off to the squad" },  // root's delta → root enters blockFeed FIRST
+        { type: "text-end", id: "1" },
+        { type: "tool-call", toolCallId: "d1", toolName: "delegate_task", input: JSON.stringify({ to: "proofchild", goal: "do the thing" }) },
+        { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_use" }, usage: su },
+      ]);
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "proofchild", role: "proves focus", identity: "PROOF-CHILD-IDENTITY — you stream slowly.", tools: [] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "go", ENTER);
+  await waitFor(lastFrame, "child working");        // the child's live block is on screen
+  await send(stdin, "[Z");                    // shift+tab → focus mode (ring on block 0 = the child)
+  await waitFor(lastFrame, "navigate", 1500);       // the focus-mode footer proves focus engaged
+  await send(stdin, ENTER);                         // open the highlighted block
+  await waitFor(lastFrame, "esc to close");         // the operation view is open (live or settled)
+  // The view must identify the CHILD — "/ proofchild" in its esc line (settled) or its runId in the
+  // no-data line (still live). The OLD code opened ROOT's view here ("/ root").
+  await waitForPred(
+    lastFrame,
+    (f) => f.includes("/ proofchild") || f.includes("no data for run proofchild"),
+    "operation view identifies proofchild",
+    2000,
+  );
+  await send(stdin, "");                      // esc closes the operation view
+  await waitFor(lastFrame, "root all wrapped");     // drain the foreground turn cleanly
 });
 
 // ── Plan 04 Phase 6: /schedules add → list → remove (durable, from the REPL) ──

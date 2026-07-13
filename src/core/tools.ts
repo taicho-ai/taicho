@@ -545,13 +545,14 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         "until the child returns) when you don't need the result right now — e.g. long research you'll " +
         "check on later. Follow up with check_task(taskId) for status or await_task(taskId) to block on " +
         "it when you finally need it. Results come back BY REFERENCE (a summary + artifact handles), never " +
-        "inlined. Hand inputs over with `inputArtifacts` and set `criteria` exactly as for delegate_task. " +
-        "`to` may be an agent id or a team id, resolved the same way delegate_task resolves it.",
+        "inlined. Hand inputs over with `inputArtifacts`. Unlike delegate_task, `criteria` here rides " +
+        "into the worker's brief but is NOT independently verified at settle (no checker, no retry on " +
+        "the background path). `to` may be an agent id or a team id, resolved the same way delegate_task resolves it.",
       inputSchema: z.object({
         to: z.string().describe("an agent id, or a team id (ids share one namespace)"),
         goal: z.string(),
         context: z.string().optional(),
-        criteria: z.string().optional().describe("acceptance criteria the output must meet; enables an independent check + one retry"),
+        criteria: z.string().optional().describe("acceptance criteria, passed to the worker in its brief; NOT independently checked on the background path (unlike delegate_task)"),
         inputArtifacts: z.array(z.string()).optional().describe("artifact handles ('id' or 'id@vN') to hand to the task by reference"),
         itemId: z.string().optional().describe("an item on your plan this task fulfils; the ENGINE ticks it when the task settles, possibly turns later"),
       }),
