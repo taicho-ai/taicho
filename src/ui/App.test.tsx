@@ -1329,7 +1329,7 @@ test("/artifacts gc never archives a version handed off across a delegation edge
 
 // ── Plan 15: completion action bar + artifact viewer ──
 
-test("Plan 15: a turn that produces artifacts shows the completion action bar; ⏎ opens the viewer", async () => {
+test("Plan 21: a completed turn with artifacts DOCKS the browser; ⏎ opens the full-screen reader; esc chain", async () => {
   const model = new MockLanguageModelV3({ doGenerate: mockValues(
     toolCall("save_artifact", { id: "test-doc", title: "Test Document", body: "# Hello\n\nThis is the content." }),
     finalText("Done. See artifact test-doc@v1."),
@@ -1338,33 +1338,111 @@ test("Plan 15: a turn that produces artifacts shows the completion action bar; �
   const { stdin, lastFrame } = render(<App {...props} />);
 
   await send(stdin, "create a document", ENTER);
-  await waitFor(lastFrame, "View artifacts (1)");
-  expect(lastFrame()).toContain("Continue chatting");
-  expect(lastFrame()).toContain("←/→ move");
+  await waitFor(lastFrame, "ARTIFACTS");                 // the shelf docked itself — no bar, no command
+  expect(lastFrame()).toContain("test-doc@v1");          // the row is on the shelf
+  expect(lastFrame()).toContain("1 artifact");           // the honesty line
+  expect(lastFrame()).toContain("this run");             // scoped to the run that just ended
 
-  // ⏎ on "View artifacts" opens the viewer
-  await send(stdin, ENTER);
-  await waitFor(lastFrame, "Test Document");
-  expect(lastFrame()).toContain("test-doc@v1");
-  expect(lastFrame()).toContain("root");
-  expect(lastFrame()).toContain("↑/↓ scroll");
+  await send(stdin, ENTER);                              // ⏎ → the full-screen reader
+  await waitFor(lastFrame, "Hello");                     // the body renders
+  expect(lastFrame()).toContain("test-doc@v1 · root");   // reader header: handle · producer
+  expect(lastFrame()).toContain("esc shelf");
 
-  // esc closes the viewer
-  await send(stdin, ESC);
-  await waitFor(lastFrame, "> ");
+  await send(stdin, ESC);                                // reader → shelf
+  await waitFor(lastFrame, "ARTIFACTS");
+  await send(stdin, ESC);                                // shelf → chat
+  await waitForGone(lastFrame, "ARTIFACTS");
+  await waitFor(lastFrame, "> ");                        // the input line is back
 });
 
-test("Plan 15: a turn with no artifacts shows no completion bar", async () => {
+test("Plan 21: a turn with no artifacts does not dock the browser", async () => {
   const model = new MockLanguageModelV3({ doGenerate: mockValues(finalText("just text, no artifacts")) as any });
   const { props } = await setup({ model });
   const { stdin, lastFrame } = render(<App {...props} />);
 
   await send(stdin, "say hi", ENTER);
   await waitFor(lastFrame, "just text, no artifacts");
-  // No completion bar should appear
-  expect(lastFrame()).not.toContain("View artifacts");
-  expect(lastFrame()).not.toContain("Continue chatting");
+  expect(lastFrame()).not.toContain("ARTIFACTS");
 });
+
+test("Plan 21: a FAILED turn never docks, even when it produced artifacts (spec §1 unifies the old two triggers)", async () => {
+  // The @agent path used to show the bar unconditionally; now both paths gate on completed.
+  let calls = 0;
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async () => {
+      calls += 1;
+      if (calls > 1) throw Object.assign(new Error("provider died"), { code: "ECONNREFUSED" });
+      return toolCall("save_artifact", { id: "orphan", title: "Orphan", body: "body" });
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "maker", role: "makes things", identity: "You make things." }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "@maker make a thing", ENTER);
+  await waitFor(lastFrame, "failed");                    // the run line reports the failure
+  expect(lastFrame()).not.toContain("ARTIFACTS");        // no dock on a failed turn
+});
+
+test("Plan 21: bare /artifacts re-enters the browser scoped to the latest run", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    toolCall("save_artifact", { id: "re-doc", title: "Re Doc", body: "content" }),
+    finalText("saved."),
+  ) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make it", ENTER);
+  await waitFor(lastFrame, "ARTIFACTS");
+  await send(stdin, ESC);                                // leave the dock
+  await waitForGone(lastFrame, "ARTIFACTS");
+  await send(stdin, "/artifacts", ENTER);                // one command re-enters
+  await waitFor(lastFrame, "ARTIFACTS");
+  expect(lastFrame()).toContain("re-doc@v1");            // same latest-run scope
+});
+
+test("Plan 21: a pending approval SUSPENDS the docked browser — the card owns 'y', the dock returns after", async () => {
+  // Turn 1: root saves an artifact AND dispatches a background worker, then finishes → the dock
+  // appears. The worker (slow start) then requests create_agent → the approval card must take the
+  // WHOLE keyboard (dock unmounted), 'y' answers the CARD (never approves an artifact), and when the
+  // queue drains the dock remounts from preserved state. This is the spec §1 blocker test.
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("minted-by-bg")) return finalText("bg worker done");         // worker AFTER approval (check
+      // BEFORE the identity branch — the worker's prompt always carries its identity, and matching it
+      // first would loop the worker into requesting create_agent forever)
+      if (s.includes("SUSPEND-WORKER-IDENTITY")) {
+        await sleep(250); // let the dock render first
+        return toolCall("create_agent", { id: "minted-by-bg", role: "background-minted", identity: "You were minted from a background approval." });
+      }
+      if (s.includes("task_bg_")) return finalText("dispatched and saved.");      // root after dispatch result
+      return {
+        content: [
+          { type: "tool-call", toolCallId: "s1", toolName: "save_artifact", input: JSON.stringify({ id: "sus-doc", title: "Sus Doc", body: "content" }) },
+          { type: "tool-call", toolCallId: "d1", toolName: "dispatch_task", input: JSON.stringify({ to: "susworker", goal: "mint an agent" }) },
+        ],
+        finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+      } as unknown as LanguageModelV3GenerateResult;
+    }) as any,
+  });
+  const { ws, db, props } = await setup({ model });
+  await createAgent(ws, db, { id: "susworker", role: "suspends the dock", identity: "SUSPEND-WORKER-IDENTITY — you request approvals.", tools: ["create_agent"] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "save and dispatch", ENTER);
+  await waitFor(lastFrame, "ARTIFACTS");                 // docked after the completed foreground turn
+  await waitFor(lastFrame, "approve?", 6000);            // the background approval CARD is up (gate on the
+                                                         // card's own text — the ↳ breadcrumb fires earlier)
+  expect(lastFrame()).not.toContain("ARTIFACTS");        // …and it SUSPENDED the dock outright
+  await send(stdin, "y");                                // 'y' can only mean the card
+  await waitFor(lastFrame, "ARTIFACTS", 6000);           // queue drained → the dock remounted
+  await waitFor(lastFrame, "background task", 8000);     // the worker settled — its create_agent has run
+  expect(existsSync(join(ws, "agents", "minted-by-bg", "agent.md"))).toBe(true);  // the card was approved
+  expect(lastFrame()).toContain("sus-doc@v1");           // state preserved (same shelf)
+}, 15000);
 
 // --- Plan 19: /teams through the real REPL (Layer 1 — UI wiring never ships on typecheck alone) ----
 

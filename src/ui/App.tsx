@@ -8,7 +8,8 @@ import { StatusBar } from "./StatusBar";
 import { SquadPanes, resolveLayout, type PaneEntry, type PaneFeedMap } from "./SquadPanes";
 import { AgentBlock, useBlockSettle, useBlockTicker, tailLines, type AgentBlockData } from "./AgentBlock";
 import { OperationView } from "./OperationView";
-import { ArtifactViewer } from "./ArtifactViewer";
+import { ArtifactBrowser, initialBrowserUi, type BrowserUiState } from "./ArtifactBrowser";
+import { latestRunFallback } from "./browser-model";
 import { parseInput } from "./input";
 import { BANNER } from "./banner";
 import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
@@ -283,11 +284,15 @@ export function App(props: {
   const [focusIndex, setFocusIndex] = useState(0);
   const [operationRunId, setOperationRunId] = useState<string | null>(null);
 
-  // Plan 15: completion action bar + artifact viewer. When a user turn completes with artifacts, show
-  // the action bar; ⏎ on "View artifacts" opens the viewer. The viewer is cardKeyRef-owned.
-  const [completionArtifacts, setCompletionArtifacts] = useState<import("../schemas/artifact").Artifact[] | null>(null);
-  const [artifactViewerOpen, setArtifactViewerOpen] = useState(false);
-  const [actionBarFocus, setActionBarFocus] = useState(0); // 0 = View artifacts, 1 = Continue chatting
+  // Plan 21: the artifact browser. Runs END inside it — a COMPLETED foreground turn with ≥1 artifact
+  // docks the shelf over the chat (replacing Plan 15's completion action bar + viewer). ALL of its UI
+  // state lives HERE so a pending approval card can unmount the dock and remount it losslessly. The
+  // keyboard rides browserKeyRef — its own ref, never cardKeyRef — behind a fixed dispatch order in
+  // useInput (pending card → operation view → browser → chat), so `y` can only ever answer the
+  // surface that is actually on screen.
+  const [browser, setBrowser] = useState<{ rootRunId?: string; ui: BrowserUiState } | null>(null);
+  const browserKeyRef = useRef<CardKeyHandler | null>(null);
+  const lastRunRef = useRef<string | undefined>(undefined); // last completed foreground run (bare /artifacts re-entry)
 
   // Plan 13 (corrected): compute block data from the block feed at the top level (hooks must not be
   // called inside conditionals or IIFEs). The consistent block view shows every AGENT (sub-agents,
@@ -322,19 +327,10 @@ export function App(props: {
     // when the captain's first keystroke arrives, so we forward it to the active card. (A card-owned
     // useInput registers a beat after its render commits and would drop that first key — the hang
     // we're fixing.) The card publishes its handler to cardKeyRef during render.
-    if (pending || operationRunId || artifactViewerOpen) { cardKeyRef.current?.(input, key); return; } // a card OR the operation view OR artifact viewer owns the keyboard
-    // Plan 15: completion action bar navigation. ←/→ move, ⏎ select, esc/type → dismiss.
-    if (completionArtifacts && completionArtifacts.length > 0) {
-      if (key.escape) { setCompletionArtifacts(null); setActionBarFocus(0); return; }
-      if (key.leftArrow || key.rightArrow) { setActionBarFocus((f) => f === 0 ? 1 : 0); return; }
-      if (key.return) {
-        if (actionBarFocus === 0) { setArtifactViewerOpen(true); }
-        else { setCompletionArtifacts(null); setActionBarFocus(0); }
-        return;
-      }
-      // Any other key dismisses the bar and returns to chat
-      setCompletionArtifacts(null); setActionBarFocus(0); return;
-    }
+    if (pending || operationRunId) { cardKeyRef.current?.(input, key); return; } // a card OR the operation view owns the keyboard
+    // Plan 21: the docked browser is NEXT in precedence — a pending card above suspends it entirely
+    // (its render is gated on !pending too), so a keystroke can never be ambiguous between surfaces.
+    if (browser) { browserKeyRef.current?.(input, key); return; }
     // Plan 13: focus mode navigation. shift+tab enters, esc leaves, ↑↓ move, ⏎ opens operation view.
     // Plan 20: the ring and the Enter target read the SAME collection — allBlocks is what RENDERS
     // (root excluded, settling-first). The old Enter path indexed [...blockFeed.keys()] (insertion
@@ -738,9 +734,10 @@ export function App(props: {
         if (!streamedRef.current) say({ kind: "agent", from: "root", text: res.text, rendered: true });
         if (res.trace.outcome === "completed") {
           thread.current.push({ role: "assistant", content: res.text });
-          // Plan 15: gather artifacts from the conversation's run tree and show the completion action bar
+          // Plan 21: the run ends INSIDE the browser — dock it when the turn produced artifacts.
+          lastRunRef.current = res.runId;
           const artifacts = gatherConversationArtifacts(props.ws, res.runId);
-          if (artifacts.length > 0) setCompletionArtifacts(artifacts);
+          if (artifacts.length > 0) setBrowser({ rootRunId: res.runId, ui: initialBrowserUi() });
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
           maybeSayAuthExpired(res.text);
@@ -755,9 +752,13 @@ export function App(props: {
         if (!streamedRef.current) say({ kind: "agent", from: target.id, text: res.text, rendered: true });
         if (res.trace.outcome === "failed") maybeSayAuthExpired(res.text);
         say({ kind: "system", text: `  run: ${res.runId} (${res.trace.outcome}, ${res.trace.tokens} tok, ${res.trace.costUsd == null ? "subscription" : "$" + res.trace.costUsd.toFixed(4)}, ${res.trace.artifacts.length} artifact(s))` });
-        // Plan 15: gather artifacts from the conversation's run tree and show the completion action bar
-        const artifacts = gatherConversationArtifacts(props.ws, res.runId);
-        if (artifacts.length > 0) setCompletionArtifacts(artifacts);
+        // Plan 21: dock the browser — like the chat path, gated on a COMPLETED run (the old bar's
+        // unconditional @agent gather was accidental; a failed turn never auto-enters — spec §1).
+        if (res.trace.outcome === "completed") {
+          lastRunRef.current = res.runId;
+          const artifacts = gatherConversationArtifacts(props.ws, res.runId);
+          if (artifacts.length > 0) setBrowser({ rootRunId: res.runId, ui: initialBrowserUi() });
+        }
       }
     } catch (e) {
       // A pre-run failure that throws rather than returning a failed RunResult — e.g. resolveModel's
@@ -959,6 +960,14 @@ export function App(props: {
       return;
     }
     if (cmd === "artifacts") {
+      // Plan 21: bare /artifacts opens the BROWSER, scoped to the latest run (this session's last
+      // completed foreground run, else the newest ledger turn, else the all-runs scope). The
+      // subcommands below keep working until Phase 4 retires them.
+      if (!arg.trim()) {
+        const rootRunId = lastRunRef.current ?? latestRunFallback(props.ws);
+        setBrowser({ rootRunId, ui: { ...initialBrowserUi(), scope: rootRunId ? "run" : "all" } });
+        return;
+      }
       const parsed = parseArtifactsCommand(arg);
       if (parsed.kind === "error") { say({ kind: "system", text: `  ${parsed.message}` }); return; }
       if (parsed.kind === "list") {
@@ -1144,12 +1153,12 @@ export function App(props: {
       })()}
       {/* Plan 10 Phase 4: split panes (one per live agent) sit above the spinner + bar. The mode
           (bar/panes/both) and terminal size decide what shows; too small ⇒ degrade to bar-only. */}
-      {!operationRunId && layout.showPanes && (
+      {!operationRunId && !browser && layout.showPanes && (
         <SquadPanes statuses={statuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
       )}
       {/* Plan 13 (corrected): consistent agent blocks — the default squad view. Every agent (root and
           sub-agents) is rendered as a single block: header + fixed 2-line body. The block IS the record. */}
-      {!operationRunId && allBlocks.length > 0 && (() => {
+      {!operationRunId && !browser && allBlocks.length > 0 && (() => {
         const blockWidth = Math.min(termSize.columns - 4, 96);
         return (
           <Box flexDirection="column">
@@ -1176,36 +1185,25 @@ export function App(props: {
           onClose={() => { cardKeyRef.current = null; setOperationRunId(null); }}
         />
       )}
-      {/* Plan 15: completion action bar — shown when a user turn produces artifacts. */}
-      {!pending && !operationRunId && !artifactViewerOpen && completionArtifacts && completionArtifacts.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Box>
-            <Text color={actionBarFocus === 0 ? "cyan" : "gray"} bold={actionBarFocus === 0}>
-              {actionBarFocus === 0 ? "▸ " : "  "}View artifacts ({completionArtifacts.length})
-            </Text>
-            <Text dimColor>     </Text>
-            <Text color={actionBarFocus === 1 ? "cyan" : "gray"} bold={actionBarFocus === 1}>
-              {actionBarFocus === 1 ? "▸ " : "  "}Continue chatting
-            </Text>
-          </Box>
-          <Text dimColor>←/→ move · ⏎ select · esc/type to chat</Text>
-        </Box>
-      )}
-      {/* Plan 15: artifact viewer — full-screen card for browsing artifacts. */}
-      {artifactViewerOpen && completionArtifacts && (
-        <ArtifactViewer
+      {/* Plan 21: the artifact browser — docked shelf (or full-screen reader) after a completed
+          artifact-producing turn, or via /artifacts. A pending card SUSPENDS it (gate + key order). */}
+      {!pending && !operationRunId && browser && (
+        <ArtifactBrowser
           ws={props.ws}
-          artifacts={completionArtifacts}
           width={termSize.columns}
-          keyHandlerRef={cardKeyRef}
-          onClose={() => { cardKeyRef.current = null; setArtifactViewerOpen(false); }}
+          rows={termSize.rows}
+          rootRunId={browser.rootRunId}
+          st={browser.ui}
+          onChange={(ui) => setBrowser((b) => (b ? { ...b, ui } : b))}
+          keyRef={browserKeyRef}
+          onClose={() => { browserKeyRef.current = null; setBrowser(null); }}
         />
       )}
       {!pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
-      {planPanelOn && plan && !operationRunId && <PlanPanel plan={plan} width={termSize.columns} />}
+      {planPanelOn && plan && !operationRunId && !browser && <PlanPanel plan={plan} width={termSize.columns} />}
       {layout.showBar && statuses.length > 0 && <StatusBar statuses={statuses} width={termSize.columns} />}
-      {!pending && !operationRunId && (
+      {!pending && !operationRunId && !browser && (
         <>
           <Box>
             <Text color={busy ? "gray" : focusMode ? "gray" : "cyan"}>{busy ? "❯ " : focusMode ? "  " : "> "}</Text>

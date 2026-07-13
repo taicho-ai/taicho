@@ -26,7 +26,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "mcp", summary: "manage MCP servers", usage: "[list|add|remove|login] …" },
   { name: "kb", summary: "manage the knowledgebase", usage: "sync | list [filter] | forget <filter> | reindex" },
   { name: "skills", summary: "manage agent skills", usage: "list | show <id|name> | remove <id> | reindex" },
-  { name: "artifacts", summary: "view / annotate / approve artifacts", usage: "list [q] | show <handle> | annotate <handle> <text> | approve <handle> | gc" },
+  { name: "artifacts", summary: "browse the squad's artifacts (the browser; subcommands retire in Ph4)", usage: "[list|show|annotate|approve|gc …]" },
   { name: "status", summary: "show the auth source" },
   { name: "login", summary: "sign in with a ChatGPT subscription", usage: "openai" },
   { name: "logout", summary: "sign out", usage: "openai" },
