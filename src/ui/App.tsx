@@ -176,11 +176,13 @@ export function App(props: {
   // routine typing never remounts (only the deliberate programmatic sets below do).
   const [inputKey, setInputKey] = useState(0);
   const [inputSeed, setInputSeed] = useState("");
-  const setInputValue = (v: string) => { setInput(v); setInputSeed(v); setInputKey((k) => k + 1); };
+  const setInputValue = (v: string) => { inputLiveRef.current = v; setInput(v); setInputSeed(v); setInputKey((k) => k + 1); };
   // MUST be a stable reference: @inkjs/ui TextInput fires onChange from an effect whose deps include
   // `onChange` itself, and its `previousValue` lags one keystroke — so a fresh inline handler re-fires
   // onChange on every App re-render, which would reset `selected` and freeze the suggester highlight.
-  const onInputChange = useCallback((v: string) => { setInput(v); setSelected(0); }, []);
+  const inputLiveRef = useRef("");  // Plan 21: the live draft — the dock unmounts the TextInput, and a
+                                    // typed-but-unsent line must survive into the remount's seed.
+  const onInputChange = useCallback((v: string) => { inputLiveRef.current = v; setInput(v); setSelected(0); }, []);
   const [selected, setSelected] = useState(0);
   const [activity, setActivity] = useState("working…"); // live status shown by the run spinner
   const [busy, setBusy] = useState(false);
@@ -288,9 +290,16 @@ export function App(props: {
   // keyboard rides browserKeyRef — its own ref, never cardKeyRef — behind a fixed dispatch order in
   // useInput (pending card → operation view → browser → chat), so `y` can only ever answer the
   // surface that is actually on screen.
-  const [browser, setBrowser] = useState<{ rootRunId?: string; ui: BrowserUiState } | null>(null);
+  const [browser, setBrowser] = useState<{ rootRunId?: string; ui: BrowserUiState; bump: number } | null>(null);
   const browserKeyRef = useRef<CardKeyHandler | null>(null);
   const lastRunRef = useRef<string | undefined>(undefined); // last completed foreground run (bare /artifacts re-entry)
+  // Dock the browser, carrying any un-submitted draft into the TextInput's remount seed (the input
+  // unmounts while the browser owns the keyboard — without this, a line typed during the run vanishes).
+  const dockBrowser = (b: { rootRunId?: string; ui: BrowserUiState; bump: number }) => {
+    setInputSeed(inputLiveRef.current);
+    setInputKey((k) => k + 1);
+    setBrowser(b);
+  };
 
   // Plan 13 (corrected): compute block data from the block feed at the top level (hooks must not be
   // called inside conditionals or IIFEs). The consistent block view shows every AGENT (sub-agents,
@@ -483,6 +492,7 @@ export function App(props: {
     // stayed in_progress forever and boot's reconcilePlans wrongly marked it interrupted.
     settlePlanItem(taskId, wasCancelled ? "failed" : res.trace.outcome === "completed" ? "done" : res.trace.outcome === "blocked" ? "blocked" : "failed",
       wasCancelled ? "task cancelled" : `task ${taskId} ${res.trace.outcome}`);
+    if (res.trace.artifacts.length > 0 || res.trace.outputArtifacts.length > 0) bumpBrowserForArtifacts();
   };
   const failTask = (taskId: string, agentId: string, e: unknown) => {
     setTaskFields(props.ws, props.db, taskId, { status: "failed", stepStatus: "failed", summary: e instanceof Error ? e.message : String(e) });
@@ -494,14 +504,19 @@ export function App(props: {
   const settlePlanItem = (taskId: string, status: "done" | "failed" | "blocked", note: string) => {
     const settled = settlePlanItemForTask(props.ws, props.db, taskId, status, note);
     if (settled) { const st = foldPlan(props.ws, settled.planId); if (st) setPlan(st); }
-    // Plan 21 §2: a background settle while the browser is DOCKED. Its run is structurally invisible
-    // to scopes 1–2 (no delegatedOut edge, no ledger turn), so injecting a row there would lie —
-    // instead the state bump re-renders the shelf (a real change only in all-runs) and scopes 1–2 get
-    // a one-keystroke hint. Never while READING (the reader is full-screen; the shelf catches up on esc).
+  };
+  // Plan 21 §2: a background settle that PRODUCED artifacts, while the browser is open. Its run is
+  // structurally invisible to scopes 1–2 (no delegatedOut edge, no ledger turn), so injecting a row
+  // there would lie — the bump re-gathers the shelf's data (a real change only in all-runs) and
+  // scopes 1–2 get a one-keystroke hint. Set even while READING: the hint renders only on the shelf's
+  // mode line, so it simply surfaces on esc (dropping it there lost the signal permanently). Settles
+  // with NO artifacts (failed, cancelled, empty) never hint — the mode line must not promise a row
+  // that does not exist in any scope.
+  const bumpBrowserForArtifacts = () => {
     setBrowser((b) => {
-      if (!b || b.ui.reading) return b;
+      if (!b) return b;
       const hint = b.ui.scope === "all" ? undefined : "+ new from background — press 3";
-      return { ...b, ui: { ...b.ui, hint } };
+      return { ...b, bump: b.bump + 1, ui: { ...b.ui, hint } };
     });
   };
 
@@ -744,7 +759,7 @@ export function App(props: {
           // Plan 21: the run ends INSIDE the browser — dock it when the turn produced artifacts.
           lastRunRef.current = res.runId;
           const artifacts = gatherConversationArtifacts(props.ws, res.runId);
-          if (artifacts.length > 0) setBrowser({ rootRunId: res.runId, ui: initialBrowserUi() });
+          if (artifacts.length > 0) dockBrowser({ rootRunId: res.runId, ui: initialBrowserUi(), bump: 0 });
         } else {
           thread.current.pop(); // drop the user turn so failures don't accumulate as context
           maybeSayAuthExpired(res.text);
@@ -764,7 +779,7 @@ export function App(props: {
         if (res.trace.outcome === "completed") {
           lastRunRef.current = res.runId;
           const artifacts = gatherConversationArtifacts(props.ws, res.runId);
-          if (artifacts.length > 0) setBrowser({ rootRunId: res.runId, ui: initialBrowserUi() });
+          if (artifacts.length > 0) dockBrowser({ rootRunId: res.runId, ui: initialBrowserUi(), bump: 0 });
         }
       }
     } catch (e) {
@@ -986,7 +1001,7 @@ export function App(props: {
         return;
       }
       const rootRunId = lastRunRef.current ?? latestRunFallback(props.ws);
-      setBrowser({ rootRunId, ui: { ...initialBrowserUi(), scope: rootRunId ? "run" : "all" } });
+      dockBrowser({ rootRunId, ui: { ...initialBrowserUi(), scope: rootRunId ? "run" : "all" }, bump: 0 });
       return;
     }
     if (cmd === "tasks") {
@@ -1153,7 +1168,8 @@ export function App(props: {
           rows={termSize.rows}
           rootRunId={browser.rootRunId}
           st={browser.ui}
-          onChange={(ui) => setBrowser((b) => (b ? { ...b, ui } : b))}
+          bump={browser.bump}
+          onChange={(next) => setBrowser((b) => (b ? { ...b, ui: typeof next === "function" ? next(b.ui) : next } : b))}
           keyRef={browserKeyRef}
           gcRun={gcRun}
           onClose={() => { browserKeyRef.current = null; setBrowser(null); }}

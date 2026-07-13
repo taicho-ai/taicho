@@ -1255,6 +1255,74 @@ test("Plan 21 Ph4: reader verbs — `a` lands open feedback on the viewed versio
   expect(listAnnotations(ws, "verb-doc@v1").some((an) => an.kind === "approval")).toBe(true);
 });
 
+test("Plan 21 review: a bad $EDITOR must not crash the REPL — `o` reports and shows the path", async () => {
+  const prevEditor = process.env.EDITOR;
+  process.env.EDITOR = "definitely-not-a-real-editor-xyz";   // spawn ENOENT arrives as an ASYNC error event
+  try {
+    const { ws, props } = await setup({ model: mockModel("hi") });
+    saveArtifact(ws, { id: "open-doc", title: "Open Doc", body: "# body", producer: "root", runId: "root/1" });
+    const { stdin, lastFrame } = render(<App {...props} />);
+    await send(stdin, "/artifacts", ENTER);
+    await waitFor(lastFrame, "open-doc@v1");
+    await send(stdin, ENTER);                                // reader
+    await waitFor(lastFrame, "a annotate");
+    await send(stdin, "o");
+    // Without the error listener this killed the whole process (exit 1) one tick later.
+    await waitFor(lastFrame, "$EDITOR failed", 4000);
+    expect(lastFrame()).toContain("body file:");             // the path — the always-usable part
+  } finally {
+    if (prevEditor === undefined) delete process.env.EDITOR; else process.env.EDITOR = prevEditor;
+  }
+});
+
+test("Plan 21 review: search ⏎ KEEPS the query as a filter and the found row can be OPENED", async () => {
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(
+    {
+      content: [
+        { type: "tool-call", toolCallId: "a1", toolName: "save_artifact", input: JSON.stringify({ id: "fusion-notes", title: "Fusion Notes", body: "plasma facts" }) },
+        { type: "tool-call", toolCallId: "a2", toolName: "save_artifact", input: JSON.stringify({ id: "market-brief", title: "Market Brief", body: "money facts" }) },
+      ],
+      finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+    } as unknown as LanguageModelV3GenerateResult,
+    finalText("both saved."),
+  ) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "make both", ENTER);
+  await waitFor(lastFrame, "2 artifacts");
+  await send(stdin, "/");
+  await waitFor(lastFrame, "searching title");
+  await send(stdin, "f", "u", "s");
+  await waitFor(lastFrame, "1 of 2 match");
+  await send(stdin, ENTER);                                  // keep: query → filters.q, keys → shelf
+  await waitFor(lastFrame, "/fus");                          // the kept-query chip on the header
+  expect(lastFrame()).toContain("1 of 2 match");             // still narrowed — the hint was honest
+  await send(stdin, ENTER);                                  // ⏎ now OPENS the found row (the old trap)
+  await waitFor(lastFrame, "plasma facts");                  // the reader, on the match
+});
+
+test("Plan 21 review: the reader is pinned by HANDLE — a background save cannot swap it mid-read", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
+  saveArtifact(ws, { id: "steady-doc", title: "Steady Doc", body: "# steady content", producer: "root", runId: "root/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/artifacts", ENTER);                    // cold → all-runs
+  await waitFor(lastFrame, "steady-doc@v1");
+  await send(stdin, ENTER);                                  // read steady-doc
+  await waitFor(lastFrame, "steady content");
+  // A background run saves a NEWER artifact — its run group now tops the all-runs shelf, shifting
+  // every row index. An index-pinned reader swapped here (and `a`/`y` mis-targeted the ledger).
+  saveArtifact(ws, { id: "intruder", title: "Intruder", body: "# intruder content", producer: "worker", runId: "worker/99" });
+  await send(stdin, DOWN);                                   // any keystroke forces a re-render
+  await waitFor(lastFrame, "steady content");                // still reading the SAME artifact
+  expect(lastFrame()).toContain("steady-doc@v1");
+  expect(lastFrame()).not.toContain("intruder content");
+  await send(stdin, "y");                                    // the verb targets the PINNED handle
+  await waitFor(lastFrame, "✓ approved steady-doc@v1");
+  expect(listAnnotations(ws, "intruder@v1").length).toBe(0); // never the intruder
+});
+
 test("Plan 21 Ph5: `r` composes a revision request and submits it as a NORMAL turn", async () => {
   let revisionPrompt = "";
   const model = new MockLanguageModelV3({

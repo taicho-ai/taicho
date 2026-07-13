@@ -10,7 +10,7 @@
  *  card can UNMOUNT the browser outright and remount it losslessly — spec §1's suspension rule.
  *  Keys arrive via `keyRef` (a browser-OWNED ref, never cardKeyRef): App's useInput dispatches
  *  pending card → operation view → browser → chat, so ownership is fixed order, not last-writer-wins. */
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { Box, Text } from "ink";
 import { spawn } from "node:child_process";
 import { type Artifact, artifactHandle } from "../schemas/artifact";
@@ -30,6 +30,10 @@ export interface BrowserUiState {
   filters: BrowserFilters;
   sel: number;                  // indexes the ARTIFACT rows (headers are never selectable)
   reading: boolean;
+  /** The reader is pinned to a HANDLE, never a row index: the shelf recomputes from disk every
+   *  render, and a background save can reorder rows mid-read — an index would silently swap the
+   *  artifact under the reader (and under an in-flight `a`/`y`, mis-targeting an append-only ledger). */
+  readingHandle: string | null;
   scroll: number;
   search: string | null;        // "/" live query; null = closed
   filterOpen: boolean;          // the `f` chip row
@@ -45,7 +49,7 @@ export interface BrowserUiState {
 
 export function initialBrowserUi(): BrowserUiState {
   return {
-    scope: "run", sort: "run", filters: {}, sel: 0, reading: false, scroll: 0,
+    scope: "run", sort: "run", filters: {}, sel: 0, reading: false, readingHandle: null, scroll: 0,
     search: null, filterOpen: false, filterField: 0,
     feedback: null, versionsOpen: false, versionSel: 0, versionOverride: null, gcPreview: null,
   };
@@ -96,7 +100,12 @@ export function ArtifactBrowser(props: {
   rows: number;
   rootRunId?: string;
   st: BrowserUiState;
-  onChange: (next: BrowserUiState) => void;
+  /** Data-change counter from App: a background settle that produced artifacts increments it, which
+   *  is what invalidates the memoized disk pipeline below — onStep-driven re-renders reuse it. */
+  bump?: number;
+  /** Accepts a functional update so ACCUMULATING inputs (typed feedback/search, scroll) survive two
+   *  keys arriving in one stdin chunk — ink dispatches both against the same render's closure. */
+  onChange: (next: BrowserUiState | ((prev: BrowserUiState) => BrowserUiState)) => void;
   keyRef: React.MutableRefObject<CardKeyHandler | null>;
   onClose: () => void;
   /** App-owned GC (it computes the protected refs from traces + task refs); dryRun previews. */
@@ -105,19 +114,28 @@ export function ArtifactBrowser(props: {
 }) {
   const { ws, st, onChange } = props;
 
-  // Data pipeline — pure, recomputed per render (the stores are cheap file/manifest reads at squad
-  // scale, and the shelf re-renders only on state changes or a settle-triggered bump).
-  const inScope = resolveScope(ws, st.scope, { rootRunId: props.rootRunId });
+  // Data pipeline — pure functions over the stores, MEMOIZED: App re-renders on every live
+  // background onStep event (statuses) and on the block ticker, and this pipeline is synchronous
+  // filesystem I/O (ledgers, traces, annotations per row). Disk changes the shelf must see arrive
+  // via `bump` (settle-with-artifacts) or a browser state change (scope/filters/verbs re-key it).
   const filters: BrowserFilters = st.search != null ? { ...st.filters, q: st.search } : st.filters;
-  const matched = applyFilters(ws, inScope, filters);
-  const rows = shelfRows(ws, matched, st.scope, st.sort);
+  const filterKey = JSON.stringify(filters);
+  const { inScope, matched, rows } = useMemo(() => {
+    const inScope = resolveScope(ws, st.scope, { rootRunId: props.rootRunId });
+    const matched = applyFilters(ws, inScope, JSON.parse(filterKey) as BrowserFilters);
+    return { inScope, matched, rows: shelfRows(ws, matched, st.scope, st.sort) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws, st.scope, st.sort, filterKey, props.rootRunId, props.bump, st.note, st.gcPreview]);
   const arts = artifactRows(rows);
   const sel = Math.min(st.sel, Math.max(0, arts.length - 1));
   const rowArtifact: Artifact | undefined = arts[sel]?.artifact;
-  // The reader may be pinned to an exact version via `v`; the shelf always shows latest-per-id.
-  const current: Artifact | undefined = st.reading && st.versionOverride
-    ? readArtifact(ws, st.versionOverride) ?? rowArtifact
-    : rowArtifact;
+  // The reader resolves its PINNED handle (an exact version via `v` wins); the shelf's row highlight
+  // may drift with a reorder — cosmetic — but the read/annotate/approve target never does.
+  const pinned = st.reading ? (st.versionOverride ?? st.readingHandle) : null;
+  const current: Artifact | undefined = pinned ? readArtifact(ws, pinned) ?? rowArtifact : rowArtifact;
+  // The pinned artifact's position in the CURRENT list (for ←/→ + the "n/m" label), found by id.
+  const pinnedIdx = current ? arts.findIndex((r) => r.artifact.id === current.id) : -1;
+  const readerIdx = pinnedIdx >= 0 ? pinnedIdx : sel;
 
   const handler: CardKeyHandler = (input, key) => {
     if (st.reading) {
@@ -132,9 +150,9 @@ export function ArtifactBrowser(props: {
           } else onChange({ ...st, feedback: null });
           return;
         }
-        if (key.backspace || key.delete) { onChange({ ...st, feedback: st.feedback.slice(0, -1) }); return; }
+        if (key.backspace || key.delete) { onChange((prev) => ({ ...prev, feedback: (prev.feedback ?? "").slice(0, -1) })); return; }
         if (input && !key.ctrl && !key.meta && !key.upArrow && !key.downArrow && !key.tab) {
-          onChange({ ...st, feedback: st.feedback + input });
+          onChange((prev) => ({ ...prev, feedback: (prev.feedback ?? "") + input }));
           return;
         }
         return;
@@ -152,11 +170,25 @@ export function ArtifactBrowser(props: {
         }
         return;
       }
-      if (key.escape) { onChange({ ...st, reading: false, scroll: 0, versionOverride: null, note: undefined }); return; }
-      if (key.upArrow) { onChange({ ...st, scroll: Math.max(0, st.scroll - 1) }); return; }
-      if (key.downArrow) { onChange({ ...st, scroll: st.scroll + 1 }); return; }   // clamped at render
-      if (key.leftArrow) { onChange({ ...st, sel: Math.max(0, sel - 1), scroll: 0, versionOverride: null, note: undefined }); return; }
-      if (key.rightArrow) { onChange({ ...st, sel: Math.min(arts.length - 1, sel + 1), scroll: 0, versionOverride: null, note: undefined }); return; }
+      if (key.escape) { onChange({ ...st, reading: false, readingHandle: null, scroll: 0, versionOverride: null, note: undefined }); return; }
+      if (key.upArrow) { onChange((prev) => ({ ...prev, scroll: Math.max(0, prev.scroll - 1) })); return; }
+      if (key.downArrow) {
+        // clamp HERE, not just at render — a render-only clamp accumulates invisible scroll debt
+        // that ↑ must repay one press at a time (the old viewer clamped in the handler too).
+        const max = current ? Math.max(0, (readArtifactBody(ws, artifactHandle(current))?.toString("utf8") ?? "").split("\n").length - READER_LINES) : 0;
+        onChange((prev) => ({ ...prev, scroll: Math.min(max, prev.scroll + 1) }));
+        return;
+      }
+      if (key.leftArrow) {
+        const prevArt = arts[Math.max(0, readerIdx - 1)]?.artifact;
+        if (prevArt) onChange({ ...st, sel: Math.max(0, readerIdx - 1), readingHandle: artifactHandle(prevArt), scroll: 0, versionOverride: null, note: undefined });
+        return;
+      }
+      if (key.rightArrow) {
+        const nextArt = arts[Math.min(arts.length - 1, readerIdx + 1)]?.artifact;
+        if (nextArt) onChange({ ...st, sel: Math.min(arts.length - 1, readerIdx + 1), readingHandle: artifactHandle(nextArt), scroll: 0, versionOverride: null, note: undefined });
+        return;
+      }
       if (input === "a") { onChange({ ...st, feedback: "" }); return; }
       if (input === "y" && current) {
         const an = annotateArtifact(ws, { target: artifactHandle(current), author: "human", body: "approved by captain", kind: "approval" });
@@ -182,12 +214,14 @@ export function ArtifactBrowser(props: {
         }
         const editor = process.env.EDITOR || process.env.VISUAL;
         if (editor) {
-          try {
-            spawn(editor, [path], { detached: true, stdio: "ignore" }).unref();
-            onChange({ ...st, note: `opened in ${editor}: ${path}` });
-          } catch (e) {
-            onChange({ ...st, note: `open failed (${e instanceof Error ? e.message : String(e)}): ${path}` });
-          }
+          // spawn() reports ENOENT ASYNCHRONOUSLY on the child's 'error' event — with no listener it
+          // is an uncaught exception that kills the whole REPL (a try/catch here is dead code for it).
+          // Attach the listener, and always show the PATH: a detached GUI editor may open, a terminal
+          // editor (vim) can't take the tty from under Ink — the path is the honest, always-usable part.
+          const child = spawn(editor, [path], { detached: true, stdio: "ignore" });
+          child.on("error", (e) => onChange((prev) => ({ ...prev, note: `$EDITOR failed (${e.message}) — body file: ${path}` })));
+          child.unref();
+          onChange({ ...st, note: `↗ sent to $EDITOR (${editor}) — body file: ${path}` });
         } else onChange({ ...st, note: `no $EDITOR — body file: ${path}` });
         return;
       }
@@ -197,6 +231,15 @@ export function ArtifactBrowser(props: {
     // `g` dry-run preview awaiting confirm.
     if (st.gcPreview) {
       if (key.return && props.gcRun) {
+        // TOCTOU guard: the store may have changed while the confirm line sat waiting (a background
+        // save mints versions). Re-dry and compare — if the would-archive set moved, REFRESH the
+        // preview instead of archiving things the captain never saw; a second ⏎ confirms the new set.
+        const recheck = props.gcRun(true);
+        const same = recheck.archived.length === st.gcPreview.length && recheck.archived.every((h, i) => st.gcPreview![i] === h);
+        if (!same) {
+          onChange({ ...st, gcPreview: recheck.archived, note: "store changed while confirming — review the new set" });
+          return;
+        }
         const r = props.gcRun(false);
         onChange({ ...st, gcPreview: null, note: `gc: archived ${r.archived.length} version(s), kept ${r.kept}` });
         return;
@@ -206,11 +249,14 @@ export function ArtifactBrowser(props: {
     }
     // "/" search owns printable keys while open: type to narrow, ⏎ keeps the query, esc clears it.
     if (st.search != null) {
-      if (key.escape) { onChange({ ...st, search: null }); return; }
-      if (key.return) { onChange({ ...st, search: st.search || null }); return; }
-      if (key.backspace || key.delete) { onChange({ ...st, search: st.search.slice(0, -1) }); return; }
+      if (key.escape) { onChange({ ...st, search: null }); return; }  // esc DISCARDS the query
+      // ⏎ KEEPS the query: it moves into filters.q (the honesty line stays narrowed) and the keys
+      // return to the shelf so the found row can actually be navigated and opened. `/` reopens with
+      // the kept query preloaded for editing.
+      if (key.return) { onChange({ ...st, search: null, filters: { ...st.filters, q: st.search.trim() || undefined } }); return; }
+      if (key.backspace || key.delete) { onChange((prev) => ({ ...prev, search: (prev.search ?? "").slice(0, -1) })); return; }
       if (input && !key.ctrl && !key.meta && !key.upArrow && !key.downArrow && !key.tab) {
-        onChange({ ...st, search: st.search + input, sel: 0 });
+        onChange((prev) => ({ ...prev, search: (prev.search ?? "") + input, sel: 0 }));
         return;
       }
       return;
@@ -227,7 +273,7 @@ export function ArtifactBrowser(props: {
       return;
     }
     if (key.escape) { props.onClose(); return; }
-    if (input === "/") { onChange({ ...st, search: "" }); return; }
+    if (input === "/") { onChange({ ...st, search: st.filters.q ?? "", filters: { ...st.filters, q: undefined } }); return; }
     if (input === "f") { onChange({ ...st, filterOpen: true, filterField: 0 }); return; }
     if (input === "g" && st.scope === "all" && props.gcRun) {
       const dry = props.gcRun(true);
@@ -236,7 +282,7 @@ export function ArtifactBrowser(props: {
     }
     if (key.upArrow) { onChange({ ...st, sel: Math.max(0, sel - 1) }); return; }
     if (key.downArrow) { onChange({ ...st, sel: Math.min(Math.max(0, arts.length - 1), sel + 1) }); return; }
-    if (key.return) { if (rowArtifact) onChange({ ...st, reading: true, scroll: 0, note: undefined }); return; }
+    if (key.return) { if (rowArtifact) onChange({ ...st, reading: true, readingHandle: artifactHandle(rowArtifact), scroll: 0, note: undefined }); return; }
     if (key.tab) {
       const i = SCOPES.findIndex((s) => s.key === st.scope);
       onChange({ ...st, scope: SCOPES[(i + 1) % SCOPES.length]!.key, sel: 0, hint: undefined });
@@ -288,7 +334,7 @@ export function ArtifactBrowser(props: {
     return (
       <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} width={props.width}>
         <Text dimColor>← esc   / {current.title}</Text>
-        <Text color="cyan" bold>{handle} · {current.producer} · {ageLabel(current.created)} ago · {sel + 1}/{arts.length} · {current.runId}</Text>
+        <Text color="cyan" bold>{handle} · {current.producer} · {ageLabel(current.created)} ago · {readerIdx + 1}/{arts.length} · {current.runId}</Text>
         <Text> </Text>
         {bodyLines.slice(scroll, scroll + visible).map((line, i) => (
           <Text key={i}>{renderMarkdown(line, props.width - 4)}</Text>
@@ -357,6 +403,7 @@ export function ArtifactBrowser(props: {
         <Text color={matched.length === inScope.length ? undefined : "yellow"} dimColor={matched.length === inScope.length}>
           {countLine(matched.length, inScope.length)}
         </Text>
+        {st.filters.q && st.search == null && <Text color="yellow"> · /{st.filters.q}</Text>}
         {st.hint && <Text color="yellow"> · {st.hint}</Text>}
       </Box>
       {st.filterOpen && (
