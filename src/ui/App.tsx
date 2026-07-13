@@ -1157,6 +1157,7 @@ export function App(props: {
           keyRef={browserKeyRef}
           gcRun={gcRun}
           onClose={() => { browserKeyRef.current = null; setBrowser(null); }}
+          onSubmitChat={(text) => { browserKeyRef.current = null; setBrowser(null); void submit(text); }}
         />
       )}
       {!pending && busy && <RunStatus activity={activity} />}

@@ -1255,6 +1255,32 @@ test("Plan 21 Ph4: reader verbs — `a` lands open feedback on the viewed versio
   expect(listAnnotations(ws, "verb-doc@v1").some((an) => an.kind === "approval")).toBe(true);
 });
 
+test("Plan 21 Ph5: `r` composes a revision request and submits it as a NORMAL turn", async () => {
+  let revisionPrompt = "";
+  const model = new MockLanguageModelV3({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    doGenerate: (async ({ prompt }: { prompt: unknown }) => {
+      const s = JSON.stringify(prompt);
+      if (s.includes("revise rev-doc@v1")) { revisionPrompt = s; return finalText("revision underway"); }
+      return finalText("hi");
+    }) as any,
+  });
+  const { ws, props } = await setup({ model });
+  saveArtifact(ws, { id: "rev-doc", title: "Rev Doc", body: "# draft", producer: "root", runId: "root/1" });
+  annotateArtifact(ws, { target: "rev-doc@v1", author: "checker", body: "needs a cost table" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/artifacts", ENTER);
+  await waitFor(lastFrame, "rev-doc@v1");
+  await send(stdin, ENTER);                                // reader
+  await waitFor(lastFrame, "r revise");
+  await send(stdin, "r");                                  // one key: compose + submit
+  await waitFor(lastFrame, "revision underway");           // the turn ran through the NORMAL chat path
+  expect(lastFrame()).not.toContain("a annotate");         // the browser closed for the turn
+  expect(revisionPrompt).toContain("revise rev-doc@v1");   // the composed request named the handle…
+  expect(revisionPrompt).toContain("needs a cost table");  // …and carried the open feedback
+});
+
 test("Plan 21 Ph4: shelf `g` (all-runs) previews gc with a dry run, ⏎ confirms — same code path", async () => {
   const { ws, props } = await setup({ model: mockModel("hi") });
   for (let i = 1; i <= 5; i++) saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: "root/1" });

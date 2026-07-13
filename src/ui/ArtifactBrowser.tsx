@@ -164,6 +164,15 @@ export function ArtifactBrowser(props: {
         return;
       }
       if (input === "v" && current) { onChange({ ...st, versionsOpen: true, versionSel: Math.max(0, artifactVersions(ws, current.id).length - 1) }); return; }
+      // `r` request revision (Phase 5): composes and submits a NORMAL chat turn — root plans/delegates
+      // it, approvals apply, and the revision run's completion re-docks the browser with the new
+      // version on top. One key, not a new run type; the money it spends goes through the same gates
+      // a typed request would.
+      if (input === "r" && current && props.onSubmitChat) {
+        const fb = openFeedback(ws, artifactHandle(current)).map((an) => an.body).join("; ");
+        props.onSubmitChat(`revise ${artifactHandle(current)}: ${fb || "the captain requests a revision"}`);
+        return;
+      }
       if (input === "o" && current) {
         const path = artifactBodyPath(ws, artifactHandle(current));
         if (!path) {
@@ -295,7 +304,7 @@ export function ArtifactBrowser(props: {
         {st.feedback != null ? (
           <Text><Text dimColor>feedback ▸ </Text>{st.feedback}<Text color="cyan">▏</Text><Text dimColor>  (⏎ save · esc cancel)</Text></Text>
         ) : (
-          <Text dimColor>a annotate · y approve · v versions · o $EDITOR · ←/→ prev/next · ↑/↓ scroll · esc shelf</Text>
+          <Text dimColor>a annotate · y approve · r revise · v versions · o $EDITOR · ←/→ prev/next · ↑/↓ scroll · esc shelf</Text>
         )}
       </Box>
     );
