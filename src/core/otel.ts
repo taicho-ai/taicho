@@ -1,16 +1,16 @@
 /** Plan 16: OpenTelemetry instrumentation. The engine already produces rich internal evidence
- *  (transcript.jsonl, RunTrace, the /trace waterfall) — but it is taicho-only. This module exports the
- *  SAME model/tool/delegation activity as STANDARD OpenTelemetry: `gen_ai.*` semantic-convention spans
- *  (via the AI SDK's experimental_telemetry) nested under a taicho run span, plus a small metrics
+ *  (transcript.jsonl, RunTrace) — but it is taicho-only. This module exports the SAME
+ *  model/tool/delegation activity as STANDARD OpenTelemetry: `gen_ai.*` semantic-convention spans —
+ *  taicho-native "chat <model> · iter N" spans opened in loop.ts (NOT the AI SDK's
+ *  experimental_telemetry, which is unused) — nested under a taicho run span, plus a small metrics
  *  pipeline. Everything ships over OTLP to any collector (Jaeger, Grafana Tempo, Honeycomb, LangSmith…).
  *
  *  OFF BY DEFAULT: with no OTLP endpoint configured, initTelemetry returns undefined and the engine
  *  does zero extra work — no provider, no spans, no network. Turning it on is one env var
  *  (OTEL_EXPORTER_OTLP_ENDPOINT), read by the standard OTel SDK exactly as every other OTel app reads it.
  *
- *  This is Plan 16 Phase 1 ("emit alongside"): OTel spans are produced in addition to today's transcript
- *  evidence, so /trace is unchanged and the export is purely additive. Phases 2/3 (repointing /trace at
- *  the span store, retiring the transcript-derived path) are follow-ups. */
+ *  Since Plan 17 this export is the ONLY trace-visualization path — the internal /trace waterfall is
+ *  retired; users point the standard OTEL_* env vars at their own backend (docs/observability.md). */
 import { metrics, context as otelContextApi, type Tracer, type Histogram, type Counter, type UpDownCounter } from "@opentelemetry/api";
 import {
   NodeTracerProvider,
@@ -48,7 +48,8 @@ export interface Telemetry {
    *  System Architecture graph — shows each agent as its own service and draws the delegation edges,
    *  instead of one undifferentiated "taicho". Providers are cached per agent. */
   tracerFor(agent: string): Tracer;
-  /** Whether prompt/completion text may leave the process (OTEL_TAICHO_CAPTURE_CONTENT). Off by default. */
+  /** Whether prompt/completion text may leave the process. ON by default; opt OUT with
+   *  OTEL_TAICHO_CAPTURE_CONTENT=0|false|no|off (unrecognized values leave it on). */
   captureContent: boolean;
   /** Per model call → gen_ai token-usage + operation-duration histograms + the taicho cost counter. */
   recordModelCall(m: ModelCallMetric): void;
