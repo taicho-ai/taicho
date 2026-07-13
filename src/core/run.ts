@@ -146,7 +146,7 @@ export interface RunContext {
   verifications: VerificationRecord[];
   /** The independent delegation checker: child output + criteria → verdict, via the delegating
    *  agent's own resolved model (same plumbing the loop uses). */
-  checkCriteria: (p: { goal: string; criteria: string; output: string }) => Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string }>;
+  checkCriteria: (p: { goal: string; criteria: string; output: string }) => Promise<{ verdict: VerificationVerdict; tokens: number; costUsd: number | null; costNote?: string; checkerError?: boolean }>;
   /** Surface a breadcrumb to the captain (a failed verification, a team routing decision) or a plan
    *  snapshot (Plan 18), routed via onStep. Phase-less by construction, so the status reducer ignores it. */
   emit?: (info: { note?: string; plan?: PlanState }) => void;

@@ -25,6 +25,7 @@ export const VerificationRecord = z.object({
   tokens: z.number().default(0),              // the checker call's own spend (advisory; not a hard budget)
   costUsd: z.number().nullable().default(0),  // null on a subscription checker (no measurable USD) — never a fabricated 0
   costNote: z.string().optional(),            // "subscription" when the checker ran on an unpriced subscription model
+  checkerError: z.boolean().optional(),       // Plan 20: the checker itself never ran (outage/cancel) — the verdict means "unverified", not a judged fail
 });
 export type VerificationRecord = z.infer<typeof VerificationRecord>;
 

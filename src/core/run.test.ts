@@ -737,6 +737,31 @@ test("criteria that fails twice surfaces the result WITH the failed verdict atta
   expect(tr).toContain("still missing Y");
 });
 
+test("Plan 20: checker OUTAGE ⇒ no retry, result surfaces UNVERIFIED with checkerError on the record", async () => {
+  const { ws, db } = await boot();
+  bossAndWorker(ws, db);
+  // Content-branching mock (order-independent, survives SDK-level retries of the throwing call):
+  // the checker is the only prompt carrying VERIFIER_SYSTEM's "impartial acceptance checker".
+  const model = new MockLanguageModelV3({
+    doGenerate: (async (opts: { prompt: unknown }) => {
+      const prompt = JSON.stringify(opts.prompt);
+      if (prompt.includes("impartial acceptance checker")) throw Object.assign(new Error("provider down"), { code: "ECONNREFUSED" });
+      if (prompt.includes("You work.")) return text("worker output");            // the child
+      if (prompt.includes("checker unavailable")) return text("boss done");      // boss, after the tool result came back
+      return call("delegate_task", { to: "worker", goal: "write X", criteria: "must mention Y" });
+    }) as any,
+  });
+  const boss = await loadAgent(ws, "boss");
+  const res = await executeRun(makeDeps({ ws, db, model }), { agent: boss, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.text).toBe("boss done");
+  expect(res.trace.delegatedOut.length).toBe(1);                 // the child ran ONCE — no pointless retry against a down judge
+  expect(res.trace.verification.length).toBe(1);
+  expect(res.trace.verification[0].checkerError).toBe(true);
+  expect(res.trace.verification[0].retried).toBe(false);
+  expect(res.trace.verification[0].verdict.pass).toBe(false);
+  expect(res.trace.verification[0].verdict.reasons.join(" ")).toContain("checker unavailable");
+});
+
 test("a FAILED verdict annotates only the child's LATEST output version — a same-id multi-save doesn't smear (PR #20)", async () => {
   const { ws, db } = await boot();
   // workItems:1 ⇒ the failing check's retry is refused, so exactly one child run (which saves the same
@@ -919,6 +944,19 @@ test("non-subscription checker prices its real spend: runChecker returns a USD c
   expect(r.costUsd).toBeGreaterThan(0); // a real cost — folding it is exactly what closes the cost-honesty gap
   expect(r.costNote).toBeUndefined();   // priced run ⇒ no subscription note
   expect(r.tokens).toBeGreaterThan(0);
+});
+
+test("Plan 20: a checker that never RAN (model error) is not a pass — checkerError verdict, pass=false", async () => {
+  const { ws } = await boot();
+  const agent = await loadAgent(ws, "root");
+  // Every attempt throws (the SDK may retry a network-shaped error; the outage outlasts the retries).
+  const model = new MockLanguageModelV3({
+    doStream: (() => { throw Object.assign(new Error("provider down"), { code: "ECONNREFUSED" }); }) as any,
+  });
+  const r = await runChecker({ model, agent, subscription: false, goal: "g", criteria: "c", output: "o" });
+  expect(r.checkerError).toBe(true);
+  expect(r.verdict.pass).toBe(false);   // OLD behavior: "[error]" parsed to a non-blocking advisory PASS
+  expect(r.verdict.reasons.join(" ")).toContain("checker unavailable");
 });
 
 // ---------------------------------------------------------------------------
