@@ -1316,7 +1316,7 @@ test("Plan 21: a completed turn with artifacts DOCKS the browser; ⏎ opens the 
   await send(stdin, ENTER);                              // ⏎ → the full-screen reader
   await waitFor(lastFrame, "Hello");                     // the body renders
   expect(lastFrame()).toContain("test-doc@v1 · root");   // reader header: handle · producer
-  expect(lastFrame()).toContain("esc shelf");
+  expect(lastFrame()).toContain("a annotate");            // the verb row (its tail wraps at narrow widths)
 
   await send(stdin, ESC);                                // reader → shelf
   await waitFor(lastFrame, "ARTIFACTS");

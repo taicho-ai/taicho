@@ -239,33 +239,37 @@ a drill-in showing the brief, full output, tools, and artifact); `esc` returns f
   `shift+tab`→`⏎` operation view. File assertions (including the child's reply NOT flooding
   scrollback) decide pass/fail.
 
-### Artifact viewer + completion action bar (Plan 15)
+### The artifact browser (Plan 21 — replaces Plan 15's bar + viewer)
 
-`ui/ArtifactViewer.tsx` is a full-screen card that renders the selected artifact's body as markdown,
-scrollable. The completion action bar appears when a user turn produces artifacts, offering "View
-artifacts (N)" and "Continue chatting" options.
+`ui/ArtifactBrowser.tsx` is a mode, not a command set: a COMPLETED `triggeredBy:"user"` turn with ≥1
+artifact in its subtree DOCKS the shelf over the (still visible) chat — no bar, no command — and `⏎`
+opens the full-screen reader. `esc` chains reader → shelf → chat; bare `/artifacts` re-enters scoped
+to the latest run. Scopes: `tab`/`1·2·3` — this run / conversation (all-agent ledger union) / all
+runs (grouped by producing run, `s` cycles sorts). `f` opens filter chips, `/` live-searches on the
+browser's OWN input line; the mode line always admits a narrowed window ("4 of 31 match"). Reader
+verbs: `a` annotate inline (open feedback on the VIEWED version), `y` approve, `r` request revision
+(composes + submits a normal chat turn), `v` versions, `o` `$EDITOR`; shelf `g` (all-runs) previews
+GC with `GcOptions.dryRun` before archiving on confirm.
 
-**Completion action bar:** When a `triggeredBy:"user"` turn completes and its delegation subtree
-produced ≥1 artifact, the app shows a keyboard-navigable action row pinned above the input:
-`▸ View artifacts (N) · Continue chatting`. `←/→` move the focus; `⏎` selects; `esc`/type → chat.
-Turns that produced no artifacts show no bar.
+**Keyboard ownership is a fixed dispatch order** — pending card → operation view → browser (its own
+`browserKeyRef`, published DURING RENDER per the ink registration race) → chat. A pending approval
+SUSPENDS the dock outright (render gate + key order), so `y` can only ever answer the surface on
+screen; the dock remounts losslessly from App-held `browserState`. While docked, panes/blocks/plan
+panel yield (the one-line status bar stays) and the main TextInput unmounts.
 
-**Artifact viewer:** "View artifacts" opens a full-screen card (cardKeyRef-owned, same pattern as
-`OperationView`). Renders the selected artifact's **body as markdown**, scrollable
-(`↑/↓`). Header shows handle · producer · age · position. Browse with `←/→` (prev/next artifact),
-`tab` opens the jump list, `esc` returns to chat.
-
-**Data source:** `gatherConversationArtifacts(ws, rootRunId)` walks the delegation subtree, collects
-artifact handles from each run's `trace.artifacts` and `trace.outputArtifacts`, de-dups by handle,
-and returns them ordered by `created` desc (latest first). Resolves via `readArtifact` (envelope only).
-
-- **Pure units** — `gatherConversationArtifacts` lives in `src/core/conversation-artifacts.ts`; its
-  old pure-unit coverage was deleted with `trace-tree.test.ts` in Plan 17 and has NOT been replaced
-  (no `conversation-artifacts.test.ts` exists) — today it is covered only through the Layer-1 App
-  tests below.
-- **Layer 1 (Ink)** — `App.test.tsx` covers the completion action bar and artifact viewer: a turn
-  that produces artifacts shows the bar with correct count; `⏎` opens the viewer on the newest
-  artifact; `esc` returns to chat; a turn with no artifacts shows no bar.
+- **Pure units** — `ui/browser-model.test.ts`: scope resolution (run subtree / ledger union / store),
+  `latestRunFallback`, the filter predicate per chip, badges (approvals never inflate ⚑), run-grouping
+  + sorts, the honesty line. `gatherConversationArtifacts` itself is still covered through these +
+  the Layer-1 tests (no colocated test of its own).
+- **Layer 1 (Ink)** — the `Plan 21` tests in `App.test.tsx`: auto-enter on completed artifact turns
+  (never failed turns, never background settles — those hint); the esc chain; card-suspension (`y`
+  answers the card, dock returns with state); scope round-trip; settle hint; `/` search + `f` chips;
+  reader verbs `a`/`y`; the `g` dry-run→confirm pair; `r` composing a real turn; `/artifacts`
+  re-entry; subcommands pointing at the browser.
+- **Layer 4 (VHS)** — `bun scripts/e2e-evidence.ts artifact-browser`: the dock appears by ITSELF
+  after a real delegation, `⏎` reader, `a` types feedback that must land as an OPEN annotation on the
+  exact version, esc chain out. Keystone assertions: the body marker is in the artifact file, never
+  in root's transcript; the typed feedback is in `annotations.jsonl`.
 
 ## Adding a dependency (testing-adjacent gotcha)
 

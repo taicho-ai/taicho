@@ -135,7 +135,7 @@ this plan is captain-surface only.
 
 - The artifact STORE's semantics — immutability, versioning, GC protections, the annotations
   ledger — are untouched. Exactly three additive surfaces are in scope, all named above:
-  `ArtifactFilter.since`, `GcOptions.dryRun`, and `artifactBodyPath(ws, handle)`. Nothing else.
+  `GcOptions.dryRun` and `artifactBodyPath(ws, handle)`. Nothing else. (A planned `ArtifactFilter.since` was cut during implementation: scopes 1–2 never flow through `listArtifacts`, so the browser-layer `since` predicate — which covers every scope — made the store addition dead code.)
 - The run-end path stays exception-safe: auto-enter is UI-only, downstream of turn completion —
   a browser bug must never fail a run.
 - Blocks/panes/status bar behavior **while the browser is not docked** is unchanged; while docked,
@@ -189,7 +189,7 @@ operation view → browser → chat) — never `cardKeyRef`.
 2. **Scopes** — conversation (all-agent ledger union) + all-runs with run-grouping and `s` sorts;
    background-settle scope-hint line.
 3. **Filters + search** — chip row, `/` live search on the browser's own input, honesty line,
-   `ArtifactFilter.since`.
+   the browser-layer `since` predicate (see §6 — the store addition was cut as dead code).
 4. **Verbs** — `a` `y` `o` `v` `g` (`GcOptions.dryRun`, `artifactBodyPath`); port the gc protection
    tests to the store level; retire the `/artifacts` subcommands + `parseArtifactsCommand`.
 5. **`r` request revision** — compose+submit a normal turn from the reader.

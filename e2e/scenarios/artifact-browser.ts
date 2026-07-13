@@ -101,7 +101,7 @@ const scenario: Scenario = {
   // evidence/artifact-browser/ and records them in the manifest). dock.png shows the self-docked
   // shelf over the chat; reader.png shows the full-screen reader. Keep in sync with the tape.
   video: "session.mp4",
-  screenshots: ["approval-card.png", "dock.png", "reader.png", "final.png"],
+  screenshots: ["approval-card.png", "dock.png", "reader.png", "annotate.png", "final.png"],
 
   // Every load-bearing wait gates Enter/Screenshot on stable on-screen text (Wait+Screen), never a
   // fixed Sleep — the SLOW is in the e2e MODEL (the ~4s child hold), not the tape.
@@ -133,6 +133,14 @@ Enter
 Wait+Screen@15s /Proof Document/
 Sleep 700ms
 Screenshot reader.png
+Type "a"
+Wait+Screen@10s /feedback/
+Type "add a cost table"
+Sleep 300ms
+Enter
+Wait+Screen@10s /feedback on proof-doc/
+Sleep 500ms
+Screenshot annotate.png
 Escape
 Sleep 500ms
 Wait+Screen@10s /ARTIFACTS/
@@ -212,6 +220,17 @@ Sleep 500ms
         const { name } = secondRootRun(ws);
         const transcript = readFileSync(join(ws, "runs", "root", name, "transcript.jsonl"), "utf8");
         return { pass: !transcript.includes(BODY_MARKER), actual: transcript.includes(BODY_MARKER) ? "<body leaked into transcript>" : "body not in transcript" };
+      },
+    ),
+    check(
+      "the reader's `a` verb landed OPEN feedback on the viewed version",
+      `artifacts/${ARTIFACT_ID}/annotations.jsonl contains the typed feedback`,
+      () => {
+        const f = join(ws, "artifacts", ARTIFACT_ID, "annotations.jsonl");
+        if (!existsSync(f)) return { pass: false, actual: "<no annotations file>" };
+        const log = readFileSync(f, "utf8");
+        const pass = log.includes("add a cost table") && log.includes('"kind":"feedback"');
+        return { pass, actual: pass ? "feedback annotation present" : "<feedback missing>" };
       },
     ),
     check(

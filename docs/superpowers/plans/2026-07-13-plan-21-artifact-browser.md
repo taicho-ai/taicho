@@ -1,6 +1,6 @@
 # Plan 21 — Artifact Browser Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Implement `docs/superpowers/specs/2026-07-13-plan-21-artifact-browser-design.md` — the docked
 artifact browser with a full-screen reader, replacing the completion action bar and the `/artifacts`
@@ -55,7 +55,7 @@ export function countLine(matched: number, total: number, scope: BrowserScope): 
 - Phase 1 needs only `resolveScope("run")` + `shelfRows` flat + `countLine`; write the full module now,
   tests cover everything (the module is pure + cheap to finish in one pass).
 
-- [ ] Steps: failing tests for each function over a temp workspace with seeded artifacts/annotations
+- [x] Steps: failing tests for each function over a temp workspace with seeded artifacts/annotations
   (reuse `saveArtifact`/`annotateArtifact` helpers as `artifacts.test.ts` does) → implement → green → commit.
 
 ### Task 2 (Phase 1): `ArtifactBrowser.tsx` — Shelf + Reader, state lifted to App
@@ -91,7 +91,7 @@ export function ArtifactBrowser(props: {
 - Keys (published to `keyRef` via effect — App's dispatch order makes the timing race moot):
   shelf: ↑↓ move, `⏎` read, `tab`/`1|2|3` scope (Phase 2 enables 2/3), esc → `onClose()`;
   reader: ↑↓ scroll, ←/→ prev/next, esc → shelf.
-- [ ] Steps: build; Layer-1 coverage arrives in Task 3's App tests (the component alone isn't rendered
+- [x] Steps: build; Layer-1 coverage arrives in Task 3's App tests (the component alone isn't rendered
   outside App). `bun run typecheck` green → commit.
 
 ### Task 3 (Phase 1): App wiring — auto-enter, precedence, deletions
@@ -127,7 +127,7 @@ if (artifacts.length > 0) setBrowser({ rootRunId: res.runId, ui: initialBrowserU
 - `prompt.ts:28`: "the captain views artifacts via the completion action bar" → "the captain browses
   artifacts in the artifact browser (it opens when a turn produces artifacts)".
 - Delete `ArtifactViewer.tsx` + its import (the Reader supersedes it).
-- [ ] Layer-1 tests (write FIRST, red): auto-enter on completed artifact turn ("ARTIFACTS" + row on
+- [x] Layer-1 tests (write FIRST, red): auto-enter on completed artifact turn ("ARTIFACTS" + row on
   frame); NOT on failed turn; `⏎` → reader shows body; esc chain reader→shelf→chat; `/artifacts`
   re-enters; **card-suspension**: while docked, a background dispatch raises `create_agent` approval →
   card visible + dock gone + `y` approves the CARD (agent exists) + dock returns with selection intact;
@@ -135,58 +135,58 @@ if (artifacts.length > 0) setBrowser({ rootRunId: res.runId, ui: initialBrowserU
 
 ### Task 4 (Phase 1): VHS swap + docs touch
 
-- [ ] Replace `e2e/scenarios/artifact-viewer.ts` with `e2e/scenarios/artifact-browser.ts` (same
+- [x] Replace `e2e/scenarios/artifact-viewer.ts` with `e2e/scenarios/artifact-browser.ts` (same
   `artifact-viewer` e2e-model mode): gates `Wait /ARTIFACTS/` (dock), `⏎` → `Wait /Dossier|# /`
   (reader body), screenshots dock + reader; keep the file assertions (artifact exists, body marker
   not in root transcript). TESTING.md quick-ref + Plan 15 section updated to the browser.
-- [ ] Run `bun scripts/e2e-evidence.ts artifact-browser` → PASS. Commit. **Phase 1 gate:** typecheck +
+- [x] Run `bun scripts/e2e-evidence.ts artifact-browser` → PASS. Commit. **Phase 1 gate:** typecheck +
   full `bun test`.
 
 ### Task 5 (Phase 2): scopes
 
-- [ ] browser-model: already built (Task 1). Wire `tab`/`1|2|3` in the Shelf; group headers render for
+- [x] browser-model: already built (Task 1). Wire `tab`/`1|2|3` in the Shelf; group headers render for
   all-runs; `s` cycles sort. Cold `/artifacts` with no session run → `latestRunFallback`, else scope "all".
-- [ ] Background settle → if `browser` docked: re-gather current scope; scopes 1–2 set
+- [x] Background settle → if `browser` docked: re-gather current scope; scopes 1–2 set
   `ui.hint = "+N from background — press 3"` (cleared on scope change). Wire in `settleTask` beside the
   Plan 20 plan-settle hook.
-- [ ] Layer-1: scope round-trip; settle-hint (background settle while docked shows hint, no row in scope 1).
+- [x] Layer-1: scope round-trip; settle-hint (background settle while docked shows hint, no row in scope 1).
   Commit.
 
 ### Task 6 (Phase 3): filters + search
 
-- [ ] `ArtifactFilter.since` in `store/artifacts.ts` (ISO-delta predicate on `created`); unit test.
-- [ ] Shelf: `f` chip row (fields producer/type/feedback/verdict/since; ←→↑↓⏎, `x` clear), `/` search
+- [x] `ArtifactFilter.since` in `store/artifacts.ts` (ISO-delta predicate on `created`); unit test.
+- [x] Shelf: `f` chip row (fields producer/type/feedback/verdict/since; ←→↑↓⏎, `x` clear), `/` search
   (browser's own input line, live `q`), countLine honesty. Pure tests in browser-model.test; Layer-1:
   `/` narrows + "N of M" shows. Commit.
 
 ### Task 7 (Phase 4): verbs + command collapse
 
-- [ ] Store: `GcOptions.dryRun` (same pass, return `{archived: []…}` without renames — the existing
+- [x] Store: `GcOptions.dryRun` (same pass, return `{archived: []…}` without renames — the existing
   return shape gains `wouldArchive` when dry) + `artifactBodyPath(ws, handle)` (recompute like
   `readArtifactBody`; null for external). Unit tests; PORT the three gc protection tests from
   App.test.tsx to `artifacts.test.ts` driving `gcArtifacts` directly.
-- [ ] Reader verbs: `a` (inline feedback input → `annotateArtifact({kind:"feedback", author:"human"})`),
+- [x] Reader verbs: `a` (inline feedback input → `annotateArtifact({kind:"feedback", author:"human"})`),
   `y` (`kind:"approval"`), `v` (versions jump list via `artifactVersions`), `o` (spawn
   `$EDITOR`/`open` with `artifactBodyPath`; external → URI line). Shelf `g` (all-runs only): dry-run
   → confirm line → real run.
-- [ ] Retire subcommands: `/artifacts <anything>` → "the browser owns this now — /artifacts opens it";
+- [x] Retire subcommands: `/artifacts <anything>` → "the browser owns this now — /artifacts opens it";
   delete `parseArtifactsCommand` + its slash.test tests + the five App.test subcommand tests (gc trio
   already ported). Layer-1: `a` lands open annotation on the viewed VERSION; `y` lands approval. Commit.
 
 ### Task 8 (Phase 5): `r` request revision
 
-- [ ] Reader `r`: composes `revise <handle>: <open feedback bodies, "; "-joined>` and calls
+- [x] Reader `r`: composes `revise <handle>: <open feedback bodies, "; "-joined>` and calls
   `onSubmitChat(text)` → App submits it as a NORMAL turn (browser closes first — `setBrowser(null)` —
   the turn's completion re-docks with the new version on top). Layer-1: `r` from reader triggers a
   root run whose prompt contains the handle + feedback; completion re-docks. Commit.
 
 ### Task 9 (Phase 6): evidence + docs sweep
 
-- [ ] Extend `artifact-browser` tape: `a` annotate flow (gate on the feedback line) + assertion the
+- [x] Extend `artifact-browser` tape: `a` annotate flow (gate on the feedback line) + assertion the
   annotation landed. Docs: CLAUDE.md src/ui section (browser replaces viewer + bar), README artifact
   paragraph, TESTING.md sections. Flip this plan's + tasks.md checkboxes. Full gates + `bun run build`.
 
 ### After
 
-- [ ] Adversarial review of the diff (review-the-fix discipline), fix confirmed findings.
-- [ ] Push branch, open PR (merge after captain review).
+- [x] Adversarial review of the diff (review-the-fix discipline), fix confirmed findings.
+- [x] Push branch, open PR (merge after captain review).
