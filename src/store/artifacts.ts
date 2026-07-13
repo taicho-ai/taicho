@@ -105,11 +105,18 @@ export function readArtifact(ws: string, handle: string): Artifact | null {
  *  path baked into the envelope goes stale the moment the workspace dir is renamed/moved, but the
  *  bytes still live at ws/artifacts/<id>/v<N>.<ext> — so we address them by ws, not by the baked path. */
 export function readArtifactBody(ws: string, handle: string): Buffer | null {
+  const file = artifactBodyPath(ws, handle);
+  if (!file || !existsSync(file)) return null;
+  return readFileSync(file);
+}
+
+/** Plan 21: the body file's CURRENT path (recomputed from ws, per the relocatable-addressing note
+ *  above — never read `location.path` directly); null for external artifacts or a missing handle.
+ *  The browser's `o` verb hands this to $EDITOR. */
+export function artifactBodyPath(ws: string, handle: string): string | null {
   const a = readArtifact(ws, handle);
   if (!a || a.location.kind !== "file") return null;
-  const file = join(idDir(ws, a.id), basename(a.location.path));
-  if (!existsSync(file)) return null;
-  return readFileSync(file);
+  return join(idDir(ws, a.id), basename(a.location.path));
 }
 
 export interface ArtifactFilter {
@@ -252,6 +259,10 @@ export function collectReferencedArtifacts(src: GcReferenceSources): string[] {
 export interface GcOptions {
   keepLatest?: number;    // per id: always keep the N newest versions (default 3)
   referenced?: string[];  // protected handles the CALLER knows are live (hand-off/policy/task refs — see collectReferencedArtifacts)
+  /** Plan 21: compute the protected set and the would-archive list on the SAME code path, but touch
+   *  nothing — the browser's `g` verb previews with this, then runs for real; preview and action
+   *  cannot disagree because they are one function. */
+  dryRun?: boolean;
 }
 export interface GcReport {
   archived: string[];     // version handles ("id@vN") relocated into _archive
@@ -312,14 +323,16 @@ export function gcArtifacts(ws: string, opts: GcOptions = {}): GcReport {
     for (const v of artifactVersions(ws, id)) {
       const handle = `${id}@v${v}`;
       if (protectedSet.has(handle)) { kept++; continue; }
-      const archiveDir = join(idDir(ws, id), ARCHIVE);
-      mkdirSync(archiveDir, { recursive: true });
-      // relocate the envelope (v<N>.json) + any body (v<N>.<ext>) — anchored so v1 never matches v11.
-      const re = new RegExp(`^v${v}\\.`);
-      for (const f of readdirSync(idDir(ws, id))) if (re.test(f)) renameSync(join(idDir(ws, id), f), join(archiveDir, f));
-      archived.push(handle);
+      if (!opts.dryRun) {
+        const archiveDir = join(idDir(ws, id), ARCHIVE);
+        mkdirSync(archiveDir, { recursive: true });
+        // relocate the envelope (v<N>.json) + any body (v<N>.<ext>) — anchored so v1 never matches v11.
+        const re = new RegExp(`^v${v}\\.`);
+        for (const f of readdirSync(idDir(ws, id))) if (re.test(f)) renameSync(join(idDir(ws, id), f), join(archiveDir, f));
+      }
+      archived.push(handle); // dryRun: the WOULD-archive list, same computation
     }
   }
-  rebuildArtifactIndex(ws); // latest-per-id is unchanged (only OLDER versions archived) — refresh anyway
+  if (!opts.dryRun) rebuildArtifactIndex(ws); // latest-per-id is unchanged (only OLDER versions archived) — refresh anyway
   return { archived, kept, protectedRefs: protectedSet.size };
 }

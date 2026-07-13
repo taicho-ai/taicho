@@ -43,10 +43,8 @@ import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
 import type { McpManager } from "../core/mcp/manager";
 import { addMcpServer, removeMcpServer } from "../store/mcp-store";
-import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand, parseArtifactsCommand, tokenize } from "./slash";
-import { listArtifacts, readArtifact, readArtifactBody, artifactVersions, gcArtifacts, collectReferencedArtifacts } from "../store/artifacts";
-import { annotateArtifact, listAnnotations } from "../store/annotations";
-import { artifactHandle } from "../schemas/artifact";
+import { parseMcpCommand, formatMcpStatus, parseKbCommand, parseSkillCommand, tokenize } from "./slash";
+import { gcArtifacts, collectReferencedArtifacts } from "../store/artifacts";
 import { syncKnowledgeSources } from "../knowledge/sync";
 import { listNodeRows, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { listSkills, readSkill, deleteSkill, reindexSkills } from "../store/skills";
@@ -776,6 +774,18 @@ export function App(props: {
     } finally { setBusy(false); clearStatuses(); clearBlockFeed(); }
   };
 
+  // Plan 21: GC for the browser's `g` verb — protect a version by what CONSUMES it, never by its own
+  // producing run's record (folding trace.artifacts in would pin every version ever produced and
+  // shadow keep-latest-N). dryRun previews on the SAME code path the confirm then runs.
+  const gcRun = (dryRun: boolean) =>
+    gcArtifacts(props.ws, {
+      referenced: collectReferencedArtifacts({
+        traces: listTraces(props.ws),
+        taskResultRefs: listTaskIndex(props.db).map((t) => t.result_ref),
+      }),
+      dryRun,
+    });
+
   const runSlash = async (cmd: string, arg: string) => {
     // Plan 20: mid-session roster reindex, for hand-edits to agents/*/agent.md (e.g. `team: news`).
     // Boot also reindexes unconditionally; this covers edits made while the REPL is open. The bare
@@ -969,74 +979,14 @@ export function App(props: {
       return;
     }
     if (cmd === "artifacts") {
-      // Plan 21: bare /artifacts opens the BROWSER, scoped to the latest run (this session's last
-      // completed foreground run, else the newest ledger turn, else the all-runs scope). The
-      // subcommands below keep working until Phase 4 retires them.
-      if (!arg.trim()) {
-        const rootRunId = lastRunRef.current ?? latestRunFallback(props.ws);
-        setBrowser({ rootRunId, ui: { ...initialBrowserUi(), scope: rootRunId ? "run" : "all" } });
+      // Plan 21 Ph4: /artifacts IS the browser. The five subcommands retired — every verb lives on a
+      // key next to the thing it acts on (list→shelf, show→⏎ reader, annotate→a, approve→y, gc→g).
+      if (arg.trim()) {
+        say({ kind: "system", text: "  the browser owns this now — /artifacts opens it (⏎ read · a annotate · y approve · g gc in all-runs)" });
         return;
       }
-      const parsed = parseArtifactsCommand(arg);
-      if (parsed.kind === "error") { say({ kind: "system", text: `  ${parsed.message}` }); return; }
-      if (parsed.kind === "list") {
-        const all = listArtifacts(props.ws, parsed.q ? { q: parsed.q } : {});
-        if (!all.length) { say({ kind: "system", text: "  (no artifacts)" }); return; }
-        all.forEach((a) => {
-          const open = listAnnotations(props.ws, artifactHandle(a), { status: "open" }).length;
-          say({ kind: "system", text: `  [${artifactHandle(a)}] ${a.title} (${a.type}, ${a.role}) · ${a.producer}${open ? ` · ${open} open feedback` : ""}${a.summary ? ` — ${a.summary}` : ""}` });
-        });
-        return;
-      }
-      if (parsed.kind === "show") {
-        const a = readArtifact(props.ws, parsed.handle);
-        if (!a) { say({ kind: "system", text: `  no artifact "${parsed.handle}"` }); return; }
-        say({ kind: "system", text: `  [${artifactHandle(a)}] ${a.title}` });
-        say({ kind: "system", text: `  type=${a.type} role=${a.role} producer=${a.producer} run=${a.runId} versions=[${artifactVersions(props.ws, a.id).join(", ")}]` });
-        if (a.parents.length) say({ kind: "system", text: `  parents: ${a.parents.join(", ")}` });
-        if (a.summary) say({ kind: "system", text: `  summary: ${a.summary}` });
-        // Render the artifact BODY (not just the envelope) so `/artifacts show` actually shows the
-        // content — the in-terminal complement to the full-screen viewer. readArtifactBody returns
-        // null for external (MCP-fronted) refs, so those just show the envelope + locator.
-        if (a.location.kind === "external") {
-          say({ kind: "system", text: `  external: ${a.location.uri}` });
-        } else {
-          const body = readArtifactBody(props.ws, artifactHandle(a));
-          if (body && body.length) {
-            say({ kind: "system", text: "  ───" });
-            renderMarkdown(body.toString("utf8"), mdWidth).split("\n").forEach((ln) => say({ kind: "system", text: `  ${ln}` }));
-          }
-        }
-        const anns = listAnnotations(props.ws, artifactHandle(a));
-        if (!anns.length) say({ kind: "system", text: "  (no annotations)" });
-        else anns.forEach((an) => say({ kind: "system", text: `  ✎ [${an.id}] (${an.status}) ${an.kind} · ${an.author}: ${an.body}${an.verdict ? ` [${an.verdict.pass ? "pass" : "FAIL"}]` : ""}` }));
-        return;
-      }
-      if (parsed.kind === "annotate") {
-        try {
-          const an = annotateArtifact(props.ws, { target: parsed.handle, author: "human", body: parsed.body, kind: "feedback" });
-          say({ kind: "system", text: `  ✎ annotated ${an.target} (${an.id}) — hand it to an agent to revise; the open feedback rides along.` });
-        } catch (e) { say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` }); }
-        return;
-      }
-      if (parsed.kind === "approve") {
-        try {
-          const an = annotateArtifact(props.ws, { target: parsed.handle, author: "human", body: "approved by captain", kind: "approval" });
-          say({ kind: "system", text: `  ✓ approved ${an.target}` });
-        } catch (e) { say({ kind: "system", text: `  ${e instanceof Error ? e.message : String(e)}` }); }
-        return;
-      }
-      // gc — protect a version by what CONSUMES it, never by its own producing run's record. Every
-      // version an agent saves lands in that run's `trace.artifacts`, so folding that in would pin
-      // every version ever produced and shadow keep-latest-N (nothing would ever be archived). Draw
-      // the protected set from the hand-off graph (inputArtifacts/outputArtifacts) + task resultRefs;
-      // annotations + parent-closure are honored inside gcArtifacts.
-      const referenced = collectReferencedArtifacts({
-        traces: listTraces(props.ws),
-        taskResultRefs: listTaskIndex(props.db).map((t) => t.result_ref),
-      });
-      const r = gcArtifacts(props.ws, { referenced });
-      say({ kind: "system", text: `  gc: archived ${r.archived.length} version(s), kept ${r.kept}${r.archived.length ? ` — ${r.archived.join(", ")}` : " (nothing to collect)"}` });
+      const rootRunId = lastRunRef.current ?? latestRunFallback(props.ws);
+      setBrowser({ rootRunId, ui: { ...initialBrowserUi(), scope: rootRunId ? "run" : "all" } });
       return;
     }
     if (cmd === "tasks") {
@@ -1205,6 +1155,7 @@ export function App(props: {
           st={browser.ui}
           onChange={(ui) => setBrowser((b) => (b ? { ...b, ui } : b))}
           keyRef={browserKeyRef}
+          gcRun={gcRun}
           onClose={() => { browserKeyRef.current = null; setBrowser(null); }}
         />
       )}

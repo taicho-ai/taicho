@@ -118,11 +118,13 @@ test("applyFilters + badges: feedback:open and verdict:pass/fail read the annota
   expect(b.approved).toBe(false);
 });
 
-test("badgesFor: an approval-kind annotation marks approved", async () => {
+test("badgesFor: an approval-kind annotation marks approved and never inflates the ⚑ count", async () => {
   const w = await ws();
   const a = seed(w, { id: "signed-off" });
   annotateArtifact(w, { target: artifactHandle(a), author: "human", body: "approved by captain", kind: "approval" });
-  expect(badgesFor(w, a).approved).toBe(true);
+  const b = badgesFor(w, a);
+  expect(b.approved).toBe(true);
+  expect(b.openFeedback).toBe(0);   // an approval is state, not actionable feedback
 });
 
 test("shelfRows all+run: groups by producing run, groups newest-first, headers not selectable", async () => {

@@ -86,8 +86,9 @@ export function badgesFor(ws: string, a: Artifact): RowBadges {
   for (const an of anns) if (an.verdict) verdict = an.verdict.pass ? "pass" : "fail"; // last verdict wins
   return {
     // "Open feedback" means ACTIONABLE: open feedback text or a FAILING verdict. A passing checker
-    // verdict is an open annotation too, but flagging it would tell the captain to act on a pass.
-    openFeedback: anns.filter((an) => an.status === "open" && (!an.verdict || !an.verdict.pass)).length,
+    // verdict is an open annotation too, but flagging it would tell the captain to act on a pass —
+    // and an approval (open by ledger mechanics) is state, not feedback.
+    openFeedback: anns.filter((an) => an.status === "open" && an.kind !== "approval" && (!an.verdict || !an.verdict.pass)).length,
     approved: anns.some((an) => an.kind === "approval"),
     verdict,
   };

@@ -1224,107 +1224,51 @@ test("concurrent approval requests queue instead of clobbering: both are answere
 
 // ── Plan 01 Phase 4 — the /artifacts UI (view / annotate / approve) ──────────
 
-test("/artifacts list shows a stored artifact with its handle", async () => {
-  const { ws, props } = await setup();
-  saveArtifact(ws, { id: "dossier", title: "Foo dossier", type: "dossier", summary: "on foo", body: "BODY", producer: "root", runId: "root/1" });
+// ── Plan 21 Ph4: the /artifacts subcommands retired — the browser owns the verbs ──
+
+test("Plan 21 Ph4: any /artifacts subcommand points at the browser instead", async () => {
+  const { props } = await setup({ model: mockModel("hi") });
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "/artifacts list", ENTER);
-  await waitFor(lastFrame, "dossier@v1");
-  expect(lastFrame()).toContain("Foo dossier");
+  await waitFor(lastFrame, "the browser owns this now");
+  expect(lastFrame()).not.toContain("ARTIFACTS ");          // pointing, not opening
 });
 
-test("/artifacts on an empty store reports (no artifacts)", async () => {
-  const { props } = await setup();
+test("Plan 21 Ph4: reader verbs — `a` lands open feedback on the viewed version, `y` approves", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
+  saveArtifact(ws, { id: "verb-doc", title: "Verb Doc", body: "# body", producer: "root", runId: "root/1" });
   const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts", ENTER);
-  await waitFor(lastFrame, "no artifacts");
+
+  await send(stdin, "/artifacts", ENTER);                   // cold open: no runs yet → all-runs scope
+  await waitFor(lastFrame, "verb-doc@v1");
+  await send(stdin, ENTER);                                 // reader
+  await waitFor(lastFrame, "a annotate");
+  await send(stdin, "a");                                   // inline feedback input
+  await waitFor(lastFrame, "feedback ▸");
+  await send(stdin, "tighten the intro", ENTER);
+  await waitFor(lastFrame, "✎ feedback on verb-doc@v1");
+  const anns = listAnnotations(ws, "verb-doc@v1");
+  expect(anns.some((an) => an.kind === "feedback" && an.status === "open" && an.body === "tighten the intro")).toBe(true);
+
+  await send(stdin, "y");                                   // approve the viewed version
+  await waitFor(lastFrame, "✓ approved verb-doc@v1");
+  expect(listAnnotations(ws, "verb-doc@v1").some((an) => an.kind === "approval")).toBe(true);
 });
 
-test("/artifacts annotate attaches human feedback (asserted against the store)", async () => {
-  const { ws, props } = await setup();
-  saveArtifact(ws, { id: "dossier", title: "Dossier", body: "BODY", producer: "root", runId: "root/1" });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts annotate dossier tighten the intro", ENTER);
-  await waitFor(lastFrame, "annotated dossier@v1");
-  const open = listAnnotations(ws, "dossier", { status: "open" });
-  expect(open.length).toBe(1);
-  expect(open[0].author).toBe("human");
-  expect(open[0].body).toBe("tighten the intro");
-  expect(open[0].kind).toBe("feedback");
-});
-
-test("/artifacts approve records a captain sign-off", async () => {
-  const { ws, props } = await setup();
-  saveArtifact(ws, { id: "dossier", title: "Dossier", body: "BODY", producer: "root", runId: "root/1" });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts approve dossier@v1", ENTER);
-  await waitFor(lastFrame, "approved dossier@v1");
-  expect(listAnnotations(ws, "dossier").map((a) => a.kind)).toEqual(["approval"]);
-});
-
-test("/artifacts show surfaces provenance + the artifact BODY + the open feedback", async () => {
-  const { ws, props } = await setup();
-  saveArtifact(ws, { id: "dossier", title: "Dossier", type: "dossier", summary: "sum", body: "THE ACTUAL DELIVERABLE BODY", producer: "root", runId: "root/1" });
-  annotateArtifact(ws, { target: "dossier@v1", author: "human", body: "add dates" });
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts show dossier", ENTER);
-  await waitFor(lastFrame, "add dates");
-  const frame = lastFrame() ?? "";
-  expect(frame).toContain("producer=root");
-  expect(frame).toContain("versions=[1]");
-  expect(frame).toContain("THE ACTUAL DELIVERABLE BODY"); // the BODY is rendered, not just the envelope
-});
-
-test("/artifacts annotate on a missing artifact reports the error (no dangling feedback)", async () => {
-  const { props } = await setup();
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts annotate ghost do something", ENTER);
-  await waitFor(lastFrame, "no artifact");
-});
-
-test("/artifacts gc archives old unreferenced versions and reports what it collected", async () => {
-  const { ws, props } = await setup();
+test("Plan 21 Ph4: shelf `g` (all-runs) previews gc with a dry run, ⏎ confirms — same code path", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
   for (let i = 1; i <= 5; i++) saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: "root/1" });
   const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts gc", ENTER);
-  await waitFor(lastFrame, "archived 2 version(s)");
-  expect(readArtifact(ws, "doc@v1")).toBeNull();        // v1/v2 archived out of the live store
-  expect(readArtifact(ws, "doc")!.version).toBe(5);     // latest untouched
-});
 
-// PRODUCTION CONDITION (PR #17 review): each version is pinned by its OWN producing trace.artifacts —
-// the real state after iterative revision. The handler must protect by the CONSUMPTION/hand-off graph,
-// not the producing record, or gc is a no-op (keep-latest-N shadowed). The pre-fix handler folded
-// t.artifacts into `referenced`, so every version was protected and nothing was ever archived.
-test("/artifacts gc still archives superseded versions when each is pinned by its producing trace", async () => {
-  const { ws, props } = await setup();
-  for (let i = 1; i <= 5; i++) {
-    saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: `root/2026-07-04-run${i}` });
-    writeTrace(ws, mkTrace({ id: `root/2026-07-04-run${i}`, agent: "root", artifacts: [`doc@v${i}`] }));
-  }
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts gc", ENTER);
-  await waitFor(lastFrame, "archived 2 version(s)"); // v1/v2 collected despite being trace-pinned
-  expect(readArtifact(ws, "doc@v1")).toBeNull();
-  expect(readArtifact(ws, "doc@v2")).toBeNull();
+  await send(stdin, "/artifacts", ENTER);                   // cold open → all-runs scope (g lives here)
+  await waitFor(lastFrame, "doc@v5");
+  await send(stdin, "g");
+  await waitFor(lastFrame, "gc would archive 2 version(s)");
+  expect(readArtifact(ws, "doc@v1")).not.toBeNull();        // the preview touched NOTHING
+  await send(stdin, ENTER);                                 // confirm
+  await waitFor(lastFrame, "gc: archived 2 version(s)");
+  expect(readArtifact(ws, "doc@v1")).toBeNull();            // now it archived exactly the previewed set
   expect(readArtifact(ws, "doc")!.version).toBe(5);
-});
-
-// A version CONSUMED via the hand-off graph (inputArtifacts/outputArtifacts) must survive gc, however
-// old — this is the safety invariant the re-scoped protected set must still honor.
-test("/artifacts gc never archives a version handed off across a delegation edge", async () => {
-  const { ws, props } = await setup();
-  for (let i = 1; i <= 5; i++) {
-    saveArtifact(ws, { id: "doc", title: `v${i}`, body: `${i}`, producer: "root", runId: `root/2026-07-04-run${i}` });
-    writeTrace(ws, mkTrace({ id: `root/2026-07-04-run${i}`, agent: "root", artifacts: [`doc@v${i}`] }));
-  }
-  // A later run handed old doc@v1 DOWN to a child and received doc@v2 UP — both are live references.
-  writeTrace(ws, mkTrace({ id: "root/2026-07-04-run9", agent: "root", inputArtifacts: ["doc@v1"], outputArtifacts: ["doc@v2"] }));
-  const { stdin, lastFrame } = render(<App {...props} />);
-  await send(stdin, "/artifacts gc", ENTER);
-  await waitFor(lastFrame, "nothing to collect"); // v1+v2 protected by hand-off; v3/v4/v5 are keep-latest-3
-  expect(readArtifact(ws, "doc@v1")!.title).toBe("v1");
-  expect(readArtifact(ws, "doc@v2")!.title).toBe("v2");
 });
 
 // ── Plan 15: completion action bar + artifact viewer ──

@@ -129,7 +129,7 @@ test("parseKbCommand parses subcommands and filters", () => {
   expect(parseKbCommand("wat").kind).toBe("error");
 });
 
-import { parseSkillCommand, parseArtifactsCommand } from "./slash";
+import { parseSkillCommand } from "./slash";
 
 test("parseSkillCommand parses subcommands", () => {
   expect(parseSkillCommand("list")).toEqual({ kind: "list" });
@@ -141,19 +141,7 @@ test("parseSkillCommand parses subcommands", () => {
   expect(parseSkillCommand("wat").kind).toBe("error");
 });
 
-test("parseArtifactsCommand parses subcommands (Plan 01 Ph4 UI)", () => {
-  expect(parseArtifactsCommand("")).toEqual({ kind: "list" });               // bare /artifacts → list
-  expect(parseArtifactsCommand("list")).toEqual({ kind: "list", q: undefined });
-  expect(parseArtifactsCommand("list foo")).toEqual({ kind: "list", q: "foo" });
-  expect(parseArtifactsCommand("gc")).toEqual({ kind: "gc" });
-  expect(parseArtifactsCommand("show doc@v2")).toEqual({ kind: "show", handle: "doc@v2" });
-  expect(parseArtifactsCommand("approve doc")).toEqual({ kind: "approve", handle: "doc" });
-  // annotate splits the FIRST token as the handle, the rest (spaces preserved) as the feedback body
-  expect(parseArtifactsCommand("annotate doc@v1 add more dates")).toEqual({ kind: "annotate", handle: "doc@v1", body: "add more dates" });
-  expect(parseArtifactsCommand("annotate doc").kind).toBe("error");          // needs a body
-  expect(parseArtifactsCommand("show").kind).toBe("error");                  // needs a handle
-  expect(parseArtifactsCommand("wat").kind).toBe("error");
-});
+// (the parseArtifactsCommand tests retired with the parser — Plan 21 Ph4: /artifacts IS the browser)
 
 // --- Plan 19: /teams ------------------------------------------------------------------------------
 
