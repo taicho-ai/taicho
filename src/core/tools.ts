@@ -52,6 +52,22 @@ function latestHandlePerId(handles: string[]): string[] {
   return [...best.values()].map((b) => b.handle);
 }
 
+/** Apply the captain's card edits to a team proposal. ProposalCard returns only CHANGED, non-empty
+ *  fields as strings; members/grant are captured as comma-separated lists and split back to arrays. */
+function mergeTeamProposal(
+  base: { id: string; charter: string; lead?: string; members: string[]; grant: string[] },
+  edits: Record<string, string>,
+): { id: string; charter: string; lead?: string; members: string[]; grant: string[] } {
+  const list = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+  return {
+    id: edits.id ? edits.id.trim() : base.id,
+    charter: edits.charter ?? base.charter,
+    lead: edits.lead !== undefined ? (edits.lead.trim() || undefined) : base.lead,
+    members: edits.members !== undefined ? list(edits.members) : base.members,
+    grant: edits.grant !== undefined ? list(edits.grant) : base.grant,
+  };
+}
+
 export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager, teamPolicy?: TeamTools): ToolSet {
   const set: ToolSet = {};
   // Plan 19: a team's tool policy layers over the member's own grant — `grant` ADDS, `deny` REMOVES and
@@ -217,6 +233,39 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           return { created: created.id, role: created.role };
         } catch {
           return { error: `agent "${finalDraft.id}" already exists or could not be created` };
+        }
+      },
+    });
+
+  // Plan 22: the on-the-fly team route. "take editor, reporter and fact-check — that's the news team" →
+  // this tool → ONE approval card (the same one create_agent uses). Captain-gated by construction, and
+  // the grant can name only tools the PROPOSER already holds, so a model can't escalate itself by minting
+  // a team. NOT in DEFAULT_WORKER_TOOLS — root holds it; a lead would be granted it deliberately.
+  if (has("create_team"))
+    set.create_team = tool({
+      description:
+        "Propose a NEW team for the captain to approve, and optionally staff it in one step. A team groups agents so you can address the group and let it route work to the right member. Give it a clear id, a one-line charter, the member agent ids, an optional lead (a member the team routes to first), and any EXTRA tools to grant every member. The captain approves before the team exists.",
+      inputSchema: z.object({
+        id: z.string().regex(/^[a-z][a-z0-9-]*$/),
+        charter: z.string(),
+        members: z.array(z.string()).default([]).describe("agent ids to place on the team"),
+        lead: z.string().optional().describe("a member the team routes to first; omit for capability-based routing"),
+        grant: z.array(z.string()).default([]).describe("extra tools to grant every member — you may only grant tools YOU already hold"),
+      }),
+      execute: async (draft) => {
+        // Capability ceiling: you cannot grant a team more than you hold. This is what makes the tool safe
+        // to expose despite a team granting capability — escalation is impossible before the captain looks.
+        const overreach = draft.grant.filter((t) => !agent.tools.includes(t));
+        if (overreach.length) return { rejected: true, reason: `cannot grant tools you do not hold: ${overreach.join(", ")}` };
+        const proposal = { id: draft.id, charter: draft.charter, lead: draft.lead, members: draft.members, grant: draft.grant };
+        const decision = await ctx.requestApproval({ kind: "create_team", draft: proposal });
+        if (decision.type === "reject") return { rejected: true, reason: "reject" };
+        const final = decision.type === "edit" ? mergeTeamProposal(proposal, decision.draft) : proposal;
+        try {
+          const team = await ctx.createTeam(final);
+          return { created: team.id, lead: team.lead, members: final.members };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : `team "${final.id}" could not be created` };
         }
       },
     });

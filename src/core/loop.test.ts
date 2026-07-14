@@ -44,7 +44,7 @@ function streamSeq(...sets: unknown[][]): any {
 }
 
 const agent: AgentDef = {
-  id: "a", role: "r", identity: "i", tools: ["noop"], canSee: ["*"], canDelegateTo: [],
+  id: "a", role: "r", identity: "i", tools: ["noop"], teams: [], canSee: ["*"], canDelegateTo: [],
   budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 20 }, isRoot: false,
   created: "2026-06-11T00:00:00.000Z",
 };

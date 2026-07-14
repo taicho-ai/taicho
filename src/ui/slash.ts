@@ -5,6 +5,7 @@ import type { PolicyNote } from "../schemas/policy";
 import { McpServerConfig } from "../store/config";
 import type { McpServerStatus } from "../core/mcp/manager";
 import { rollupCosts, formatCostRollup } from "../core/costs";
+import { DEFAULT_TEAM_ID } from "../schemas/team";
 
 export type Line = { kind: "user" | "agent" | "system"; from?: string; text: string; rendered?: boolean };
 
@@ -67,13 +68,18 @@ export function runSlash(cmd: string, arg: string, deps: SlashDeps): Line[] {
       sys("  @<agent> <task> — address an agent · ESC to quit"),
     ];
   if (cmd === "agents")
-    return deps.roster.map((r) => sys(`  ${r.is_root ? "*" : "-"} ${r.id}: ${r.role}${r.team ? ` (${r.team})` : ""}`));
+    return deps.roster.map((r) => {
+      // Show only EXPLICIT teams — every agent is on `default`, so printing it on each line is noise.
+      // (The Org browser shows default; this flat list stays terse.)
+      const teams = (r.teams ?? []).filter((t) => t !== DEFAULT_TEAM_ID);
+      return sys(`  ${r.is_root ? "*" : "-"} ${r.id}: ${r.role}${teams.length ? ` (${teams.join(" · ")})` : ""}`);
+    });
   if (cmd === "teams") {
     if (!deps.teams.length)
       return [sys("  (no teams) — a team is a captain-owned file at teams/<id>/team.md")];
     const out: Line[] = [];
     for (const t of deps.teams) {
-      const members = deps.roster.filter((r) => r.team === t.id);
+      const members = deps.roster.filter((r) => r.teams?.includes(t.id));
       const how = t.lead ? `lead: ${t.lead}` : "routed by capability";
       out.push(sys(`  ${t.id}: ${t.charter}`));
       out.push(sys(`    ${how} · ${members.length} agent${members.length === 1 ? "" : "s"}`));

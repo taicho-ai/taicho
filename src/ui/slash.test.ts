@@ -146,10 +146,10 @@ test("parseSkillCommand parses subcommands", () => {
 // --- Plan 19: /teams ------------------------------------------------------------------------------
 
 const teamRoster = [
-  { id: "root", role: "orch", is_root: 1, team: null },
-  { id: "editor", role: "assigns copy", is_root: 0, team: "news" },
-  { id: "reporter", role: "files stories", is_root: 0, team: "news" },
-  { id: "quant", role: "prices instruments", is_root: 0, team: "trading" },
+  { id: "root", role: "orch", is_root: 1, teams: ["default"] },
+  { id: "editor", role: "assigns copy", is_root: 0, teams: ["default", "news"] },
+  { id: "reporter", role: "files stories", is_root: 0, teams: ["default", "news"] },
+  { id: "quant", role: "prices instruments", is_root: 0, teams: ["default", "trading"] },
 ];
 const teamDeps = {
   ...deps,

@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+/** Plan 22: the universal team. Every agent belongs to `default` — it IS the squad, expressed as a
+ *  team. It is seeded on boot, cannot be deleted, and is IMPLICIT: an agent never has to list it in its
+ *  own `teams:` frontmatter (the derived index adds it). Root leads it. Explicit teams (news, trading…)
+ *  are additive overlays on top; joining one never removes an agent from default. */
+export const DEFAULT_TEAM_ID = "default";
+
 /** A team's tool policy, applied in toolsForAgent to every member.
  *  `grant` ADDS to a member's own toolset; `deny` REMOVES from it and wins over the member's own grant.
  *  A `deny` list that intersects DEFAULT_WORKER_TOOLS is rejected when the team loads (store/teams.ts):
@@ -52,6 +58,21 @@ export function effectiveTools(agentTools: string[], policy?: TeamTools): string
   for (const t of [...agentTools, ...policy.grant])
     if (!denied.has(t) && !seen.has(t)) { seen.add(t); out.push(t); }
   return out;
+}
+
+/** Fold several teams' tool policies into one (Plan 22: an agent may sit on many teams). Grants union,
+ *  denies union — and since effectiveTools lets deny win over grant, a tool ANY of the agent's teams
+ *  denies is denied for it, even if another grants it. The DEFAULT_WORKER_TOOLS floor is protected
+ *  per-team at load (assertPolicyRespectsFloor), so the union can never strip a worker's artifact tools. */
+export function mergeTeamPolicies(policies: (TeamTools | undefined)[]): TeamTools {
+  const grant: string[] = [];
+  const deny: string[] = [];
+  for (const p of policies) {
+    if (!p) continue;
+    for (const g of p.grant) if (!grant.includes(g)) grant.push(g);
+    for (const d of p.deny) if (!deny.includes(d)) deny.push(d);
+  }
+  return { grant, deny };
 }
 
 /** The ACL grammar's team production (core/registry.ts). An entry in canSee/canDelegateTo is `"*"`,

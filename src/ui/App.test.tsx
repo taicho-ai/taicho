@@ -28,7 +28,7 @@ import { listSchedules, createSchedule } from "../store/schedules";
 import { readMcpStore } from "../store/mcp-store";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { getViewMode } from "../store/prefs";
-import { createTeam } from "../store/teams";
+import { createTeam, teamExists, membersOf } from "../store/teams";
 import { writePlan, reindexPlans, currentPlanId, foldPlan } from "../store/plans";
 import { readPrefs } from "../store/prefs";
 import { statusReducer } from "../core/agent-status";
@@ -205,8 +205,8 @@ test("suggester: ↓ moves the › highlight and Enter runs the highlighted no-a
   expect(lastFrame()).toContain("› /help");      // first row highlighted
   await send(stdin, DOWN);
   await waitFor(lastFrame, "› /agents");          // highlight moved
-  await send(stdin, ENTER);                        // /agents takes no arg → runs immediately
-  await waitFor(lastFrame, "* root");
+  await send(stdin, ENTER);                        // /agents takes no arg → runs immediately (opens the Org browser)
+  await waitFor(lastFrame, "ORG");
 });
 
 test("suggester highlight STAYS put across re-renders (uncontrolled @inkjs/ui onChange must not reset it)", async () => {
@@ -796,19 +796,21 @@ test("Plan 20 (review finding): /agents reindex refreshes App's roster STATE —
   await waitFor(lastFrame, "discarded");
 });
 
-test("Plan 20: /agents reindex picks up a hand-edit to agent.md (team: takes effect mid-session)", async () => {
+test("Plan 20/22: /agents reindex picks up a hand-edit to agent.md (teams: takes effect mid-session)", async () => {
   const { ws, db, props } = await setup({ model: mockModel("hi") });
+  createTeam(ws, { id: "news", charter: "covers breaking stories" });
   await createAgent(ws, db, { id: "member", role: "member role", identity: "You are a member." }, "root");
-  expect(loadIndex(db).find((r) => r.id === "member")!.team ?? null).toBeNull();
+  // Plan 22: an agent with no explicit team is a default-only member.
+  expect(loadIndex(db).find((r) => r.id === "member")!.teams).toEqual(["default"]);
 
-  // The documented membership mechanism: hand-edit the agent's own frontmatter.
+  // The documented membership mechanism: hand-edit the agent's own `teams:` frontmatter, then reindex.
   const file = join(ws, "agents", "member", "agent.md");
-  writeFileSync(file, readFileSync(file, "utf8").replace("id: member", "id: member\nteam: news"));
+  writeFileSync(file, readFileSync(file, "utf8").replace("teams: \n  []", "teams: \n  - news"));
 
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "/agents reindex", ENTER);
   await waitFor(lastFrame, "roster reindexed");
-  expect(loadIndex(db).find((r) => r.id === "member")!.team).toBe("news");   // the derived row refreshed
+  expect(loadIndex(db).find((r) => r.id === "member")!.teams).toEqual(["default", "news"]);   // the derived row refreshed
 });
 
 test("Plan 20: focus-mode Enter opens the run the ring HIGHLIGHTS, not blockFeed insertion order", async () => {
@@ -1638,25 +1640,76 @@ test("Plan 21: a pending approval SUSPENDS the docked browser — the card owns 
   expect(lastFrame()).toContain("sus-doc@v1");           // state preserved (same shelf)
 }, 15000);
 
-// --- Plan 19: /teams through the real REPL (Layer 1 — UI wiring never ships on typecheck alone) ----
+// --- Plan 22: the Org browser through the real REPL (Layer 1 — UI wiring never ships on typecheck alone) --
 
-test("/teams reports an empty squad, then lists a real team read from disk", async () => {
+test("/teams opens the Org browser; a team written to disk shows in it, with its members", async () => {
   const { props } = await setup();
   const { stdin, lastFrame } = render(<App {...props} />);
 
   await send(stdin, "/teams", ENTER);
-  await waitFor(lastFrame, "(no teams)");
+  await waitFor(lastFrame, "ORG");
+  expect(lastFrame()).toContain("1 teams");
+  expect(lastFrame()).toContain("2 agents");
 
-  // A team is a captain-owned file. Write one, then ask again — App re-reads teams/ per invocation,
-  // so an edit shows up without a restart.
   createTeam(props.ws, { id: "news", charter: "covers breaking stories", lead: "editor" });
-  await createAgent(props.ws, props.db, { id: "editor", role: "assigns copy", identity: "You edit.", team: "news" }, "root");
+  await createAgent(props.ws, props.db, { id: "editor", role: "assigns copy", identity: "You edit.", teams: ["news"] }, "root");
   await reindex(props.ws, props.db);
 
+  // esc closes the mode (restoring the input), then re-open so the browser recomputes rows from disk
+  await send(stdin, ESC);
   await send(stdin, "/teams", ENTER);
-  await waitFor(lastFrame, "news: covers breaking stories");
-  expect(lastFrame()).toContain("lead: editor");
-  expect(lastFrame()).toContain("editor: assigns copy");
+  await waitFor(lastFrame, "news");
+  expect(lastFrame()).toContain("lead editor");
+});
+
+test("/agents opens the Org browser on the agents scope, listing the squad with their teams", async () => {
+  const { props, ws, db } = await setup();
+  await createAgent(ws, db, { id: "editor", role: "assigns copy", identity: "You edit." }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/agents", ENTER);
+  await waitFor(lastFrame, "ORG");
+  expect(lastFrame()).toContain("2 agents"); // inverse-highlighted scope tab reads as text
+  expect(lastFrame()).toContain("editor");
+  expect(lastFrame()).toContain("root");
+});
+
+test("the Org browser hires an agent through the wizard (a → identity → teams → ⏎)", async () => {
+  const { props, ws, db } = await setup();
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/agents", ENTER);
+  await waitFor(lastFrame, "ORG");
+  await send(stdin, "a");                       // open the Hire wizard
+  await waitFor(lastFrame, "HIRE AGENT");
+  await send(stdin, "scribe", ENTER);           // id → next field
+  await send(stdin, "drafts copy", ENTER);      // role → next field
+  await send(stdin, "You are a careful scribe.", ENTER); // persona → teams step
+  await waitFor(lastFrame, "step 2/2");
+  await send(stdin, ENTER);                      // no teams selected → hire (default-only)
+  await waitFor(lastFrame, "hired scribe");
+  expect(loadIndex(db).some((r) => r.id === "scribe")).toBe(true);
+});
+
+test("the Org browser forms a team through the Add wizard (a → id → charter → members → lead → ⏎)", async () => {
+  const { props, ws, db } = await setup();
+  await createAgent(ws, db, { id: "editor", role: "edits copy", identity: "i" }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/teams", ENTER);
+  await waitFor(lastFrame, "ORG");
+  await send(stdin, "a");                        // open Team Add
+  await waitFor(lastFrame, "NEW TEAM");
+  await send(stdin, "news", ENTER);              // id → charter field
+  await send(stdin, "the daily brief", ENTER);   // charter → members step
+  await waitFor(lastFrame, "step 2/3");
+  await send(stdin, " ");                        // toggle the first agent (editor, sorted first)
+  await send(stdin, ENTER);                      // → lead step
+  await waitFor(lastFrame, "step 3/3");
+  await send(stdin, ENTER);                      // leadless → create the team
+  await waitFor(lastFrame, "created team news");
+  expect(teamExists(ws, "news")).toBe(true);
+  expect(membersOf(db, "news").map((m) => m.id)).toContain("editor");
 });
 
 // --- Plan 18: the pinned plan panel (Layer 1 — UI wiring never ships on typecheck alone) -----------

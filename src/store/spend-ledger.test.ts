@@ -149,6 +149,17 @@ test("scopesFor puts the NARROWER scope first, so the more actionable message wi
   expect(scopesFor(undefined)).toEqual(["squad"]);
 });
 
+test("Plan 22: scopesFor meters every explicit team, drops the implicit default, dedups, ends with squad", () => {
+  // an agent on several teams is bounded by each of them AND the squad
+  expect(scopesFor(["news", "trading"])).toEqual(["team:news", "team:trading", "squad"]);
+  // `default` IS the squad — metering it separately would double-count, so it is dropped
+  expect(scopesFor(["default", "news"])).toEqual(["team:news", "squad"]);
+  expect(scopesFor(["default"])).toEqual(["squad"]);
+  // a duplicate membership never doubles a ceiling
+  expect(scopesFor(["news", "news"])).toEqual(["team:news", "squad"]);
+  expect(scopesFor([])).toEqual(["squad"]);
+});
+
 test("exhaustionMessage names the scope that tripped", () => {
   expect(exhaustionMessage(SQUAD_SCOPE, "daily token ceiling reached (10/10 tok)")).toBe("[squad budget exhausted: daily token ceiling reached (10/10 tok)]");
   expect(exhaustionMessage(teamScope("trading"), "daily USD ceiling reached ($25.00/$25.00)")).toBe("[team budget exhausted: trading, daily USD ceiling reached ($25.00/$25.00)]");

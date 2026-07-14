@@ -10,6 +10,7 @@
  *  A run on a team is metered against BOTH scopes in one transaction: the team's ceiling and the squad's.
  *  A team ceiling can therefore stop a run the squad ceiling would happily have allowed. */
 import type { Database } from "bun:sqlite";
+import { DEFAULT_TEAM_ID } from "../schemas/team";
 
 /** `squad` bounds every agent. `team:<id>` bounds one team's members. Both are metered per model call. */
 export type SpendScope = "squad" | `team:${string}`;
@@ -17,10 +18,15 @@ export type SpendScope = "squad" | `team:${string}`;
 export const SQUAD_SCOPE: SpendScope = "squad";
 export const teamScope = (teamId: string): SpendScope => `team:${teamId}`;
 
-/** The scopes a run on `team` is metered against. Order matters only for which exhaustion message the
- *  captain sees first, and the narrower one is more actionable. */
-export function scopesFor(team?: string | null): SpendScope[] {
-  return team ? [teamScope(team), SQUAD_SCOPE] : [SQUAD_SCOPE];
+/** The scopes a run by an agent on these teams is metered against (Plan 22: an agent may be on several).
+ *  Every explicit team the agent belongs to gets its own ceiling, plus the always-present squad. The
+ *  implicit `default` team is dropped — it IS the squad, so metering it separately would double-count.
+ *  Order matters only for which exhaustion message the captain sees first, and the narrower (team) ones
+ *  come before the squad because they are more actionable. */
+export function scopesFor(teams?: string[] | string | null): SpendScope[] {
+  const list = teams == null ? [] : Array.isArray(teams) ? teams : [teams];
+  const explicit = [...new Set(list.filter((t) => t && t !== DEFAULT_TEAM_ID))];
+  return [...explicit.map(teamScope), SQUAD_SCOPE];
 }
 
 export interface SpendCeilings {

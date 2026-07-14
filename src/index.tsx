@@ -5,7 +5,7 @@ import { ensureWorkspace } from "./store/files";
 import { openDb } from "./store/db";
 import { seedRoot, seedLibrarian, reindex, loadIndex, reconcileWorkerTools } from "./store/roster";
 import { reindexKnowledge, reconcileKbScope } from "./store/knowledge";
-import { validateTeams } from "./store/teams";
+import { validateTeams, seedDefaultTeam } from "./store/teams";
 import { diffSources } from "./store/sources";
 import { createEmbedder } from "./core/embed";
 import { ensureEmbedSpace } from "./store/migrate";
@@ -28,6 +28,7 @@ import { reindexPlans, reconcilePlans } from "./store/plans";
 import { createE2eModel } from "./core/e2e-model";
 import { parseCli, runHeadless, runTail, scheduleFireOptions } from "./core/headless";
 import { runScheduleCli } from "./core/schedule-cli";
+import { runTeamCli } from "./core/team-cli";
 import { configureLogger, log } from "./core/logger";
 import { initTelemetry } from "./core/otel";
 
@@ -56,8 +57,18 @@ if (cli.command?.kind === "schedule" && cli.command.args[0] !== "run") {
   process.exit(r.ok ? 0 : 1);
 }
 
+// Plan 22: `taicho team <list|add|remove|member>` — captain-owned team management, no model. Opens the
+// DB + reindexes itself, so it short-circuits the heavy boot (seeds beyond root, MCP connect) too.
+if (cli.command?.kind === "team") {
+  const r = await runTeamCli({ ws, out: (l) => process.stdout.write(l + "\n") }, cli.command.args);
+  process.exit(r.ok ? 0 : 1);
+}
+
 await seedRoot(ws, config.defaults);
 await seedLibrarian(ws, config.defaults);
+// Plan 22: the universal `default` team — every agent belongs to it, root leads it, it can't be deleted.
+// Seeded like root/librarian; idempotent, so a customised default.md is left alone.
+seedDefaultTeam(ws);
 // Plan 14 T3: rescue any worker born toolless (`tools: []`) — grant it the default artifact baseline so
 // a live squad (root/2026-07-04-run6's 9 empty-tools agents) becomes usable without hand-editing each file.
 const backfilledWorkers = await reconcileWorkerTools(ws);
@@ -86,11 +97,11 @@ const interruptedItems = reconcilePlans(ws, db);
 // Plan 19: a team whose `lead` is missing, or sits on a DIFFERENT team, would route work out of the
 // team it is supposed to run. Report it — one bad team.md must not block boot, and the fix is an edit.
 const teamProblems = validateTeams(ws, db);
-// Plan 19: an agent's team, read from the derived registry index. Injected into the model resolver so
-// it can walk agent → team → defaults without importing the DB. A prepared statement: resolveModel runs
-// once per run, and per delegated child.
-const teamOfStmt = db.query<{ team: string | null }, [string]>("SELECT team FROM registry WHERE id = ?");
-const teamOf = (agentId: string): string | undefined => teamOfStmt.get(agentId)?.team ?? undefined;
+// Plan 19/22: an agent's teams, read from the derived membership index. Injected into the model resolver
+// so it can walk agent → team → defaults without importing the DB. A prepared statement: resolveModel
+// runs once per run, and per delegated child. Many-to-many now, so this returns the ordered team list.
+const teamsOfStmt = db.query<{ team_id: string }, [string]>("SELECT team_id FROM agent_teams WHERE agent_id = ? ORDER BY ord");
+const teamsOf = (agentId: string): string[] => teamsOfStmt.all(agentId).map((r) => r.team_id);
 const notices: string[] = [];
 if (teamProblems.length)
   notices.push(`teams: ${teamProblems.map((p) => `${p.team} (${p.problem})`).join("; ")} — /teams to review`);
@@ -197,7 +208,7 @@ function buildFromAuth(src: AuthSource): BuiltAuth {
     const cfg = { provider: src.provider, model: config.defaults?.model ?? src.model };
     return {
       model: buildModel(cfg, modelRequestTimeoutMs),
-      resolveModel: createModelResolver({ config, fallback: cfg, timeoutMs: modelRequestTimeoutMs, teamOf }).resolveModel,
+      resolveModel: createModelResolver({ config, fallback: cfg, timeoutMs: modelRequestTimeoutMs, teamsOf }).resolveModel,
       priceUsd: pricerFor(cfg.model),
     };
   }
@@ -210,8 +221,9 @@ function buildFromAuth(src: AuthSource): BuiltAuth {
     // Subscription calls are not metered in USD; mark subscription:true so the run trace reports
     // "subscription" instead of a (meaningless) dollar cost.
     const pick = (id: string) => {
-      // agent → team → defaults, the same walk createModelResolver makes for the env-key providers.
-      const t = teamOf(id);
+      // agent → team → defaults, the same walk createModelResolver makes for the env-key providers. With
+      // many-to-many membership (Plan 22), the first team carrying a model override wins.
+      const t = teamsOf(id).find((tid) => config.teams?.[tid]?.model);
       const m = config.agents?.[id]?.model ?? (t ? config.teams?.[t]?.model : undefined) ?? config.defaults?.model ?? OPENAI_CODEX_AUTH.defaultModelId;
       return { model: codex(m), modelId: m, subscription: true };
     };

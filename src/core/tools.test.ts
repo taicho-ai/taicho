@@ -32,7 +32,7 @@ const fakeMcp = {
 } as unknown as McpManager;
 
 const agent = (tools: string[]): AgentDef => ({
-  id: "a", role: "r", identity: "i", tools, canSee: ["*"], canDelegateTo: [],
+  id: "a", role: "r", identity: "i", tools, teams: [], canSee: ["*"], canDelegateTo: [],
   budgets: { maxIterationsPerRun: 5, maxWorkItemsPerRequest: 5 }, isRoot: false,
   created: "2026-06-11T00:00:00.000Z",
 });

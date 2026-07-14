@@ -215,6 +215,32 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS plans_open  ON plans(open);
       `),
   },
+  // v11: Plan 22 — many-to-many team membership. An agent may sit on several teams, so the single
+  // `registry.team` column can no longer hold membership. `agent_teams` is the join (agent × team), and
+  // — unlike v8's `team` COLUMN, which needed a baseline + a guarded ALTER because IF NOT EXISTS can't
+  // add a column — a NEW TABLE is created idempotently by the migration alone, for fresh and existing
+  // DBs both. Membership is canon in agents/<id>/agent.md (`teams:`); this is the derived index, and
+  // reindex() rebuilds it every boot (adding the implicit `default` membership). The one-time carry
+  // below only bridges the window before that first reindex (and unit tests that migrate but never
+  // reindex): it lifts any pre-Plan-22 single-team rows into the join so nothing is lost.
+  {
+    version: 11,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_teams (
+          agent_id TEXT NOT NULL,
+          team_id  TEXT NOT NULL,
+          ord      INTEGER NOT NULL DEFAULT 0,   -- declaration order, for deterministic model resolution
+          PRIMARY KEY (agent_id, team_id)
+        );
+        CREATE INDEX IF NOT EXISTS agent_teams_team ON agent_teams(team_id);
+      `);
+      if (!tableExists(db, "registry") || !columnExists(db, "registry", "team")) return;
+      const rows = db.query("SELECT id, team FROM registry WHERE team IS NOT NULL AND team <> ''").all() as { id: string; team: string }[];
+      const ins = db.query("INSERT OR IGNORE INTO agent_teams (agent_id, team_id, ord) VALUES (?, ?, 0)");
+      for (const r of rows) ins.run(r.id, r.team);
+    },
+  },
 ];
 
 function tableExists(db: Database, table: string): boolean {

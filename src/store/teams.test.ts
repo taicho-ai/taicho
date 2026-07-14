@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "./db";
 import { paths } from "./files";
-import { createTeam, loadTeam, listTeams, teamExists, membersOf, validateTeams, parseTeam, serializeTeam, assertPolicyRespectsFloor } from "./teams";
+import { createTeam, loadTeam, listTeams, teamExists, membersOf, validateTeams, parseTeam, serializeTeam, assertPolicyRespectsFloor, seedDefaultTeam } from "./teams";
+import { DEFAULT_TEAM_ID } from "../schemas/team";
 import { syncRegistry } from "../core/registry";
 import { DEFAULT_WORKER_TOOLS } from "./roster";
 import { AgentDef } from "../schemas/agent";
@@ -72,13 +73,44 @@ test("listTeams skips a malformed team.md rather than taking boot down with it",
 
 // --- membership is derived, never stored twice ----------------------------------------------------
 
-test("membersOf reads the registry's team column — the derived index of agent.md's `team:`", () => {
+test("membersOf reads the agent_teams join — the derived index of agent.md's `teams:`", () => {
   const w = ws();
   const db = openDb(w);
   syncRegistry(db, [agent("root"), agent("reporter", "news"), agent("factchecker", "news"), agent("quant", "trading")]);
   expect(membersOf(db, "news").map((m) => m.id)).toEqual(["factchecker", "reporter"]); // sorted
   expect(membersOf(db, "trading").map((m) => m.id)).toEqual(["quant"]);
   expect(membersOf(db, "empty")).toEqual([]);
+});
+
+test("Plan 22: every agent is an implicit member of the default team", () => {
+  const w = ws();
+  const db = openDb(w);
+  syncRegistry(db, [agent("root"), agent("reporter", "news"), agent("quant", "trading")]);
+  // membersOf(default) is the whole squad, even for agents that declare no explicit team
+  expect(membersOf(db, DEFAULT_TEAM_ID).map((m) => m.id)).toEqual(["quant", "reporter", "root"]);
+});
+
+test("Plan 22: an agent on several teams is a member of each", () => {
+  const w = ws();
+  const db = openDb(w);
+  const editor = AgentDef.parse({ id: "editor", role: "edits", identity: "i", teams: ["news", "research"], created: new Date().toISOString() });
+  syncRegistry(db, [editor]);
+  expect(membersOf(db, "news").map((m) => m.id)).toEqual(["editor"]);
+  expect(membersOf(db, "research").map((m) => m.id)).toEqual(["editor"]);
+  expect(membersOf(db, DEFAULT_TEAM_ID).map((m) => m.id)).toEqual(["editor"]);
+});
+
+test("seedDefaultTeam creates an undeleteable default team once, idempotently", () => {
+  const w = ws();
+  expect(teamExists(w, DEFAULT_TEAM_ID)).toBe(false);
+  seedDefaultTeam(w);
+  expect(teamExists(w, DEFAULT_TEAM_ID)).toBe(true);
+  const def = loadTeam(w, DEFAULT_TEAM_ID)!;
+  expect(def.lead).toBe("root");
+  expect(listTeams(w).map((t) => t.id)).toContain(DEFAULT_TEAM_ID);
+  // idempotent: a second call does not throw or duplicate
+  seedDefaultTeam(w);
+  expect(listTeams(w).filter((t) => t.id === DEFAULT_TEAM_ID)).toHaveLength(1);
 });
 
 test("validateTeams flags a lead that is missing, or sits on a different team", () => {
@@ -91,7 +123,7 @@ test("validateTeams flags a lead that is missing, or sits on a different team", 
 
   const problems = validateTeams(w, db);
   expect(problems).toHaveLength(2);
-  expect(problems.find((p) => p.team === "news")?.problem).toContain('it must declare "news"');
+  expect(problems.find((p) => p.team === "news")?.problem).toContain("is not a member of the team it leads");
   expect(problems.find((p) => p.team === "trading")?.problem).toContain("is not an agent");
   expect(problems.find((p) => p.team === "ops")).toBeUndefined();
 });
