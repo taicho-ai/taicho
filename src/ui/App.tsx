@@ -1,6 +1,8 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Box, Text, useInput, useApp, useStdout, type Key } from "ink";
-import { TextInput, Spinner } from "@inkjs/ui";
+import { Spinner } from "@inkjs/ui";
+import { ChatInput } from "./ChatInput";
+import { pushHistory, loadHistory, appendHistory } from "./input-history";
 import type { Database } from "bun:sqlite";
 import { ProposalCard, type CardField, type CardKeyHandler } from "./ProposalCard";
 import { QuestionCard } from "./QuestionCard";
@@ -19,6 +21,7 @@ import { gatherConversationArtifacts } from "../core/conversation-artifacts";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
 import { loadAgent, loadIndex, reindex, createAgent, setAgentTeams, deleteAgent, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
 import { listTeams, createTeamWithMembers, deleteTeam, setTeamMembers } from "../store/teams";
+import { scaffoldWorkflow } from "../store/workflows";
 import { PlanPanel } from "./PlanPanel";
 import type { PlanState } from "../schemas/plan";
 import { currentPlanId, foldPlan, settlePlanItemForTask } from "../store/plans";
@@ -179,20 +182,11 @@ export function App(props: {
   });
   const [planPanelOn, setPlanPanelOn] = useState<boolean>(() => getPlanPanel(props.ws));
   const [lines, setLines] = useState<Line[]>(() => initialLines(props));
+  // Plan 24: the message editor is now a CONTROLLED <ChatInput> — `input` is the single source of truth,
+  // so a programmatic set (clear-on-submit, seed "/cmd " on accept) is just `setInput`, and the draft
+  // survives the browser dock's unmount without the old remount hack (bumped key + seed).
   const [input, setInput] = useState("");
-  // @inkjs/ui TextInput is uncontrolled (defaultValue only, no `value`). To set its text
-  // programmatically — clear after submit, seed "/cmd " on suggestion-accept — we remount it via a
-  // bumped `key` with a fresh seed. onChange keeps `input` in sync for live suggestion matching, so
-  // routine typing never remounts (only the deliberate programmatic sets below do).
-  const [inputKey, setInputKey] = useState(0);
-  const [inputSeed, setInputSeed] = useState("");
-  const setInputValue = (v: string) => { inputLiveRef.current = v; setInput(v); setInputSeed(v); setInputKey((k) => k + 1); };
-  // MUST be a stable reference: @inkjs/ui TextInput fires onChange from an effect whose deps include
-  // `onChange` itself, and its `previousValue` lags one keystroke — so a fresh inline handler re-fires
-  // onChange on every App re-render, which would reset `selected` and freeze the suggester highlight.
-  const inputLiveRef = useRef("");  // Plan 21: the live draft — the dock unmounts the TextInput, and a
-                                    // typed-but-unsent line must survive into the remount's seed.
-  const onInputChange = useCallback((v: string) => { inputLiveRef.current = v; setInput(v); setSelected(0); }, []);
+  const [history, setHistory] = useState<string[]>(() => loadHistory(props.ws)); // ↑/↓ message history
   const [selected, setSelected] = useState(0);
   const [activity, setActivity] = useState("working…"); // live status shown by the run spinner
   const [busy, setBusy] = useState(false);
@@ -303,11 +297,9 @@ export function App(props: {
   const [browser, setBrowser] = useState<{ rootRunId?: string; ui: BrowserUiState; bump: number } | null>(null);
   const browserKeyRef = useRef<CardKeyHandler | null>(null);
   const lastRunRef = useRef<string | undefined>(undefined); // last completed foreground run (bare /artifacts re-entry)
-  // Dock the browser, carrying any un-submitted draft into the TextInput's remount seed (the input
-  // unmounts while the browser owns the keyboard — without this, a line typed during the run vanishes).
+  // Dock the browser. Plan 24: the draft lives in the controlled `input` state, so it survives the
+  // input's unmount here automatically — no remount seed needed.
   const dockBrowser = (b: { rootRunId?: string; ui: BrowserUiState; bump: number }) => {
-    setInputSeed(inputLiveRef.current);
-    setInputKey((k) => k + 1);
     setBrowser(b);
   };
 
@@ -317,8 +309,6 @@ export function App(props: {
   const [org, setOrg] = useState<{ ui: OrgUiState; bump: number } | null>(null);
   const orgKeyRef = useRef<CardKeyHandler | null>(null);
   const dockOrg = (scope: OrgScope) => {
-    setInputSeed(inputLiveRef.current);
-    setInputKey((k) => k + 1);
     setOrg({ ui: initialOrgUi(scope), bump: 0 });
   };
   // Each mutation runs a service-layer call, refreshes the derived roster (StatusBar/prompt read it), and
@@ -334,6 +324,7 @@ export function App(props: {
     deleteAgent: (id) => orgAction(() => deleteAgent(props.ws, props.db, id)),
     setTeamMembers: (teamId, members) => orgAction(() => setTeamMembers(props.ws, props.db, teamId, members)),
     setAgentTeams: (agentId, teams) => orgAction(() => setAgentTeams(props.ws, props.db, agentId, teams)),
+    scaffoldWorkflow: (teamId, members) => orgAction(async () => scaffoldWorkflow(props.ws, teamId, members)),
   };
 
   // Plan 13 (corrected): compute block data from the block feed at the top level (hooks must not be
@@ -403,11 +394,9 @@ export function App(props: {
     }
     if (key.shift && key.tab) { setFocusMode(true); return; } // enter focus mode
     if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else { void (async () => { await props.mcp?.closeAll(); await props.telemetry?.shutdown(); exit(); })(); } return; }
-    if (sugg.length > 0) {
-      if (key.upArrow)   { setSelected((s) => cycleIndex(s, sugg.length, -1)); return; }
-      if (key.downArrow) { setSelected((s) => cycleIndex(s, sugg.length, +1)); return; }
-      if (key.tab)       { acceptSuggestion(sugg); return; }
-    }
+    // Plan 24: chat-line editing (typing, motions, word-nav, history) AND the suggester's ↑/↓/Tab now
+    // live in <ChatInput>'s own useInput (gated by isActive). This boot listener only owns the surfaces
+    // above (cards, browsers, focus, escape/shift-tab).
   }, { isActive: true });
 
   const say = (l: Line) => setLines((prev) => [...prev, l]);
@@ -476,8 +465,8 @@ export function App(props: {
     const cmd = list[Math.min(selected, list.length - 1)];
     if (!cmd) return;
     setSelected(0);
-    if (cmd.requiresArg) { setInputValue(`/${cmd.name} `); return; }
-    setInputValue("");
+    if (cmd.requiresArg) { setInput(`/${cmd.name} `); return; }
+    setInput("");
     say({ kind: "user", text: `/${cmd.name}` });
     void runSlash(cmd.name, "");
   };
@@ -768,12 +757,15 @@ export function App(props: {
 
   const submit = async (value: string) => {
     if (!value.trim()) return;
+    // Plan 24: every sent line joins the ↑/↓ history (session + the persisted per-workspace file).
+    setHistory((h) => pushHistory(h, value));
+    appendHistory(props.ws, value);
 
-    if (busy) { setInputValue(""); routeSteer(value); return; }
+    if (busy) { setInput(""); routeSteer(value); return; }
 
     const matches = suggestCommands(value);
     if (matches.length > 0) { acceptSuggestion(matches); return; } // Enter selects the highlighted command
-    setInputValue("");
+    setInput("");
 
     const parsed = parseInput(value);
     say({ kind: "user", text: value });
@@ -1248,16 +1240,20 @@ export function App(props: {
       {layout.showBar && squadStatuses.length > 0 && <StatusBar statuses={squadStatuses} width={termSize.columns} />}
       {!pending && !operationRunId && !browser && !org && (
         <>
-          <Box>
-            <Text color={busy ? "gray" : focusMode ? "gray" : "cyan"}>{busy ? "❯ " : focusMode ? "  " : "> "}</Text>
-            <TextInput
-              key={inputKey}
-              defaultValue={inputSeed}
-              placeholder={focusMode ? "(focus mode — esc to return)" : "message root, or / for commands"}
-              onChange={onInputChange}
-              onSubmit={submit}
-            />
-          </Box>
+          <ChatInput
+            value={input}
+            onChange={(v) => { setInput(v); setSelected(0); }}
+            onSubmit={submit}
+            history={history}
+            isActive={!focusMode}
+            suggestOpen={sugg.length > 0}
+            onSuggestNav={(dir) => setSelected((s) => cycleIndex(s, sugg.length, dir))}
+            onSuggestAccept={() => acceptSuggestion(sugg)}
+            placeholder={focusMode ? "(focus mode — esc to return)" : "message root, or / for commands"}
+            width={Math.min(termSize.columns, 100)}
+            dimmed={busy || focusMode}
+            busy={busy}
+          />
           {sugg.length > 0 && (
             <Box flexDirection="column">
               {sugg.map((c, i) => {

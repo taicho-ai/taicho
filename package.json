@@ -30,7 +30,7 @@
     "@opentelemetry/semantic-conventions": "^1.42.0",
     "ai": "6.0.199",
     "chalk": "^5.6.2",
-    "ink": "^7.0.5",
+    "ink": "^7.1.0",
     "ink-text-input": "^6.0.0",
     "marked": "^12.0.0",
     "marked-terminal": "7.3.0",

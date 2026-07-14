@@ -12,6 +12,7 @@ import type { RunContext, RunResult } from "./run";
 import type { McpManager } from "./mcp/manager";
 import type { VerificationVerdict } from "../schemas/trace";
 import { paths } from "../store/files";
+import { loadWorkflow, seatsOf, orchestrationSlice } from "../store/workflows";
 import { readTaskState } from "../store/task-state";
 import { saveArtifact, readArtifact, readArtifactBody, listArtifacts } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
@@ -270,6 +271,22 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
+  // Plan 23: READ a team's workflow, so root can brief the captain on how a team works. Read-only — the
+  // model never authors or edits a workflow (those stay captain-authored, which is what keeps the process
+  // stable). Not approval-gated: reading isn't privileged. Root holds it; a lead could be granted it too.
+  if (has("read_workflow"))
+    set.read_workflow = tool({
+      description:
+        "Read a team's WORKFLOW — how work moves through it and what each seat (member) does — so you can brief the captain on it. Read-only: workflows are captain-authored and you cannot change one from here. Returns the raw workflow markdown plus the seats it covers, or a note when the team has none.",
+      inputSchema: z.object({ team: z.string().describe("the team id whose workflow to read") }),
+      execute: async ({ team }) => {
+        const wf = loadWorkflow(ctx.ws, team);
+        if (!wf) return { team, workflow: null, note: `team "${team}" has no workflow — it runs on the agentic brief` };
+        const text = await readFile(paths.teamWorkflowFile(ctx.ws, team), "utf8");
+        return { team, seats: seatsOf(wf), hasOrchestration: !!orchestrationSlice(wf), workflow: text };
+      },
+    });
+
   // ---- Plan 18: the agent's live plan -------------------------------------------------------------
   // NOT in DEFAULT_WORKER_TOOLS. A plan is not needed to produce an artifact, so it stays an opt-in
   // grant under Plan 08 least privilege. Root holds all three; a worker or team lead asks for them.
@@ -413,7 +430,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         // Spawn one child run (initial OR the verification retry). Both get the SAME input handles BY
         // REFERENCE, and each spawn folds its spend + produced handles into this run's aggregate/graph.
         const spawn = async (childContext?: string) => {
-          const child = await ctx.runChild({ to: target, goal, context: childContext, criteria, inputArtifacts: resolved, callId: spawnCallId });
+          const child = await ctx.runChild({ to: target, goal, context: childContext, criteria, inputArtifacts: resolved, callId: spawnCallId, viaTeam: guard.viaTeam });
           ctx.delegatedOut.push(child.runId);
           ctx.childTraces.push(child.trace);
           ctx.outputArtifacts.push(...child.trace.artifacts); // hand-off graph: handles the child produced

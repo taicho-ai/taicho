@@ -7,6 +7,7 @@ dist/
 .envt
 .DS_Store
 agents/
+teams/
 runs/
 artifacts/
 kb/
@@ -19,3 +20,4 @@ tui-traces/
 taicho.log
 verification-failures.jsonl
 schedules/
+.taicho-input-history

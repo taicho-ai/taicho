@@ -8,6 +8,7 @@ export const paths = {
   teamsDir: (ws: string) => join(ws, "teams"),
   teamDir: (ws: string, id: string) => join(ws, "teams", id),
   teamFile: (ws: string, id: string) => join(ws, "teams", id, "team.md"),
+  teamWorkflowFile: (ws: string, id: string) => join(ws, "teams", id, "workflow.md"),
   policyDir: (ws: string, id: string) => join(ws, "agents", id, "policies"),
   exemplarDir: (ws: string, id: string) => join(ws, "agents", id, "exemplars"),
   artifactDir: (ws: string) => join(ws, "artifacts"),
@@ -27,6 +28,7 @@ export const paths = {
   kbSourceFile: (ws: string, name: string) => join(ws, "kb", "sources", name),
   skillsDir: (ws: string) => join(ws, "skills"),
   skillFile: (ws: string, id: string) => join(ws, "skills", `${id}.md`),
+  inputHistoryFile: (ws: string) => join(ws, ".taicho-input-history"), // Plan 24: REPL message history
 };
 
 export async function ensureWorkspace(ws: string) {
