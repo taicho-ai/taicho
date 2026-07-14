@@ -39,7 +39,10 @@ export type CliCommand =
   // Plan 04 Phase 6: manage/fire durable schedules. `args` are the raw tokens after `schedule`
   // (--verbose already stripped); parsed by parseScheduleCommand in scheduler.ts so the CLI and the
   // REPL's /schedules command share one grammar.
-  | { kind: "schedule"; args: string[] };
+  | { kind: "schedule"; args: string[] }
+  // Plan 22: manage teams from the command line (`taicho team add|list|remove|member`). Raw tokens after
+  // `team`, parsed by runTeamCli — a captain-owned, model-free front door onto the same service layer.
+  | { kind: "team"; args: string[] };
 
 export interface ParsedCli {
   /** `--verbose`/`-v` anywhere on the line → raise the log level to debug. */
@@ -59,13 +62,14 @@ function normalizeApprove(v: string | undefined): ApprovalMode {
  *  interpreter/executable path, everything after is the command's args. No subcommand ⇒ REPL. */
 export function parseCli(argv: string[]): ParsedCli {
   const verbose = argv.includes("--verbose") || argv.includes("-v");
-  const cmdIdx = argv.findIndex((a, i) => i > 0 && (a === "run" || a === "tail" || a === "schedule"));
+  const cmdIdx = argv.findIndex((a, i) => i > 0 && (a === "run" || a === "tail" || a === "schedule" || a === "team"));
   if (cmdIdx < 0) return { verbose, command: null };
 
   const cmd = argv[cmdIdx];
   const rest = argv.slice(cmdIdx + 1).filter((a) => a !== "--verbose" && a !== "-v");
 
   if (cmd === "schedule") return { verbose, command: { kind: "schedule", args: rest } };
+  if (cmd === "team") return { verbose, command: { kind: "team", args: rest } };
 
   if (cmd === "run") {
     let agent = "root";

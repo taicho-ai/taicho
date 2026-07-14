@@ -88,8 +88,8 @@ test("resolveModel prefers the agent override, then its team's, then defaults", 
     agents: { quant: { model: "claude-haiku-4-5" } },
   };
   const fallback = { provider: "anthropic" as const, model: "claude-sonnet-4-6" };
-  const teamOf = (id: string) => (id === "quant" || id === "riskdesk" ? "trading" : undefined);
-  const { resolveModel } = createModelResolver({ config, fallback, teamOf });
+  const teamsOf = (id: string) => (id === "quant" || id === "riskdesk" ? ["trading"] : []);
+  const { resolveModel } = createModelResolver({ config, fallback, teamsOf });
 
   expect(resolveModel("quant").modelId).toBe("claude-haiku-4-5");   // agent wins over its team
   expect(resolveModel("riskdesk").modelId).toBe("claude-opus-4-8"); // team wins over defaults

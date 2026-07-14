@@ -46,13 +46,13 @@ export function buildModel(cfg: ResolvedConfig, timeoutMs?: number): Model {
 
 export interface ResolvedModel { model: Model; modelId: string; provider: Provider; captureCost?: boolean; }
 
-/** @param teamOf the running agent's team, or undefined. Injected rather than looked up so the resolver
- *  stays free of a DB import; the REPL passes a prepared registry query. */
+/** @param teamsOf the running agent's teams (Plan 22: many-to-many), or undefined. Injected rather than
+ *  looked up so the resolver stays free of a DB import; the REPL passes a prepared registry query. */
 export function createModelResolver(opts: {
   config: TaichoConfig;
   fallback: ResolvedConfig;
   timeoutMs?: number;
-  teamOf?: (agentId: string) => string | undefined;
+  teamsOf?: (agentId: string) => string[];
 }): {
   resolveModel: (agentId: string) => ResolvedModel;
 } {
@@ -61,10 +61,12 @@ export function createModelResolver(opts: {
   // is config-disposed (defaults.modelRequestTimeoutMs) — model-supplied values never reach it.
   const timeoutFetch = withRequestTimeout(fetch, opts.timeoutMs ?? DEFAULT_MODEL_REQUEST_TIMEOUT_MS);
   const resolveModel = (agentId: string): ResolvedModel => {
-    // Plan 19: agent → team → defaults. The agent still wins, so a single specialist can out-run its
-    // team's model without the team having to know about it.
+    // Plan 19/22: agent → team → defaults. The agent still wins, so a single specialist can out-run its
+    // team's model without the team having to know about it. An agent on SEVERAL teams resolves against
+    // the first (in declaration order) that actually carries a model/provider override — deterministic,
+    // and the implicit `default` team (which never has one) is skipped for free.
     const a = opts.config.agents?.[agentId];
-    const teamId = opts.teamOf?.(agentId);
+    const teamId = opts.teamsOf?.(agentId)?.find((id) => opts.config.teams?.[id]);
     const t = teamId ? opts.config.teams?.[teamId] : undefined;
     const provider: Provider = a?.provider ?? t?.provider ?? opts.config.defaults?.provider ?? opts.fallback.provider;
     const model = a?.model ?? t?.model ?? opts.config.defaults?.model ?? opts.fallback.model;

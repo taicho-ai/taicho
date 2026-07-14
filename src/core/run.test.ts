@@ -23,7 +23,7 @@ import { writeSkill } from "../store/skills";
 import { Skill } from "../schemas/skill";
 import { saveArtifact, readArtifact } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
-import { createTeam, loadTeam } from "../store/teams";
+import { createTeam, loadTeam, teamExists, membersOf } from "../store/teams";
 import { foldPlan, latestVersion, readPlanEvents, writePlan, appendPlanEvent } from "../store/plans";
 import { toolsForAgent } from "./tools";
 
@@ -159,6 +159,50 @@ test("root create_agent does NOT mutate the registry when approval rejects", asy
   const root = await loadAgent(ws, "root");
   await executeRun(deps, { agent: root, messages: [{ role: "user", content: "I need an X agent" }], triggeredBy: "user" });
   expect(loadIndex(db).some((r) => r.id === "newbie")).toBe(false);
+});
+
+// ── Plan 22: the on-the-fly create_team route (approval-gated) ──
+
+test("root create_team tool creates and staffs a team when approval resolves approve", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "reporter", role: "reports", identity: "i" }, "root");
+  await createAgent(ws, db, { id: "editor", role: "edits", identity: "i" }, "root");
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("create_team", { id: "news", charter: "the brief", members: ["reporter", "editor"], lead: "editor" }), text("done")) as any,
+  });
+  const deps = makeDeps({ ws, db, model, requestApproval: async () => ({ type: "approve" }) });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "make the news team" }], triggeredBy: "user" });
+  expect(teamExists(ws, "news")).toBe(true);
+  expect(membersOf(db, "news").map((m) => m.id)).toEqual(["editor", "reporter"]);
+  expect(loadTeam(ws, "news")!.lead).toBe("editor");
+  expect((await loadAgent(ws, "reporter")).teams).toEqual(["news"]); // membership landed on the agent
+});
+
+test("root create_team does NOT create the team when approval rejects", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "reporter", role: "reports", identity: "i" }, "root");
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("create_team", { id: "news", charter: "c", members: ["reporter"] }), text("ok")) as any,
+  });
+  const deps = makeDeps({ ws, db, model, requestApproval: async () => ({ type: "reject" }) });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "make it" }], triggeredBy: "user" });
+  expect(teamExists(ws, "news")).toBe(false);
+});
+
+test("root create_team cannot grant a tool it does not hold — blocked BEFORE the captain is asked", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "reporter", role: "r", identity: "i" }, "root");
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("create_team", { id: "news", charter: "c", members: ["reporter"], grant: ["totally_made_up_tool"] }), text("ok")) as any,
+  });
+  let approvalCalls = 0;
+  const deps = makeDeps({ ws, db, model, requestApproval: async () => { approvalCalls++; return { type: "approve" }; } });
+  const root = await loadAgent(ws, "root");
+  await executeRun(deps, { agent: root, messages: [{ role: "user", content: "make it" }], triggeredBy: "user" });
+  expect(teamExists(ws, "news")).toBe(false); // the escalation ceiling stopped it
+  expect(approvalCalls).toBe(0);              // and the captain was never even asked
 });
 
 test("root delegate_task spawns a child run that produces its own trace", async () => {
@@ -1274,8 +1318,8 @@ test("recovery: run.ts writes an incremental transcript AND a resume checkpoint 
 async function bootTeam(opts: { lead?: string } = {}) {
   const { ws, db } = await boot();
   createTeam(ws, { id: "news", charter: "covers breaking stories", lead: opts.lead });
-  await createAgent(ws, db, { id: "reporter", role: "files stories on deadline", identity: "You report.", team: "news" }, "root");
-  await createAgent(ws, db, { id: "factchecker", role: "verifies claims and sources", identity: "You verify.", team: "news" }, "root");
+  await createAgent(ws, db, { id: "reporter", role: "files stories on deadline", identity: "You report.", teams: ["news"] }, "root");
+  await createAgent(ws, db, { id: "factchecker", role: "verifies claims and sources", identity: "You verify.", teams: ["news"] }, "root");
   await reindex(ws, db);
   return { ws, db };
 }
@@ -1382,7 +1426,7 @@ test("Plan 19 Ph5: a team's tool policy reaches the member's real toolset (deny 
   const { ws, db } = await boot();
   // ops denies run_command to its members and grants recall to all of them
   createTeam(ws, { id: "ops", charter: "keeps the lights on", tools: { deny: ["run_command"], grant: ["recall"] } });
-  await createAgent(ws, db, { id: "sre", role: "operates", identity: "You operate.", tools: ["run_command"], team: "ops" }, "root");
+  await createAgent(ws, db, { id: "sre", role: "operates", identity: "You operate.", tools: ["run_command"], teams: ["ops"] }, "root");
   await reindex(ws, db);
 
   // The model tries the denied tool; the SDK never exposes it, so the loop sees an unknown tool.

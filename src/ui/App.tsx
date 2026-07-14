@@ -9,14 +9,16 @@ import { SquadPanes, resolveLayout, type PaneEntry, type PaneFeedMap } from "./S
 import { AgentBlock, useBlockSettle, useBlockTicker, tailLines, type AgentBlockData } from "./AgentBlock";
 import { OperationView } from "./OperationView";
 import { ArtifactBrowser, initialBrowserUi, type BrowserUiState } from "./ArtifactBrowser";
+import { OrgBrowser, initialOrgUi, type OrgUiState, type OrgActions } from "./OrgBrowser";
+import type { OrgScope } from "./org-browser-model";
 import { latestRunFallback } from "./browser-model";
 import { parseInput } from "./input";
 import { BANNER } from "./banner";
 import { statusReducer, statusList, type StatusMap, type AgentStatus } from "../core/agent-status";
 import { gatherConversationArtifacts } from "../core/conversation-artifacts";
 import { makeDeps, executeRun, type Model, type ApprovalRequest, type ApprovalDecision } from "../core/run";
-import { loadAgent, loadIndex, reindex, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
-import { listTeams } from "../store/teams";
+import { loadAgent, loadIndex, reindex, createAgent, setAgentTeams, deleteAgent, LIBRARIAN_ID, type RegistryRow } from "../store/roster";
+import { listTeams, createTeamWithMembers, deleteTeam, setTeamMembers } from "../store/teams";
 import { PlanPanel } from "./PlanPanel";
 import type { PlanState } from "../schemas/plan";
 import { currentPlanId, foldPlan, settlePlanItemForTask } from "../store/plans";
@@ -115,6 +117,14 @@ function proposalView(req: Exclude<ApprovalRequest, { kind: "ask_human" }>): { t
       { label: "command", value: req.command },
       { label: "cwd", value: req.cwd ?? "(workspace)" },
       { label: "flagged", value: req.reason ?? "the guard flagged this command" },
+    ] };
+  if (req.kind === "create_team")
+    return { title: "New team — approve?", fields: [
+      { label: "id", value: req.draft.id },
+      { label: "charter", value: req.draft.charter },
+      { label: "lead", value: req.draft.lead ?? "(routed by capability)" },
+      { label: "members", value: req.draft.members.join(", ") || "(none yet)" },
+      { label: "grant", value: req.draft.grant.join(", ") || "(none beyond what members hold)" },
     ] };
   return { title: "New agent — approve?", fields: [
     { label: "id", value: req.draft.id }, { label: "role", value: req.draft.role }, { label: "identity", value: req.draft.identity },
@@ -301,6 +311,31 @@ export function App(props: {
     setBrowser(b);
   };
 
+  // Plan 22: the Org browser — the captain's dedicated team/agent management mode (/teams, /agents).
+  // Same discipline as the artifact browser: all UI state lives HERE, keys ride orgKeyRef, and a pending
+  // card suspends it. It docks over the chat (input + panes + blocks + plan panel yield while it's up).
+  const [org, setOrg] = useState<{ ui: OrgUiState; bump: number } | null>(null);
+  const orgKeyRef = useRef<CardKeyHandler | null>(null);
+  const dockOrg = (scope: OrgScope) => {
+    setInputSeed(inputLiveRef.current);
+    setInputKey((k) => k + 1);
+    setOrg({ ui: initialOrgUi(scope), bump: 0 });
+  };
+  // Each mutation runs a service-layer call, refreshes the derived roster (StatusBar/prompt read it), and
+  // reports ok/error back to the browser for its transient note line.
+  const orgAction = async (fn: () => Promise<unknown>) => {
+    try { await fn(); setRoster(loadIndex(props.db)); setOrg((o) => (o ? { ...o, bump: o.bump + 1 } : o)); return { ok: true }; }
+    catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
+  };
+  const orgActions: OrgActions = {
+    createTeam: (draft, members) => orgAction(() => createTeamWithMembers(props.ws, props.db, { id: draft.id, charter: draft.charter, lead: draft.lead }, members)),
+    createAgent: (draft) => orgAction(() => createAgent(props.ws, props.db, { id: draft.id, role: draft.role, identity: draft.identity, teams: draft.teams }, "captain", props.configDefaults)),
+    deleteTeam: (id) => orgAction(() => deleteTeam(props.ws, props.db, id)),
+    deleteAgent: (id) => orgAction(() => deleteAgent(props.ws, props.db, id)),
+    setTeamMembers: (teamId, members) => orgAction(() => setTeamMembers(props.ws, props.db, teamId, members)),
+    setAgentTeams: (agentId, teams) => orgAction(() => setAgentTeams(props.ws, props.db, agentId, teams)),
+  };
+
   // Plan 13 (corrected): compute block data from the block feed at the top level (hooks must not be
   // called inside conditionals or IIFEs). The consistent block view shows every AGENT (sub-agents,
   // delegated work) as a fixed-height block. Root's direct reply still uses the scrollback (the
@@ -348,6 +383,8 @@ export function App(props: {
     // Plan 21: the docked browser is NEXT in precedence — a pending card above suspends it entirely
     // (its render is gated on !pending too), so a keystroke can never be ambiguous between surfaces.
     if (browser) { browserKeyRef.current?.(input, key); return; }
+    // Plan 22: the Org browser is next — same suspension rule as the artifact browser.
+    if (org) { orgKeyRef.current?.(input, key); return; }
     // Plan 13: focus mode navigation. shift+tab enters, esc leaves, ↑↓ move, ⏎ opens operation view.
     // Plan 20: the ring and the Enter target read the SAME collection — allBlocks is what RENDERS
     // (root excluded, settling-first). The old Enter path indexed [...blockFeed.keys()] (insertion
@@ -821,6 +858,9 @@ export function App(props: {
       say({ kind: "system", text: "  roster reindexed from agents/*/agent.md" });
       return;
     }
+    // Plan 22: /teams and bare /agents open the Org browser — the dedicated team/agent management mode.
+    if (cmd === "teams") { dockOrg("teams"); return; }
+    if (cmd === "agents" && !arg.trim()) { dockOrg("agents"); return; }
     if (cmd === "view") {
       const mode = arg.trim().toLowerCase();
       if (!mode) { say({ kind: "system", text: `  live view: ${viewMode} (usage: /view ${VIEW_MODES.join("|")})` }); return; }
@@ -1137,12 +1177,12 @@ export function App(props: {
       })()}
       {/* Plan 10 Phase 4: split panes (one per live agent) sit above the spinner + bar. The mode
           (bar/panes/both) and terminal size decide what shows; too small ⇒ degrade to bar-only. */}
-      {!operationRunId && !browser && layout.showPanes && (
+      {!operationRunId && !browser && !org && layout.showPanes && (
         <SquadPanes statuses={squadStatuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
       )}
       {/* Plan 13 (corrected): consistent agent blocks — the default squad view. Every agent (root and
           sub-agents) is rendered as a single block: header + fixed 2-line body. The block IS the record. */}
-      {!operationRunId && !browser && allBlocks.length > 0 && (() => {
+      {!operationRunId && !browser && !org && allBlocks.length > 0 && (() => {
         const blockWidth = Math.min(termSize.columns - 4, 96);
         return (
           <Box flexDirection="column">
@@ -1186,11 +1226,27 @@ export function App(props: {
           onSubmitChat={(text) => { browserKeyRef.current = null; setBrowser(null); void submit(text); }}
         />
       )}
+      {/* Plan 22: the Org browser — the team/agent management mode. Suspended by a pending card or the
+          artifact browser (both higher in the dispatch order). */}
+      {!pending && !operationRunId && !browser && org && (
+        <OrgBrowser
+          ws={props.ws}
+          db={props.db}
+          width={termSize.columns}
+          rows={termSize.rows}
+          bump={org.bump}
+          st={org.ui}
+          onChange={(next) => setOrg((o) => (o ? { ...o, ui: typeof next === "function" ? next(o.ui) : next } : o))}
+          keyRef={orgKeyRef}
+          onClose={() => { orgKeyRef.current = null; setOrg(null); }}
+          actions={orgActions}
+        />
+      )}
       {!pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
-      {planPanelOn && plan && !operationRunId && !browser && <PlanPanel plan={plan} width={termSize.columns} />}
+      {planPanelOn && plan && !operationRunId && !browser && !org && <PlanPanel plan={plan} width={termSize.columns} />}
       {layout.showBar && squadStatuses.length > 0 && <StatusBar statuses={squadStatuses} width={termSize.columns} />}
-      {!pending && !operationRunId && !browser && (
+      {!pending && !operationRunId && !browser && !org && (
         <>
           <Box>
             <Text color={busy ? "gray" : focusMode ? "gray" : "cyan"}>{busy ? "❯ " : focusMode ? "  " : "> "}</Text>

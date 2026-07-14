@@ -1,11 +1,12 @@
 /** agent.md is canon: YAML frontmatter (the AgentDef minus identity) + markdown body (the SOUL).
  *  Parsed with Bun.YAML (native). The registry table is a derived index of this. */
 import { YAML } from "bun";
-import { mkdir, writeFile, readdir, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readdir, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { AgentDef } from "../schemas/agent";
+import { DEFAULT_TEAM_ID } from "../schemas/team";
 import { paths } from "./files";
 import { syncRegistry } from "../core/registry";
 import type { TaichoConfig } from "./config";
@@ -38,7 +39,7 @@ Your job is to TURN THE CAPTAIN'S INTENT INTO ACTION, never to do the domain wor
 
 /** Root's built-in capabilities. Kept in one place so existing roots get reconciled to the current
  *  set on boot (older roots drift — e.g. predate ask_human / the MCP tools). */
-export const ROOT_TOOLS = ["create_agent", "delegate_task", "dispatch_task", "check_task", "await_task", "find_agents", "ask_human", "read_url", "add_mcp_server", "remember", "recall", "propose_skill", "run_command", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations", "write_plan", "update_plan_item", "read_plan"];
+export const ROOT_TOOLS = ["create_agent", "create_team", "delegate_task", "dispatch_task", "check_task", "await_task", "find_agents", "ask_human", "read_url", "add_mcp_server", "remember", "recall", "propose_skill", "run_command", "save_artifact", "read_artifact", "list_artifacts", "annotate_artifact", "list_annotations", "write_plan", "update_plan_item", "read_plan"];
 
 export async function seedRoot(ws: string, defaults?: TaichoConfig["defaults"]): Promise<void> {
   const file = paths.agentFile(ws, "root");
@@ -102,13 +103,14 @@ export async function seedLibrarian(ws: string, defaults?: TaichoConfig["default
   await writeFile(file, serializeAgent(lib));
 }
 
-/** `team` is null for an unaffiliated agent (root, librarian, a floating specialist), and OPTIONAL on
- *  the type so a caller constructing a row by hand — a test fixture, a slash-command stub — need not
- *  spell out an absence. loadIndex always selects it. */
-export interface RegistryRow { id: string; role: string; is_root: number; team?: string | null; }
+/** Plan 22: `teams` is an agent's full EFFECTIVE membership — the implicit `default` plus its explicit
+ *  teams, default first (as loadIndex reads it from agent_teams). OPTIONAL on the type so a caller
+ *  constructing a row by hand — a test fixture, a slash-command stub — need not spell it out; loadIndex
+ *  always populates it. An unaffiliated agent still carries `["default"]`. */
+export interface RegistryRow { id: string; role: string; is_root: number; teams?: string[]; }
 
 export interface NewAgentDraft {
-  id: string; role: string; identity: string; tools?: string[]; team?: string;
+  id: string; role: string; identity: string; tools?: string[]; teams?: string[];
 }
 
 /** The default worker capability baseline (Plan 01 hand-off-by-reference + Plan 14 lifecycle contract).
@@ -139,7 +141,20 @@ export function workerTools(requested?: string[]): string[] {
 }
 
 export function loadIndex(db: Database): RegistryRow[] {
-  return db.query<RegistryRow, []>("SELECT id, role, is_root, team FROM registry").all();
+  const base = db.query<{ id: string; role: string; is_root: number }, []>("SELECT id, role, is_root FROM registry").all();
+  const byAgent = new Map<string, string[]>();
+  for (const m of db.query<{ agent_id: string; team_id: string }, []>("SELECT agent_id, team_id FROM agent_teams ORDER BY agent_id, ord").all()) {
+    const l = byAgent.get(m.agent_id) ?? [];
+    l.push(m.team_id);
+    byAgent.set(m.agent_id, l);
+  }
+  return base.map((r) => ({ ...r, teams: byAgent.get(r.id) ?? [] }));
+}
+
+/** An agent's effective teams (default first), read from the derived index. The single-team question
+ *  the old `registry.team` column answered — now that membership is many-to-many. */
+export function teamsOf(db: Database, agentId: string): string[] {
+  return db.query<{ team_id: string }, [string]>("SELECT team_id FROM agent_teams WHERE agent_id = ? ORDER BY ord").all(agentId).map((r) => r.team_id);
 }
 
 export async function loadAgent(ws: string, id: string): Promise<AgentDef> {
@@ -160,8 +175,10 @@ export async function reindex(ws: string, db: Database): Promise<void> {
   }
   // Plan 20 (review finding): delete-then-rebuild, like every sibling reindex (plans/tasks/skills/kb).
   // syncRegistry alone is upsert-only, so a hand-DELETED agent.md left a ghost registry row that no
-  // boot or /agents reindex ever removed. Files are canon; the whole table is derived.
+  // boot or /agents reindex ever removed. Files are canon; the whole table is derived. Plan 22: clear
+  // the membership join too, or a removed agent's team rows would linger (membersOf would over-report).
   db.query("DELETE FROM registry").run();
+  db.query("DELETE FROM agent_teams").run();
   if (agents.length) syncRegistry(db, agents);
 }
 
@@ -173,9 +190,13 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
   // store/teams.ts here would close a cycle (teams.ts needs DEFAULT_WORKER_TOOLS from this module).
   if (existsSync(paths.teamFile(ws, draft.id)))
     throw new Error(`cannot create agent "${draft.id}": a team already has that id (ids are one namespace)`);
-  if (draft.team && !existsSync(paths.teamFile(ws, draft.team))) throw new Error(`no team "${draft.team}"`);
+  // Plan 22: an agent may be born onto SEVERAL teams; every named one must exist (the implicit `default`
+  // is never listed here, so it is not — and cannot be — checked). A missing team is a hard error, not
+  // a silent dangling membership.
+  const teams = (draft.teams ?? []).filter((t) => t !== DEFAULT_TEAM_ID);
+  for (const t of teams) if (!existsSync(paths.teamFile(ws, t))) throw new Error(`no team "${t}"`);
   const agent = AgentDef.parse({
-    id: draft.id, role: draft.role, identity: draft.identity, team: draft.team,
+    id: draft.id, role: draft.role, identity: draft.identity, teams,
     // Lifecycle contract (Plan 14 T1/T2): the DEFAULT_WORKER_TOOLS artifact baseline (produce + hand
     // off + consume by reference + annotate/revise) is ALWAYS merged in. An explicit `draft.tools`
     // list ADDS extras (delegate_task, run_command, an "mcp:<server>" ref, …) — it does NOT replace
@@ -185,10 +206,10 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
     // was born unable to save/read/hand-off artifacts. NO MCP grant by default (Plan 08 least
     // privilege — MCP is opt-in via an explicit "mcp:<server>" ref passed in draft.tools).
     tools: workerTools(draft.tools),
-    // Plan 19: a worker created ONTO a team sees its team, not all sixty strangers on the squad — which
-    // is what keeps root's 30-agent roster cliff unreachable. An unaffiliated worker keeps the old
+    // Plan 19/22: a worker created ONTO teams sees THOSE teams, not all sixty strangers on the squad —
+    // which is what keeps root's 30-agent roster cliff unreachable. An unaffiliated worker keeps the old
     // see-everyone default, so nothing changes for a squad that never creates a team.
-    canSee: draft.team ? [`team:${draft.team}`] : ["*"],
+    canSee: teams.length ? teams.map((t) => `team:${t}`) : ["*"],
     canDelegateTo: [], isRoot: false,
     created: new Date().toISOString(),
     budgets: defaults?.budgets,
@@ -197,6 +218,65 @@ export async function createAgent(ws: string, db: Database, draft: NewAgentDraft
   await writeFile(file, serializeAgent(agent));
   syncRegistry(db, [agent]);
   return agent;
+}
+
+/** Is this canSee the AUTO-DERIVED shape createAgent produces — see-everyone (`["*"]`) or purely
+ *  team-scoped (`team:<id>` entries only)? If so, re-teaming the agent may safely re-derive it so a
+ *  moved worker sees its new teammates. A canSee that names exact agent ids is a hand-customization and
+ *  is left untouched. An empty canSee (the librarian) is NOT default-shaped — leave it. */
+function isDefaultShapedCanSee(canSee: string[]): boolean {
+  if (canSee.length === 1 && canSee[0] === "*") return true;
+  return canSee.length > 0 && canSee.every((e) => e.startsWith("team:"));
+}
+
+export interface AgentPatch { role?: string; identity?: string; tools?: string[]; teams?: string[]; canSee?: string[]; canDelegateTo?: string[]; }
+
+/** Plan 22: edit an existing agent (the captain's `e`/`c`/`t`/`b` verbs and the CLI). Applies only the
+ *  fields present in `patch`, re-parses through AgentDef (so a bad value is rejected), rewrites agent.md,
+ *  and refreshes the derived index. Team edits are validated to exist, the Plan 14 artifact floor is
+ *  re-merged onto a worker's tools, and a default-shaped canSee is kept in sync with the new teams. */
+export async function updateAgent(ws: string, db: Database, id: string, patch: AgentPatch): Promise<AgentDef> {
+  const file = paths.agentFile(ws, id);
+  if (!existsSync(file)) throw new Error(`no agent "${id}"`);
+  const cur = await loadAgent(ws, id);
+  const teams = (patch.teams ?? cur.teams).filter((t) => t !== DEFAULT_TEAM_ID);
+  for (const t of teams) if (!existsSync(paths.teamFile(ws, t))) throw new Error(`no team "${t}"`);
+  let canSee = patch.canSee ?? cur.canSee;
+  if (patch.teams && !patch.canSee && isDefaultShapedCanSee(cur.canSee))
+    canSee = teams.length ? teams.map((t) => `team:${t}`) : ["*"];
+  const isBuiltIn = cur.isRoot || id === LIBRARIAN_ID;
+  const next = AgentDef.parse({
+    ...cur,
+    role: patch.role ?? cur.role,
+    identity: patch.identity ?? cur.identity,
+    // A worker's tool edit always keeps the artifact floor (Plan 14); root/librarian keep their curated set.
+    tools: patch.tools ? (isBuiltIn ? patch.tools : workerTools(patch.tools)) : cur.tools,
+    teams,
+    canSee,
+    canDelegateTo: patch.canDelegateTo ?? cur.canDelegateTo,
+  });
+  await writeFile(file, serializeAgent(next));
+  syncRegistry(db, [next]);
+  return next;
+}
+
+/** Set an agent's explicit team memberships (the `t` verb / member pickers). A thin updateAgent. */
+export async function setAgentTeams(ws: string, db: Database, id: string, teams: string[]): Promise<AgentDef> {
+  return updateAgent(ws, db, id, { teams });
+}
+
+/** Retire an agent (the `d` verb / CLI). Root and the librarian are protected — the squad needs its
+ *  captain and its keeper of knowledge. Removes the agent's files and its derived rows (registry +
+ *  membership). A team this agent LED is left with a dangling `lead`, which validateTeams reports on the
+ *  next boot — deliberately report-and-ask, not a silent rewrite of the team's intent. */
+export async function deleteAgent(ws: string, db: Database, id: string): Promise<void> {
+  if (id === "root") throw new Error("cannot retire root — the squad needs its captain");
+  if (id === LIBRARIAN_ID) throw new Error("cannot retire the librarian — it keeps the knowledge graph");
+  const dir = paths.agentDir(ws, id);
+  if (!existsSync(dir)) throw new Error(`no agent "${id}"`);
+  await rm(dir, { recursive: true, force: true });
+  db.query("DELETE FROM registry WHERE id = ?").run(id);
+  db.query("DELETE FROM agent_teams WHERE agent_id = ?").run(id);
 }
 
 /** Plan 14 T3 backfill — rescue existing workers that were born TOOLLESS. A worker persisted with an

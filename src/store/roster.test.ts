@@ -1,9 +1,10 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeFile, mkdir } from "node:fs/promises";
-import { serializeAgent, parseAgent, seedRoot, seedLibrarian, LIBRARIAN_ID, LIBRARIAN_TOOLS, reindex, loadIndex, loadAgent, createAgent, reconcileWorkerTools, workerTools, DEFAULT_WORKER_TOOLS, type RegistryRow } from "./roster";
+import { serializeAgent, parseAgent, seedRoot, seedLibrarian, LIBRARIAN_ID, LIBRARIAN_TOOLS, reindex, loadIndex, loadAgent, createAgent, updateAgent, setAgentTeams, deleteAgent, reconcileWorkerTools, workerTools, DEFAULT_WORKER_TOOLS, type RegistryRow } from "./roster";
+import { createTeam, membersOf } from "./teams";
 import { AgentDef } from "../schemas/agent";
 import { openDb } from "./db";
 import { ensureWorkspace, paths } from "./files";
@@ -119,6 +120,72 @@ test("reconcileWorkerTools backfills a worker born toolless; leaves explicit gra
   expect((await loadAgent(ws, LIBRARIAN_ID)).tools).toEqual(LIBRARIAN_TOOLS); // librarian untouched
   // idempotent: a second pass finds nothing to fix
   expect(await reconcileWorkerTools(ws)).toEqual([]);
+});
+
+// ── Plan 22: the agent lifecycle (updateAgent / setAgentTeams / deleteAgent) ──
+
+test("updateAgent edits fields, keeps the artifact floor, and re-derives a default-shaped canSee", async () => {
+  const { ws, db } = await freshWs();
+  await reindex(ws, db);
+  createTeam(ws, { id: "news", charter: "c" });
+  createTeam(ws, { id: "research", charter: "c" });
+  await createAgent(ws, db, { id: "w", role: "old role", identity: "old", tools: ["run_command"] }, "root");
+
+  const up = await updateAgent(ws, db, "w", { role: "new role", identity: "new", teams: ["news", "research"] });
+  expect(up.role).toBe("new role");
+  expect(up.identity).toBe("new");
+  expect(up.teams).toEqual(["news", "research"]);
+  expect(up.tools).toContain("run_command");
+  for (const t of DEFAULT_WORKER_TOOLS) expect(up.tools).toContain(t); // floor preserved on edit
+  expect(up.canSee).toEqual(["team:news", "team:research"]);           // re-derived from the default ["*"]
+  expect(loadIndex(db).find((r) => r.id === "w")!.teams).toEqual(["default", "news", "research"]);
+});
+
+test("updateAgent rejects a membership on a team that doesn't exist", async () => {
+  const { ws, db } = await freshWs();
+  await reindex(ws, db);
+  await createAgent(ws, db, { id: "w", role: "r", identity: "i" }, "root");
+  await expect(updateAgent(ws, db, "w", { teams: ["ghost"] })).rejects.toThrow('no team "ghost"');
+});
+
+test("updateAgent leaves a hand-customized canSee (exact agent ids) untouched when re-teaming", async () => {
+  const { ws, db } = await freshWs();
+  await reindex(ws, db);
+  createTeam(ws, { id: "news", charter: "c" });
+  await createAgent(ws, db, { id: "w", role: "r", identity: "i" }, "root");
+  await updateAgent(ws, db, "w", { canSee: ["root", "librarian"] }); // captain customizes visibility
+  const up = await updateAgent(ws, db, "w", { teams: ["news"] });
+  expect(up.canSee).toEqual(["root", "librarian"]); // not clobbered by the team change
+});
+
+test("setAgentTeams moves an agent between teams; the membership index follows", async () => {
+  const { ws, db } = await freshWs();
+  await reindex(ws, db);
+  createTeam(ws, { id: "news", charter: "c" });
+  createTeam(ws, { id: "trading", charter: "c" });
+  await createAgent(ws, db, { id: "w", role: "r", identity: "i", teams: ["news"] }, "root");
+
+  await setAgentTeams(ws, db, "w", ["trading"]);
+  expect((await loadAgent(ws, "w")).teams).toEqual(["trading"]);
+  expect(membersOf(db, "news")).toEqual([]);
+  expect(membersOf(db, "trading").map((m) => m.id)).toEqual(["w"]);
+});
+
+test("deleteAgent removes files + derived rows, and protects root and the librarian", async () => {
+  const { ws, db } = await freshWs();
+  await seedLibrarian(ws);
+  await reindex(ws, db);
+  createTeam(ws, { id: "news", charter: "c" });
+  await createAgent(ws, db, { id: "temp", role: "r", identity: "i", teams: ["news"] }, "root");
+  expect(membersOf(db, "news").map((m) => m.id)).toEqual(["temp"]);
+
+  await deleteAgent(ws, db, "temp");
+  expect(loadIndex(db).some((r) => r.id === "temp")).toBe(false);
+  expect(existsSync(paths.agentDir(ws, "temp"))).toBe(false);
+  expect(membersOf(db, "news")).toEqual([]); // its membership row went too
+
+  await expect(deleteAgent(ws, db, "root")).rejects.toThrow();
+  await expect(deleteAgent(ws, db, LIBRARIAN_ID)).rejects.toThrow();
 });
 
 test("createAgent rejects a duplicate id", async () => {

@@ -3,7 +3,7 @@ import { assemble, INLINE_ROSTER_MAX } from "./prompt";
 import type { AgentDef } from "../schemas/agent";
 
 const agent: AgentDef = {
-  id: "root", role: "orchestrator", identity: "I orchestrate.", tools: ["find_agents"],
+  id: "root", role: "orchestrator", identity: "I orchestrate.", tools: ["find_agents"], teams: [],
   canSee: ["*"], canDelegateTo: ["*"], budgets: { maxIterationsPerRun: 30, maxWorkItemsPerRequest: 20 },
   isRoot: true, created: "2026-06-11T00:00:00.000Z",
 };
@@ -55,7 +55,7 @@ test("a non-root agent does NOT carry the Operating taicho block (root-only orie
 // --- Plan 19: the roster shows teams, not their members -------------------------------------------
 
 const worker = (over: Partial<AgentDef> = {}): AgentDef => ({
-  id: "reporter", role: "files stories", identity: "I report.", tools: [],
+  id: "reporter", role: "files stories", identity: "I report.", tools: [], teams: ["news"],
   canSee: ["team:news"], canDelegateTo: [], budgets: { maxIterationsPerRun: 30, maxWorkItemsPerRequest: 20 },
   isRoot: false, created: "2026-06-11T00:00:00.000Z", ...over,
 });

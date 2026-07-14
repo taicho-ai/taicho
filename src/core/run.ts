@@ -5,11 +5,12 @@ import { generateText, type ModelMessage } from "ai";
 import type { AgentDef } from "../schemas/agent";
 import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schemas/trace";
 import { assemble, type RosterTeam } from "./prompt";
-import { listTeams, loadTeam, membersOf } from "../store/teams";
+import { listTeams, loadTeam, membersOf, createTeamWithMembers } from "../store/teams";
+import type { TeamDef } from "../schemas/team";
 import { routeToTeam } from "./team-routing";
 import { writePlan, foldPlan, appendPlanEvent, indexPlan, currentPlanId, renderPlan } from "../store/plans";
 import { planIdForGoal, TERMINAL_ITEM_STATUS, type PlanState, type PlanItemStatus } from "../schemas/plan";
-import { effectiveTools } from "../schemas/team";
+import { effectiveTools, mergeTeamPolicies, DEFAULT_TEAM_ID } from "../schemas/team";
 import { runLoop } from "./loop";
 import { runChecker } from "./verification";
 import { canDelegate, visibleToRows, acl } from "./registry";
@@ -65,6 +66,7 @@ const MAX_RUNS_PER_REQUEST = 50;
 function approvalLabel(req: ApprovalRequest): string {
   switch (req.kind) {
     case "create_agent": return redact(`create_agent ${req.draft.id}`);
+    case "create_team": return redact(`create_team ${req.draft.id}`);
     case "run_command": return redact(`run_command ${req.command}`).slice(0, 60);
     case "add_mcp": return redact(`add_mcp ${req.name}`);
     case "propose_skill": return redact(`propose_skill ${req.draft.name}`);
@@ -73,8 +75,14 @@ function approvalLabel(req: ApprovalRequest): string {
   }
 }
 
+/** Plan 22: the payload of an on-the-fly team proposal (root's `create_team` tool). `grant` is the extra
+ *  tools every member receives; the tool caps it at what the PROPOSER already holds, so a model can never
+ *  escalate itself by inventing a team. `members` are agent ids to staff it with. */
+export interface NewTeamProposal { id: string; charter: string; lead?: string; members: string[]; grant: string[]; }
+
 export type ApprovalRequest =
   | { kind: "create_agent"; draft: NewAgentDraft }
+  | { kind: "create_team"; draft: NewTeamProposal }
   | { kind: "propose_coaching"; draft: ProposalDraft }
   | { kind: "ask_human"; question: string; options: string[] }
   | { kind: "add_mcp"; name: string; spec: McpServerConfig }
@@ -110,6 +118,7 @@ export interface RunContext {
   delegatedOut: string[];
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   createAgent: (draft: NewAgentDraft) => Promise<AgentDef>;
+  createTeam: (proposal: NewTeamProposal) => Promise<TeamDef>;
   canDelegate: (toId: string) => boolean;
   runChild: (brief: { to: string; goal: string; context?: string; criteria?: string; inputArtifacts?: string[]; callId?: string }) => Promise<RunResult>;
   findAgents: (query: string, k: number) => AgentHit[];
@@ -411,6 +420,9 @@ export async function executeRun(
     spanEvents, emitStep, telemetry: tel,
     requestApproval: wrappedRequestApproval,
     createAgent: (draft) => createAgent(deps.ws, deps.db, draft, opts.agent.id, deps.configDefaults),
+    // Plan 22: on-the-fly team creation (root's approval-gated tool). One service call: writes the team
+    // file and staffs it. The grant ceiling is enforced in the tool BEFORE the approval card is shown.
+    createTeam: (p) => createTeamWithMembers(deps.ws, deps.db, { id: p.id, charter: p.charter, lead: p.lead, tools: { grant: p.grant } }, p.members),
     canDelegate: (toId) => canDelegate(opts.agent, loadIndex(deps.db).find((r) => r.id === toId) ?? { id: toId }),
     runChild: async ({ to, goal, context, criteria, inputArtifacts, callId }) => {
       const child = await loadAgent(deps.ws, to);
@@ -485,7 +497,7 @@ export async function executeRun(
         // (and USD, when priced) count against the ceilings and are bounded by them — not invisible.
         // Plan 19: it is spend the DELEGATING agent caused, so it meters against ITS team, not the child's.
         spendLedger: deps.spendLedger,
-        spendScopes: scopesFor(opts.agent.team),
+        spendScopes: scopesFor(opts.agent.teams),
         goal: p.goal, criteria: p.criteria, output: p.output,
       });
       // Plan 16: the independent verification checker as its own "VERIFY" span — nests under the active
@@ -584,16 +596,23 @@ export async function executeRun(
   // address it should be using. A squad with no teams/ directory takes the `[]` path and renders
   // exactly as it did before this plan. The scan is a handful of files (teams are captain-owned).
   const rosterTeams: RosterTeam[] = listTeams(deps.ws)
+    .filter((t) => t.id !== DEFAULT_TEAM_ID) // `default` is everyone — never a delegation address; keeps the roster byte-identical for a squad with no explicit teams
     .filter((t) => canDelegate(opts.agent, { id: t.id, isTeam: true }))
     .map((t) => ({ id: t.id, charter: t.charter, lead: t.lead, memberCount: membersOf(deps.db, t.id).length }))
     .filter((t) => t.memberCount > 0); // an empty team is an address that goes nowhere — don't advertise it
   const shown = new Set(rosterTeams.map((t) => t.id));
-  const visible = visibleRows.filter((r) => !r.team || !shown.has(r.team));
+  // Plan 22: an agent is accounted for by a shown team if ANY of its teams is shown (membership is
+  // many-to-many). `r.teams` carries the implicit `default`, which is never in `shown`, so it can't
+  // spuriously hide an otherwise-unaffiliated agent from the direct-reports list.
+  const visible = visibleRows.filter((r) => !(r.teams ?? []).some((t) => shown.has(t)));
 
-  // The agent's own team: its charter is a standing instruction, its tool policy layers over the
-  // member's own grant (deny wins; the DEFAULT_WORKER_TOOLS floor is protected at team load).
-  const ownTeam = opts.agent.team ? loadTeam(deps.ws, opts.agent.team) : null;
-  const agentTools = effectiveTools(opts.agent.tools, ownTeam?.tools);
+  // The agent's own teams (Plan 22: possibly several): each charter is a standing instruction, and the
+  // union of their tool policies layers over the member's own grant (deny wins; the DEFAULT_WORKER_TOOLS
+  // floor is protected per-team at load). The implicit `default` team is not among these — it carries no
+  // policy and its generic charter would only add noise.
+  const ownTeams = opts.agent.teams.map((t) => loadTeam(deps.ws, t)).filter((t): t is NonNullable<typeof t> => !!t);
+  const teamPolicy = mergeTeamPolicies(ownTeams.map((t) => t.tools));
+  const agentTools = effectiveTools(opts.agent.tools, teamPolicy);
 
   let applied: PolicyNote[] = [];
   try {
@@ -684,7 +703,7 @@ export async function executeRun(
   const { system } = assemble(opts.agent, {
     visibleAgents: visible,
     teams: rosterTeams,
-    teamCharter: ownTeam?.charterBody || undefined,
+    teamCharter: ownTeams.map((t) => t.charterBody).filter(Boolean).join("\n\n") || undefined,
     canPlan: agentTools.includes("write_plan"),
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
     policies: applied,
@@ -693,7 +712,7 @@ export async function executeRun(
     skillsBlock,
     inputArtifactsBlock,
   });
-  const tools = toolsForAgent(opts.agent, ctx, deps.mcp, ownTeam?.tools);
+  const tools = toolsForAgent(opts.agent, ctx, deps.mcp, teamPolicy);
 
   const runLoopCall = () => runLoop({
     model, agent: opts.agent, system, messages: opts.messages, tools,
@@ -722,7 +741,7 @@ export async function executeRun(
     // Plan 19: this run is ALSO metered against its own team's ceiling, so a team can be capped
     // independently. A delegated child is metered against ITS team, not its parent's — the spend is
     // the child's to answer for.
-    spendScopes: scopesFor(opts.agent.team),
+    spendScopes: scopesFor(opts.agent.teams),
     // Plan 18: render the live plan fresh before EVERY model call. Only for agents that hold the tools,
     // so an agent without a plan pays nothing. The slot never enters `messages` — see plan-inject.ts.
     pollPlan: agentTools.includes("write_plan")
