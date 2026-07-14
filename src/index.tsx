@@ -303,4 +303,19 @@ render(
     {...initial}
     cfg={authSource.kind === "env" ? { provider: authSource.provider, model: authSource.model } : null}
   />,
+  // Plan 24: enable the kitty keyboard protocol so terminals that support it (kitty, Ghostty, WezTerm,
+  // iTerm2 3.5+) report Shift+Enter as a DISTINCT sequence (\x1b[13;2u) instead of a bare \r — otherwise a
+  // terminal sends the identical byte for Enter and Shift+Enter and no code can tell them apart.
+  //
+  // mode:"enabled" (NOT "auto"): "auto" queries the terminal (CSI ? u) and only enables on a reply, but
+  // Ink sends that query from its constructor and its detector races with its own stdin setup — verified in
+  // a real PTY, the reply is MISSED (it even leaks through as a phantom keypress) and the enable sequence
+  // \x1b[>1u is never written, so the protocol stays off and Shift+Enter keeps arriving as \r. "enabled"
+  // writes \x1b[>1u directly — no query, no race. A terminal that doesn't support it (Terminal.app) simply
+  // ignores the unknown control sequence, so this is safe there (Shift+Enter just can't work in Terminal.app).
+  //
+  // exitOnCtrlC:false because Ink's built-in only recognizes the legacy \x03 byte — under the protocol
+  // Ctrl+C arrives as \x1b[99;5u and Ink would never exit. App.tsx owns Ctrl+C instead (it fires for both
+  // encodings, since Ink surfaces `input:'c', ctrl:true` either way).
+  { exitOnCtrlC: false, kittyKeyboard: { mode: "enabled" } },
 );

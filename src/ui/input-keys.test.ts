@@ -14,6 +14,14 @@ test("printable input inserts; Enter submits", () => {
   expect(classifyKey("", K({ return: true }))).toEqual({ kind: "submit" });
 });
 
+test("newline: Shift+Enter, Alt+Enter, and Ctrl+J (both encodings); plain Enter still submits", () => {
+  expect(classifyKey("", K({ return: true, shift: true })).kind).toBe("newline"); // Shift+Enter (kitty proto)
+  expect(classifyKey("", K({ return: true, meta: true })).kind).toBe("newline");  // Alt/Option+Enter
+  expect(classifyKey("\n", K())).toEqual({ kind: "newline" });                    // Ctrl+J legacy → raw linefeed
+  expect(classifyKey("j", K({ ctrl: true })).kind).toBe("newline");               // Ctrl+J under kitty → j+ctrl
+  expect(classifyKey("", K({ return: true })).kind).toBe("submit");               // plain Enter
+});
+
 test("plain motions + deletes", () => {
   expect(classifyKey("", K({ leftArrow: true })).kind).toBe("left");
   expect(classifyKey("", K({ rightArrow: true })).kind).toBe("right");

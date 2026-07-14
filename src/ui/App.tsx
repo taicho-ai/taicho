@@ -366,6 +366,14 @@ export function App(props: {
   const sugg = suggestCommands(input);
 
   useInput((input, key) => {
+    // Ctrl+C quits from ANY surface (card, browser, focus mode, chat). Ink's built-in exitOnCtrlC is
+    // disabled at render() because it only matches the legacy \x03 byte — under the kitty keyboard
+    // protocol Ctrl+C arrives as \x1b[99;5u, which Ink decodes to `input:'c', key.ctrl:true` (the same
+    // shape it gives for legacy \x03), so this ONE check handles both. Mirror the Esc-idle graceful quit.
+    if (key.ctrl && input === "c") {
+      void (async () => { await props.mcp?.closeAll(); await props.telemetry?.shutdown(); exit(); })();
+      return;
+    }
     // While a card is up, this boot-registered useInput is the only listener guaranteed to be wired
     // when the captain's first keystroke arrives, so we forward it to the active card. (A card-owned
     // useInput registers a beat after its render commits and would drop that first key — the hang
@@ -1250,7 +1258,7 @@ export function App(props: {
             onSuggestNav={(dir) => setSelected((s) => cycleIndex(s, sugg.length, dir))}
             onSuggestAccept={() => acceptSuggestion(sugg)}
             placeholder={focusMode ? "(focus mode — esc to return)" : "message root, or / for commands"}
-            width={Math.min(termSize.columns, 100)}
+            width={termSize.columns}
             dimmed={busy || focusMode}
             busy={busy}
           />

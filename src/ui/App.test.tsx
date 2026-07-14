@@ -237,6 +237,18 @@ test("the input clears after submitting a message (Plan 24: controlled ChatInput
   expect(occurrences).toBe(1);
 });
 
+test("Plan 24: ↑ keeps walking history past a recalled slash command (the menu doesn't trap it)", async () => {
+  const { ws, props } = await setup({ model: mockModel("ok") });
+  const ih = await import("./input-history");
+  ih.appendHistory(ws, "hello"); ih.appendHistory(ws, "/help"); ih.appendHistory(ws, "world"); // oldest -> newest
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await waitFor(lastFrame, "message root");
+  await send(stdin, UP); await sleep(60);   // -> "world"
+  await send(stdin, UP); await sleep(60);   // -> "/help" (re-opens the suggester)
+  await send(stdin, UP); await sleep(60);   // -> "hello" (sticky history mode ignores the menu)
+  expect(lastFrame()).toContain("> hello");
+});
+
 test("Plan 24: the input renders inside a bordered box", async () => {
   const { props } = await setup();
   const { lastFrame } = render(<App {...props} />);

@@ -1,5 +1,6 @@
-/** Plan 24: pure cursor/edit model for a single logical line. `cursor` is a code-unit index in
- *  [0, value.length]. The word-boundary algorithm (wordLeftIndex/wordRightIndex) is the heart of the
+/** Plan 24: pure cursor/edit model for the message buffer (may contain `\n` — see the multi-line section
+ *  at the bottom). `cursor` is a code-unit index in [0, value.length]. The word-boundary algorithm
+ *  (wordLeftIndex/wordRightIndex) is the heart of the
  *  Option/Alt word-nav: skip whitespace in the direction of travel, then skip the maximal run of
  *  same-CLASS chars (a run of word chars, or a run of non-space non-word chars). That matches how most
  *  editors stop at punctuation. No Ink, no React — fully unit-testable. */
@@ -51,4 +52,41 @@ export function deleteWordBack(b: Buf): Buf {
 export function deleteWordForward(b: Buf): Buf {
   const j = wordRightIndex(b.value, b.cursor);
   return { value: b.value.slice(0, b.cursor) + b.value.slice(j), cursor: b.cursor };
+}
+
+// ── multi-line (Plan 24) — line motion for ↑/↓ inside a message with newlines ────────────────────
+
+/** Start index of the line the cursor is on (0, or one past the previous newline). */
+function lineStart(value: string, cursor: number): number {
+  return value.lastIndexOf("\n", cursor - 1) + 1;
+}
+/** End index of the line the cursor is on (the next newline, or end of value). */
+function lineEnd(value: string, cursor: number): number {
+  const nl = value.indexOf("\n", cursor);
+  return nl === -1 ? value.length : nl;
+}
+export function isOnFirstLine(value: string, cursor: number): boolean {
+  return value.lastIndexOf("\n", cursor - 1) === -1;
+}
+export function isOnLastLine(value: string, cursor: number): boolean {
+  return value.indexOf("\n", cursor) === -1;
+}
+
+/** Move the cursor up one line, keeping its column (clamped to the shorter line). No-op on the first line. */
+export function lineUp(b: Buf): Buf {
+  const start = lineStart(b.value, b.cursor);
+  if (start === 0) return b;
+  const col = b.cursor - start;
+  const prevStart = lineStart(b.value, start - 1);
+  const prevLen = start - 1 - prevStart; // chars on the previous line (excluding its trailing \n)
+  return { ...b, cursor: prevStart + Math.min(col, prevLen) };
+}
+/** Move the cursor down one line, keeping its column. No-op on the last line. */
+export function lineDown(b: Buf): Buf {
+  const end = lineEnd(b.value, b.cursor);
+  if (end === b.value.length) return b;
+  const col = b.cursor - lineStart(b.value, b.cursor);
+  const nextStart = end + 1;
+  const nextLen = lineEnd(b.value, nextStart) - nextStart;
+  return { ...b, cursor: nextStart + Math.min(col, nextLen) };
 }

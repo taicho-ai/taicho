@@ -6,13 +6,18 @@
 import type { Key } from "ink";
 
 export type InputAction =
-  | { kind: "insert"; text: string }
+  | { kind: "insert"; text: string } | { kind: "newline" }
   | { kind: "backspace" } | { kind: "del" }
   | { kind: "left" } | { kind: "right" } | { kind: "home" } | { kind: "end" }
   | { kind: "wordLeft" } | { kind: "wordRight" } | { kind: "deleteWordBack" } | { kind: "deleteWordForward" }
   | { kind: "submit" } | { kind: "historyPrev" } | { kind: "historyNext" } | { kind: "noop" };
 
 export function classifyKey(input: string, key: Key): InputAction {
+  // Newline (multi-line): Shift+Enter (kitty-protocol terminals), Alt/Option+Enter, or Ctrl+J. Ctrl+J is
+  // the terminal-agnostic fallback: legacy terminals send a raw linefeed `\n`; under the kitty protocol it
+  // arrives as `input:"j", key.ctrl` (a CSI-u sequence), so accept both so it behaves identically either way.
+  if (input === "\n" || (key.ctrl && input === "j") || (key.return && (key.shift || key.meta)))
+    return { kind: "newline" };
   if (key.return) return { kind: "submit" };
   if (key.tab || key.escape) return { kind: "noop" }; // owned by the suggester / higher dispatch
 
