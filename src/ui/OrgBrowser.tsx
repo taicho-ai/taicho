@@ -11,11 +11,12 @@
  *   - CONFIRM (`d`): a guarded delete.
  *  Mutations are App-provided async actions (they own the store wiring + roster refresh); the component
  *  drives them and shows the result on a transient `note` line. */
-import { useEffect } from "react";
-import { Box, Text } from "ink";
-import { spawn } from "node:child_process";
+import { useEffect, type ReactNode } from "react";
+import { Box, Text, useApp } from "ink";
+import { editFileInTerminal } from "./editor-handoff";
 import type { CardKeyHandler } from "./ProposalCard";
 import { paths } from "../store/files";
+import { hasWorkflow, loadWorkflow, orchestrationSlice, laneFor, seatsOf } from "../store/workflows";
 import { teamRows, agentRows, isProtectedAgent, isProtectedTeam, clampSel, type OrgScope } from "./org-browser-model";
 
 type WizardState =
@@ -28,6 +29,8 @@ export interface OrgUiState {
   scope: OrgScope;
   sel: number;
   reading: boolean;
+  /** Plan 23: the id of the team whose WORKFLOW is being viewed full-screen (null = not in that view). */
+  workflow: string | null;
   wizard: WizardState | null;
   picker: PickerState | null;
   confirm: ConfirmState | null;
@@ -35,7 +38,7 @@ export interface OrgUiState {
 }
 
 export function initialOrgUi(scope: OrgScope = "teams"): OrgUiState {
-  return { scope, sel: 0, reading: false, wizard: null, picker: null, confirm: null };
+  return { scope, sel: 0, reading: false, workflow: null, wizard: null, picker: null, confirm: null };
 }
 
 export type OrgActionResult = { ok: boolean; error?: string };
@@ -46,6 +49,7 @@ export interface OrgActions {
   deleteAgent: (id: string) => Promise<OrgActionResult>;
   setTeamMembers: (teamId: string, members: string[]) => Promise<OrgActionResult>;
   setAgentTeams: (agentId: string, teams: string[]) => Promise<OrgActionResult>;
+  scaffoldWorkflow: (teamId: string, members: string[]) => Promise<OrgActionResult>;
 }
 
 const ID_RE = /^[a-z][a-z0-9-]*$/;
@@ -63,6 +67,7 @@ export function OrgBrowser(props: {
   actions: OrgActions;
 }) {
   const { ws, db, st, onChange } = props;
+  const { suspendTerminal } = useApp(); // Ink 7.1.0: hand the tty to the captain's editor, then repaint
 
   const teams = teamRows(ws, db);
   const agents = agentRows(db);
@@ -78,13 +83,10 @@ export function OrgBrowser(props: {
   const run = (p: Promise<OrgActionResult>, ok: string) =>
     void p.then((r) => onChange((prev) => ({ ...prev, note: r.ok ? ok : `⚠ ${r.error ?? "failed"}`, confirm: null, wizard: null, picker: null })));
 
+  // Plan 23: hand the terminal to the captain's editor ($EDITOR/nano), wait for it to quit, then Ink
+  // resumes and the view re-reads the file. Everyone keeps their own editor; no bespoke in-TUI editor.
   const openInEditor = (path: string) => {
-    const editor = process.env.EDITOR || process.env.VISUAL;
-    if (!editor) { setNote(`no $EDITOR — file: ${path}`); return; }
-    const child = spawn(editor, [path], { detached: true, stdio: "ignore" });
-    child.on("error", (e) => setNote(`$EDITOR failed (${e.message}) — file: ${path}`));
-    child.unref();
-    setNote(`↗ sent to $EDITOR (${editor}) — file: ${path}`);
+    void editFileInTerminal(suspendTerminal, path).then((r) => setNote(r.note));
   };
 
   // ── keyboard ──────────────────────────────────────────────────────────────────────────────────
@@ -93,6 +95,18 @@ export function OrgBrowser(props: {
     if (st.wizard) return handleWizard(input, key, st.wizard);
     // PICKER (checkbox multi-select).
     if (st.picker) return handlePicker(input, key, st.picker);
+    // WORKFLOW VIEW — see the team's workflow, hand-edit it in $EDITOR, or scaffold a starter.
+    if (st.workflow) {
+      const wid = st.workflow;
+      if (key.escape) { onChange({ ...st, workflow: null, note: undefined }); return; }
+      if (input === "e" || input === "o") { openInEditor(paths.teamWorkflowFile(ws, wid)); return; }
+      if (input === "n" && !hasWorkflow(ws, wid)) {
+        const members = teams.find((t) => t.id === wid)?.members ?? [];
+        run(props.actions.scaffoldWorkflow(wid, members), `✓ scaffolded the ${wid} workflow — press e to hand-edit it`);
+        return;
+      }
+      return;
+    }
     // CONFIRM delete.
     if (st.confirm) {
       if (input === "y") {
@@ -110,6 +124,7 @@ export function OrgBrowser(props: {
         else if (selAgent) openInEditor(paths.agentFile(ws, selAgent.id));
         return;
       }
+      if (input === "w" && selTeam) { onChange({ ...st, workflow: selTeam.id, note: undefined }); return; } // Plan 23: open the workflow view
       if (input === "m" && selTeam && !isProtectedTeam(selTeam.id)) return openMembers(selTeam.id, selTeam.members);
       if (input === "t" && selAgent) return openAgentTeams(selAgent.id, selAgent.teams);
       return;
@@ -126,6 +141,7 @@ export function OrgBrowser(props: {
     if (key.return) { if (list.length) onChange({ ...st, reading: true, note: undefined }); return; }
     if (input === "a") { onChange({ ...st, wizard: freshWizard(st.scope), note: undefined }); return; }
     if (input === "o") { if (selTeam) openInEditor(paths.teamFile(ws, selTeam.id)); else if (selAgent) openInEditor(paths.agentFile(ws, selAgent.id)); return; }
+    if (input === "w" && selTeam) { onChange({ ...st, workflow: selTeam.id, note: undefined }); return; } // Plan 23: open the workflow view
     if (input === "m" && selTeam && !isProtectedTeam(selTeam.id)) return openMembers(selTeam.id, selTeam.members);
     if (input === "t" && selAgent) return openAgentTeams(selAgent.id, selAgent.teams);
     if (input === "d") {
@@ -247,6 +263,7 @@ export function OrgBrowser(props: {
   // ── render ──────────────────────────────────────────────────────────────────────────────────────
   if (st.wizard) return <Wizard w={st.wizard} agentIds={agentIds} teamIds={teamIds} width={props.width} note={st.note} />;
   if (st.picker) return <Picker p={st.picker} width={props.width} note={st.note} />;
+  if (st.workflow) return renderWorkflowView();
 
   const border = (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} width={props.width} marginTop={1}>
@@ -272,9 +289,8 @@ export function OrgBrowser(props: {
   return border;
 
   function footer(): string {
-    if (st.reading) return "esc back · o $EDITOR" + (st.scope === "teams" ? " · m members" : " · t teams");
-    const common = "↑↓ move · ⏎ open · tab/1·2 scope · a add · d delete · o $EDITOR · esc chat";
-    return st.scope === "teams" ? "↑↓ · ⏎ open · tab scope · a add team · m members · d delete · o edit · esc" : "↑↓ · ⏎ open · tab scope · a hire · t teams · d retire · o edit · esc";
+    if (st.reading) return "esc back · o $EDITOR" + (st.scope === "teams" ? " · m members · w workflow" : " · t teams");
+    return st.scope === "teams" ? "↑↓ · ⏎ open · tab scope · a add · m members · w workflow · d delete · o edit · esc" : "↑↓ · ⏎ open · tab scope · a hire · t teams · d retire · o edit · esc";
   }
 
   function renderShelf() {
@@ -312,6 +328,40 @@ export function OrgBrowser(props: {
     return [<Text key="e" dimColor>—</Text>];
   }
 
+  // Plan 23: the WORKFLOW is a first-class citizen — see every seat's lane + the orchestration here, and
+  // hand-edit the file ($EDITOR) or scaffold a starter, without leaving the browser.
+  function renderWorkflowView() {
+    const wid = st.workflow!;
+    const team = teams.find((t) => t.id === wid);
+    const wf = loadWorkflow(ws, wid);
+    const rows: ReactNode[] = [];
+    if (!wf) {
+      rows.push(<Text key="none" dimColor>  no workflow yet — {wid} runs on the agentic brief. Author one to script how work moves through the team.</Text>);
+    } else {
+      const orch = orchestrationSlice(wf);
+      if (orch) {
+        rows.push(<Text key="oh" color="cyan">orchestration <Text dimColor>· the lead's sequence &amp; hand-offs</Text></Text>);
+        orch.split("\n").slice(0, 6).forEach((l, i) => rows.push(<Text key={`o${i}`} wrap="truncate">  {l}</Text>));
+        rows.push(<Text key="osp"> </Text>);
+      }
+      for (const seat of seatsOf(wf).filter((s) => s !== "orchestration")) {
+        const drift = team && !team.members.includes(seat) ? " · not a current member" : "";
+        rows.push(<Text key={`h-${seat}`} color="cyan">{seat}<Text dimColor>{drift}</Text></Text>);
+        (laneFor(wf, seat) ?? "").split("\n").slice(0, 4).forEach((l, i) => rows.push(<Text key={`${seat}-${i}`} wrap="truncate">  {l}</Text>));
+        rows.push(<Text key={`sp-${seat}`}> </Text>);
+      }
+    }
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} width={props.width} marginTop={1}>
+        <Text color="cyan" bold>WORKFLOW · {wid}</Text>
+        {st.note && <Text color={st.note.startsWith("⚠") ? "red" : "green"}>{st.note}</Text>}
+        <Text> </Text>
+        {rows}
+        <Text dimColor>{wf ? "e/o edit in $EDITOR · esc back" : "n scaffold a starter from the members · o author in $EDITOR · esc back"}</Text>
+      </Box>
+    );
+  }
+
   function renderDetail() {
     if (selTeam) {
       const t = selTeam;
@@ -324,6 +374,14 @@ export function OrgBrowser(props: {
           <Text> </Text>
           <Text color="cyan">MEMBERS ({t.members.length})</Text>
           {t.members.length ? t.members.map((m) => <Text key={m}>  {m === t.lead ? "* " : "- "}{m}</Text>) : <Text dimColor>  (none — press m to staff)</Text>}
+          <Text> </Text>
+          <Text color="cyan">WORKFLOW</Text>
+          {(() => {
+            const wf = loadWorkflow(ws, t.id);
+            if (!wf) return <Text dimColor>  none — press w to view/author (optional)</Text>;
+            const seats = seatsOf(wf).filter((s) => s !== "orchestration");
+            return <Text dimColor>  {orchestrationSlice(wf) ? "orchestration + " : ""}{seats.length} seat{seats.length === 1 ? "" : "s"} — press w to view/edit</Text>;
+          })()}
         </Box>
       );
     }

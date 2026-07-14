@@ -105,6 +105,12 @@ export function assemble(
     teams?: RosterTeam[];
     /** The caller's own team charter — its standing instruction. Culture is configuration. */
     teamCharter?: string;
+    /** Plan 23: the team this run executes UNDER (its workflow's team) — names the heading below. */
+    workflowTeam?: string;
+    /** Plan 23: this agent's LANE in that team's workflow — what it does when work reaches it. */
+    workflowLane?: string;
+    /** Plan 23: the ORCHESTRATION slice — the sequence + hand-offs, injected for the team's LEAD only. */
+    orchestration?: string;
     /** Plan 18: true when the agent holds write_plan. Injects the STATIC how-to-plan instruction —
      *  never the live plan, which lives only in the per-call tail slot (core/plan-inject.ts). */
     canPlan?: boolean;
@@ -132,6 +138,12 @@ export function assemble(
   if (roster) s.push({ name: "registry", tier: "context", text: roster });
   if (opts.teamCharter)
     s.push({ name: "team-charter", tier: "context", text: `## Your team's charter\n${opts.teamCharter}` });
+  // Plan 23: the team's WORKFLOW. Orchestration first (the lead's big-picture sequence), then this
+  // agent's own lane. A stable, authored process — the same on every invocation, not a per-goal plan.
+  if (opts.orchestration)
+    s.push({ name: "workflow-orchestration", tier: "context", text: `## How the ${opts.workflowTeam ?? "team"} workflow runs (you orchestrate it)\n${opts.orchestration}` });
+  if (opts.workflowLane)
+    s.push({ name: "workflow-lane", tier: "context", text: `## Your role in the ${opts.workflowTeam ?? "team"} workflow\n${opts.workflowLane}` });
   if (opts.brief)
     s.push({
       name: "brief", tier: "context",

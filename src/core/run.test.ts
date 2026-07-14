@@ -8,7 +8,7 @@ import { MockLanguageModelV3, mockValues, simulateReadableStream } from "./mock-
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
-import { seedRoot, reindex, loadIndex, loadAgent, createAgent, serializeAgent } from "../store/roster";
+import { seedRoot, reindex, loadIndex, loadAgent, createAgent, updateAgent, serializeAgent } from "../store/roster";
 import { AgentDef } from "../schemas/agent";
 import { makeDeps, executeRun } from "./run";
 import { runChecker } from "./verification";
@@ -203,6 +203,100 @@ test("root create_team cannot grant a tool it does not hold — blocked BEFORE t
   await executeRun(deps, { agent: root, messages: [{ role: "user", content: "make it" }], triggeredBy: "user" });
   expect(teamExists(ws, "news")).toBe(false); // the escalation ceiling stopped it
   expect(approvalCalls).toBe(0);              // and the captain was never even asked
+});
+
+// ── Plan 23: team workflows — the lane a member plays under the team it runs for ──
+
+const promptsOf = (model: MockLanguageModelV3) => (model as unknown as { doGenerateCalls: { prompt: unknown }[] }).doGenerateCalls.map((c) => JSON.stringify(c.prompt));
+
+test("a member delegated THROUGH a team gets its workflow lane injected", async () => {
+  const { ws, db } = await boot();
+  createTeam(ws, { id: "news", charter: "the brief" }); // leadless → routes straight to the member
+  await createAgent(ws, db, { id: "reporter", role: "files stories", identity: "You report.", teams: ["news"] }, "root");
+  writeFileSync(paths.teamWorkflowFile(ws, "news"), "## reporter\nWF-REPORTER-LANE: draft 400 words, cite sources.\n");
+  await reindex(ws, db);
+
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "news", goal: "cover the story" }), text("drafted"), text("done")) as any,
+  });
+  await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "cover the story" }], triggeredBy: "user" });
+
+  const prompts = promptsOf(model);
+  expect(prompts.some((p) => p.includes("WF-REPORTER-LANE"))).toBe(true);          // the lane reached the member
+  expect(prompts.some((p) => p.includes("Your role in the news workflow"))).toBe(true);
+});
+
+test("the team LEAD gets the orchestration slice (plus its own lane)", async () => {
+  const { ws, db } = await boot();
+  createTeam(ws, { id: "news", charter: "c", lead: "editor" });
+  await createAgent(ws, db, { id: "editor", role: "edits copy", identity: "You edit.", teams: ["news"] }, "root");
+  writeFileSync(paths.teamWorkflowFile(ws, "news"), "## orchestration\nWF-ORCH: reporter then editor.\n\n## editor\nWF-EDITOR-LANE: tighten to 250.\n");
+  await reindex(ws, db);
+
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "news", goal: "g" }), text("edited"), text("done")) as any,
+  });
+  await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "g" }], triggeredBy: "user" });
+
+  const prompts = promptsOf(model);
+  expect(prompts.some((p) => p.includes("WF-ORCH"))).toBe(true);        // orchestration → the lead
+  expect(prompts.some((p) => p.includes("WF-EDITOR-LANE"))).toBe(true); // and its own lane too
+});
+
+test("a lead's hand-off to a member by id carries the team context (member gets its lane by inheritance)", async () => {
+  const { ws, db } = await boot();
+  createTeam(ws, { id: "news", charter: "c", lead: "editor" });
+  await createAgent(ws, db, { id: "editor", role: "edits", identity: "You edit.", teams: ["news"], tools: ["delegate_task"] }, "root");
+  await createAgent(ws, db, { id: "reporter", role: "reports", identity: "You report.", teams: ["news"] }, "root");
+  await updateAgent(ws, db, "editor", { canDelegateTo: ["team:news"] }); // a lead may reach its own people
+  writeFileSync(paths.teamWorkflowFile(ws, "news"), "## reporter\nWF-INHERITED-LANE: draft it.\n");
+  await reindex(ws, db);
+
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("delegate_task", { to: "news", goal: "g" }),        // root → team → editor (the lead)
+      call("delegate_task", { to: "reporter", goal: "draft" }), // editor → reporter, a member, BY ID
+      text("drafted"),                                          // reporter
+      text("edited"),                                           // editor
+      text("done"),                                             // root
+    ) as any,
+  });
+  await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "g" }], triggeredBy: "user" });
+
+  // reporter was delegated by id (not through the team) yet still got its lane — viaTeam inherited from the lead.
+  expect(promptsOf(model).some((p) => p.includes("WF-INHERITED-LANE"))).toBe(true);
+});
+
+test("no workflow file → delegated members run exactly as before (no injection)", async () => {
+  const { ws, db } = await boot();
+  createTeam(ws, { id: "news", charter: "c" });
+  await createAgent(ws, db, { id: "reporter", role: "reports", identity: "You report.", teams: ["news"] }, "root");
+  await reindex(ws, db);
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "news", goal: "g" }), text("drafted"), text("done")) as any,
+  });
+  await executeRun(makeDeps({ ws, db, model }), { agent: await loadAgent(ws, "root"), messages: [{ role: "user", content: "g" }], triggeredBy: "user" });
+  expect(promptsOf(model).some((p) => p.includes("workflow"))).toBe(false); // nothing workflow-shaped in any prompt
+});
+
+test("root's read_workflow returns a team's workflow (read-only) so it can brief the captain", async () => {
+  const { ws, db } = await boot();
+  createTeam(ws, { id: "news", charter: "c" });
+  writeFileSync(paths.teamWorkflowFile(ws, "news"), "## orchestration\nreporter then editor.\n\n## reporter\ndraft it.\n");
+  const root = await loadAgent(ws, "root");
+  expect(root.tools).toContain("read_workflow"); // root holds it
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const set = toolsForAgent(root, { ws } as any);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res = await (set.read_workflow as any).execute({ team: "news" });
+  expect(res.seats).toContain("reporter");
+  expect(res.hasOrchestration).toBe(true);
+  expect(res.workflow).toContain("draft it.");
+  // a team with no workflow reports so, honestly
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const none = await (set.read_workflow as any).execute({ team: "trading" });
+  expect(none.workflow).toBeNull();
+  expect(none.note).toContain("no workflow");
 });
 
 test("root delegate_task spawns a child run that produces its own trace", async () => {

@@ -6,6 +6,7 @@ import type { AgentDef } from "../schemas/agent";
 import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schemas/trace";
 import { assemble, type RosterTeam } from "./prompt";
 import { listTeams, loadTeam, membersOf, createTeamWithMembers } from "../store/teams";
+import { loadWorkflow, laneFor, orchestrationSlice } from "../store/workflows";
 import type { TeamDef } from "../schemas/team";
 import { routeToTeam } from "./team-routing";
 import { writePlan, foldPlan, appendPlanEvent, indexPlan, currentPlanId, renderPlan } from "../store/plans";
@@ -120,7 +121,7 @@ export interface RunContext {
   createAgent: (draft: NewAgentDraft) => Promise<AgentDef>;
   createTeam: (proposal: NewTeamProposal) => Promise<TeamDef>;
   canDelegate: (toId: string) => boolean;
-  runChild: (brief: { to: string; goal: string; context?: string; criteria?: string; inputArtifacts?: string[]; callId?: string }) => Promise<RunResult>;
+  runChild: (brief: { to: string; goal: string; context?: string; criteria?: string; inputArtifacts?: string[]; callId?: string; viaTeam?: string }) => Promise<RunResult>;
   findAgents: (query: string, k: number) => AgentHit[];
   agentExists: (id: string) => boolean;
   notes: string[];
@@ -138,7 +139,7 @@ export interface RunContext {
   resolveDelegation: (
     to: string,
     goal: string,
-  ) => { ok: true; agentId: string; team?: string; note?: string } | { ok: false; error: string };
+  ) => { ok: true; agentId: string; team?: string; viaTeam?: string; note?: string } | { ok: false; error: string };
   /** Plan 18: the agent's live plan. `write` mints a version only when the item SET changes; `tick`
    *  appends a transition. `tick` returns `rejected` when the model tries to set a TERMINAL status on an
    *  item bound to a child run — those are engine-owned, and the attempt is still recorded (by:"model")
@@ -269,7 +270,7 @@ export function makeDeps(opts: {
 
 export async function executeRun(
   deps: RunDeps,
-  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; criteria?: string; fromRun: string }; inputArtifacts?: string[]; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string; taintedContext?: boolean; spawnCallId?: string },
+  opts: { agent: AgentDef; messages: ModelMessage[]; brief?: { from: string; goal: string; context?: string; criteria?: string; fromRun: string }; inputArtifacts?: string[]; triggeredBy: string; depth?: number; ancestry?: string[]; ingestSource?: string; taintedContext?: boolean; spawnCallId?: string; viaTeam?: string },
 ): Promise<RunResult> {
   const depth = opts.depth ?? 0;
   const ancestry = opts.ancestry ?? [];
@@ -424,7 +425,7 @@ export async function executeRun(
     // file and staffs it. The grant ceiling is enforced in the tool BEFORE the approval card is shown.
     createTeam: (p) => createTeamWithMembers(deps.ws, deps.db, { id: p.id, charter: p.charter, lead: p.lead, tools: { grant: p.grant } }, p.members),
     canDelegate: (toId) => canDelegate(opts.agent, loadIndex(deps.db).find((r) => r.id === toId) ?? { id: toId }),
-    runChild: async ({ to, goal, context, criteria, inputArtifacts, callId }) => {
+    runChild: async ({ to, goal, context, criteria, inputArtifacts, callId, viaTeam }) => {
       const child = await loadAgent(deps.ws, to);
       return executeRun(deps, {
         agent: child,
@@ -434,6 +435,9 @@ export async function executeRun(
         triggeredBy: runId,
         depth: depth + 1,
         ancestry: [...ancestry, opts.agent.id],
+        // Plan 23: the team this child runs UNDER — so it gets its workflow lane. Set by resolveDelegation
+        // (the team it was routed through, or an inherited team when a lead hands work to a member).
+        viaTeam,
         // Plan 02 Ph6: the spawning delegate_task callId, so the LIVE waterfall nests this child under
         // that EXACT tool span (deterministic even for concurrent delegations in one turn).
         spawnCallId: callId,
@@ -584,7 +588,12 @@ export async function executeRun(
       if (depth + 1 > MAX_DELEGATION_DEPTH)
         return { ok: false, error: `max delegation depth (${MAX_DELEGATION_DEPTH}) reached (a team with a lead consumes one level)` };
       if (deps.runCounter!.n >= MAX_RUNS_PER_REQUEST) return { ok: false, error: `max runs per request (${MAX_RUNS_PER_REQUEST}) reached` };
-      return { ok: true, agentId: target, team: team?.id, note };
+      // Plan 23: the team context the CHILD runs under (for its workflow lane). When delegated through a
+      // team id, that's the team. When a lead — itself running under team X (opts.viaTeam) — hands work
+      // DIRECTLY to a member of X, the child inherits X, so the lead's hand-offs give members their lanes.
+      let viaTeam = team?.id;
+      if (!viaTeam && row && opts.viaTeam && (row.teams ?? []).includes(opts.viaTeam)) viaTeam = opts.viaTeam;
+      return { ok: true, agentId: target, team: team?.id, viaTeam, note };
     },
   };
 
@@ -613,6 +622,15 @@ export async function executeRun(
   const ownTeams = opts.agent.teams.map((t) => loadTeam(deps.ws, t)).filter((t): t is NonNullable<typeof t> => !!t);
   const teamPolicy = mergeTeamPolicies(ownTeams.map((t) => t.tools));
   const agentTools = effectiveTools(opts.agent.tools, teamPolicy);
+
+  // Plan 23: the agent's LANE in the workflow of the team it is running UNDER (opts.viaTeam). Sparse and
+  // optional — no workflow file, or no section for this agent → nothing is injected (the agentic
+  // fallback). The `orchestration` slice is injected for that team's LEAD only. The whole feature is
+  // inert unless a run has a team context AND that team authored a workflow.md.
+  const workflow = opts.viaTeam ? loadWorkflow(deps.ws, opts.viaTeam) : null;
+  const workflowLane = workflow ? laneFor(workflow, opts.agent.id) : undefined;
+  const viaTeamDef = opts.viaTeam ? (ownTeams.find((t) => t.id === opts.viaTeam) ?? loadTeam(deps.ws, opts.viaTeam)) : null;
+  const orchestration = workflow && viaTeamDef?.lead === opts.agent.id ? orchestrationSlice(workflow) : undefined;
 
   let applied: PolicyNote[] = [];
   try {
@@ -704,6 +722,9 @@ export async function executeRun(
     visibleAgents: visible,
     teams: rosterTeams,
     teamCharter: ownTeams.map((t) => t.charterBody).filter(Boolean).join("\n\n") || undefined,
+    workflowTeam: opts.viaTeam,
+    workflowLane,
+    orchestration,
     canPlan: agentTools.includes("write_plan"),
     brief: opts.brief ? { to: opts.agent.id, ...opts.brief } : undefined,
     policies: applied,

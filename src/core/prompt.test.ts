@@ -130,3 +130,22 @@ test("no charter section when the agent sits on no team", () => {
   const { sections } = assemble(agent, { visibleAgents: [], teams: [], policies: [] });
   expect(sections.find((s) => s.name === "team-charter")).toBeUndefined();
 });
+
+// --- Plan 23: the team workflow — lane + orchestration -------------------------------------------
+
+test("the workflow lane and orchestration inject as context-tier sections", () => {
+  const { system, sections } = assemble(worker(), {
+    visibleAgents: [], teams: [], policies: [],
+    workflowTeam: "news", workflowLane: "Draft 400 words, cite sources.", orchestration: "reporter → fact-check → editor.",
+  });
+  expect(system).toContain("## How the news workflow runs (you orchestrate it)\nreporter → fact-check → editor.");
+  expect(system).toContain("## Your role in the news workflow\nDraft 400 words, cite sources.");
+  expect(sections.find((s) => s.name === "workflow-lane")?.tier).toBe("context");
+  expect(sections.find((s) => s.name === "workflow-orchestration")?.tier).toBe("context");
+});
+
+test("no workflow fields → no workflow sections (the agentic fallback leaves the prompt unchanged)", () => {
+  const { sections } = assemble(worker(), { visibleAgents: [], teams: [], policies: [] });
+  expect(sections.find((s) => s.name === "workflow-lane")).toBeUndefined();
+  expect(sections.find((s) => s.name === "workflow-orchestration")).toBeUndefined();
+});

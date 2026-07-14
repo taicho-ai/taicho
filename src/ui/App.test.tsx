@@ -225,16 +225,50 @@ test("suggester highlight STAYS put across re-renders (uncontrolled @inkjs/ui on
   expect(lastFrame()).toContain("› /teams");       // still on row 2, not snapped back to /help
 });
 
-test("the input clears after submitting a message (uncontrolled TextInput remounts on submit)", async () => {
+test("the input clears after submitting a message (Plan 24: controlled ChatInput, cleared via setInput)", async () => {
   const { props } = await setup({ model: mockModel("ok") });
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "hello there", ENTER);
   await waitFor(lastFrame, "ok");                    // the run completed and root replied
   await sleep(60);
-  // "hello there" must appear exactly ONCE — as the echoed user line. If the uncontrolled input
-  // hadn't cleared on submit it would still hold the typed text too, giving two occurrences.
+  // "hello there" must appear exactly ONCE — as the echoed user line. If the input hadn't cleared on
+  // submit it would still hold the typed text too, giving two occurrences.
   const occurrences = (lastFrame() ?? "").split("hello there").length - 1;
   expect(occurrences).toBe(1);
+});
+
+test("Plan 24: the input renders inside a bordered box", async () => {
+  const { props } = await setup();
+  const { lastFrame } = render(<App {...props} />);
+  await waitFor(lastFrame, "message root");
+  expect(lastFrame()).toContain("╭"); // top border line
+  expect(lastFrame()).toContain("╰"); // bottom border line
+});
+
+test("Plan 24: ↑ recalls the previous submitted message into the input", async () => {
+  const { props } = await setup({ model: mockModel("ok") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "summarize this", ENTER);
+  await waitFor(lastFrame, "ok");                       // replied; input is empty again
+  expect(lastFrame()).toContain("message root, or / for commands"); // placeholder shows (input empty)
+  await send(stdin, "\x1b[A");                          // ↑
+  await sleep(60);
+  expect(lastFrame()).not.toContain("message root, or / for commands"); // placeholder gone → input has text
+  expect(lastFrame()).toContain("summarize this");     // the recalled message is in the box
+});
+
+test("Plan 24: Ctrl+W in the input deletes the previous word before submit", async () => {
+  const { props } = await setup({ model: mockModel("ok") });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await waitFor(lastFrame, "message root");
+  await send(stdin, "alpha beta");
+  await sleep(40);
+  await send(stdin, "\x17");                            // Ctrl+W -> "alpha "
+  await sleep(40);
+  await send(stdin, ENTER);
+  await waitFor(lastFrame, "ok");
+  expect(lastFrame()).not.toContain("alpha beta");     // "beta" was word-deleted, never submitted
+  expect(lastFrame()).toContain("alpha");
 });
 
 test("/mcp list renders the manager's servers", async () => {
@@ -1289,24 +1323,19 @@ test("Plan 21 Ph4: reader verbs — `a` lands open feedback on the viewed versio
   expect(listAnnotations(ws, "verb-doc@v1").some((an) => an.kind === "approval")).toBe(true);
 });
 
-test("Plan 21 review: a bad $EDITOR must not crash the REPL — `o` reports and shows the path", async () => {
-  const prevEditor = process.env.EDITOR;
-  process.env.EDITOR = "definitely-not-a-real-editor-xyz";   // spawn ENOENT arrives as an ASYNC error event
-  try {
-    const { ws, props } = await setup({ model: mockModel("hi") });
-    saveArtifact(ws, { id: "open-doc", title: "Open Doc", body: "# body", producer: "root", runId: "root/1" });
-    const { stdin, lastFrame } = render(<App {...props} />);
-    await send(stdin, "/artifacts", ENTER);
-    await waitFor(lastFrame, "open-doc@v1");
-    await send(stdin, ENTER);                                // reader
-    await waitFor(lastFrame, "a annotate");
-    await send(stdin, "o");
-    // Without the error listener this killed the whole process (exit 1) one tick later.
-    await waitFor(lastFrame, "$EDITOR failed", 4000);
-    expect(lastFrame()).toContain("body file:");             // the path — the always-usable part
-  } finally {
-    if (prevEditor === undefined) delete process.env.EDITOR; else process.env.EDITOR = prevEditor;
-  }
+test("Plan 23: `o` in a non-interactive context shows the path instead of launching an editor (no crash)", async () => {
+  // The REPL under ink-testing-library has no TTY, so the editor handoff (Ink 7.1.0 suspendTerminal)
+  // is skipped and it reports the path — it never spawns a real editor from a test, and never crashes.
+  const { ws, props } = await setup({ model: mockModel("hi") });
+  saveArtifact(ws, { id: "open-doc", title: "Open Doc", body: "# body", producer: "root", runId: "root/1" });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "/artifacts", ENTER);
+  await waitFor(lastFrame, "open-doc@v1");
+  await send(stdin, ENTER);                                // reader
+  await waitFor(lastFrame, "a annotate");
+  await send(stdin, "o");
+  await waitFor(lastFrame, "open it yourself", 4000);      // reports the path, alive and well
+  expect(lastFrame()).toContain("open-doc");               // the path is shown
 });
 
 test("Plan 21 review: search ⏎ KEEPS the query as a filter and the found row can be OPENED", async () => {
@@ -1689,6 +1718,41 @@ test("the Org browser hires an agent through the wizard (a → identity → team
   await send(stdin, ENTER);                      // no teams selected → hire (default-only)
   await waitFor(lastFrame, "hired scribe");
   expect(loadIndex(db).some((r) => r.id === "scribe")).toBe(true);
+});
+
+test("Plan 23: the team detail shows workflow status and reflects an authored workflow.md", async () => {
+  const { props, ws } = await setup();
+  createTeam(ws, { id: "news", charter: "the brief" }); // setup() seeds no default team, so news is row 0
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/teams", ENTER);
+  await waitFor(lastFrame, "ORG");
+  await send(stdin, ENTER);                       // open the news detail
+  await waitFor(lastFrame, "WORKFLOW");
+  expect(lastFrame()).toContain("none — press w");
+
+  writeFileSync(join(ws, "teams", "news", "workflow.md"), "## orchestration\nreporter then editor.\n\n## editor\ntighten.\n");
+  await send(stdin, ESC);                          // back to the shelf
+  await send(stdin, ENTER);                        // re-open detail — it re-reads from disk
+  await waitFor(lastFrame, "press w to view/edit"); // the summary now counts seats
+  expect(lastFrame()).toContain("1 seat");
+});
+
+test("Plan 23: the workflow view is first-class — see the lanes, and scaffold a starter when none exists", async () => {
+  const { props, ws, db } = await setup();
+  createTeam(ws, { id: "news", charter: "c" });
+  await createAgent(ws, db, { id: "reporter", role: "reports", identity: "You report.", teams: ["news"] }, "root");
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/teams", ENTER);
+  await waitFor(lastFrame, "ORG");
+  await send(stdin, "w");                          // open the workflow view for the selected team (news)
+  await waitFor(lastFrame, "WORKFLOW · news");
+  expect(lastFrame()).toContain("no workflow yet");
+
+  await send(stdin, "n");                          // scaffold a starter from the members
+  await waitFor(lastFrame, "orchestration");       // the scaffolded workflow now renders inline
+  expect(lastFrame()).toContain("reporter");       // the member appears as a seat you can see
 });
 
 test("the Org browser forms a team through the Add wizard (a → id → charter → members → lead → ⏎)", async () => {

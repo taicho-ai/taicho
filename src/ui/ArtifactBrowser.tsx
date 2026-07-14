@@ -11,8 +11,8 @@
  *  Keys arrive via `keyRef` (a browser-OWNED ref, never cardKeyRef): App's useInput dispatches
  *  pending card → operation view → browser → chat, so ownership is fixed order, not last-writer-wins. */
 import { useEffect, useMemo } from "react";
-import { Box, Text } from "ink";
-import { spawn } from "node:child_process";
+import { Box, Text, useApp } from "ink";
+import { editFileInTerminal } from "./editor-handoff";
 import { type Artifact, artifactHandle } from "../schemas/artifact";
 import { readArtifactBody, artifactBodyPath, artifactVersions, readArtifact, type GcReport } from "../store/artifacts";
 import { listAnnotations, annotateArtifact } from "../store/annotations";
@@ -113,6 +113,7 @@ export function ArtifactBrowser(props: {
   onSubmitChat?: (text: string) => void;   // Phase 5: the reader's `r` verb
 }) {
   const { ws, st, onChange } = props;
+  const { suspendTerminal } = useApp(); // Ink 7.1.0: hand the tty to the captain's editor, then repaint
 
   // Data pipeline — pure functions over the stores, MEMOIZED: App re-renders on every live
   // background onStep event (statuses) and on the block ticker, and this pipeline is synchronous
@@ -212,17 +213,9 @@ export function ArtifactBrowser(props: {
           onChange({ ...st, note: `external — no local file: ${uri}` });
           return;
         }
-        const editor = process.env.EDITOR || process.env.VISUAL;
-        if (editor) {
-          // spawn() reports ENOENT ASYNCHRONOUSLY on the child's 'error' event — with no listener it
-          // is an uncaught exception that kills the whole REPL (a try/catch here is dead code for it).
-          // Attach the listener, and always show the PATH: a detached GUI editor may open, a terminal
-          // editor (vim) can't take the tty from under Ink — the path is the honest, always-usable part.
-          const child = spawn(editor, [path], { detached: true, stdio: "ignore" });
-          child.on("error", (e) => onChange((prev) => ({ ...prev, note: `$EDITOR failed (${e.message}) — body file: ${path}` })));
-          child.unref();
-          onChange({ ...st, note: `↗ sent to $EDITOR (${editor}) — body file: ${path}` });
-        } else onChange({ ...st, note: `no $EDITOR — body file: ${path}` });
+        // Plan 23: hand the terminal to the captain's editor ($EDITOR/nano) via Ink's suspendTerminal,
+        // wait for it to quit, then repaint — so a TERMINAL editor (nano/vim) actually gets the tty.
+        void editFileInTerminal(suspendTerminal, path).then((r) => onChange((prev) => ({ ...prev, note: r.note })));
         return;
       }
       return; // reader consumes everything else
