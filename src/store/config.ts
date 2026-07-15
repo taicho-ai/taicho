@@ -62,6 +62,9 @@ const McpHttpServer = z.object({
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).optional(),
   auth: z.literal("oauth").optional(), // omitted ⇒ no-auth or static-header auth
+  // Secrets stored WITH the server. `applyMcpEnv` loads them into process.env on add + every boot, so a
+  // ${VAR} ref in `url`/`headers` resolves (via interpolateEnv) both immediately and after a restart.
+  env: z.record(z.string(), z.string()).optional(),
 });
 export const McpServerConfig = z.union([McpStdioServer, McpHttpServer]);
 export type McpServerConfig = z.infer<typeof McpServerConfig>;

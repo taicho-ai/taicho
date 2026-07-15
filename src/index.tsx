@@ -19,7 +19,7 @@ import { runLoginFlow } from "./core/auth/login";
 import { createCodexProvider } from "./core/providers/openai-codex";
 import { OPENAI_CODEX_AUTH } from "./core/auth/constants";
 import { createMcpManager, type McpManager } from "./core/mcp/manager";
-import { readMcpStore } from "./store/mcp-store";
+import { readMcpStore, applyMcpEnv } from "./store/mcp-store";
 import { makeSpendLedger, hasAnyCeilings } from "./store/spend-ledger";
 import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
@@ -121,6 +121,9 @@ const roster = loadIndex(db);
 const embedder = createEmbedder({ provider: config.embeddings?.provider });
 if (embedder) ensureEmbedSpace(db, embedder.model, embedder.dim);
 
+// Load every stored MCP server's `env` (secrets saved WITH the server) into process.env BEFORE connecting,
+// so a `${VAR}` ref in a url/header resolves this session exactly as it did when the server was added.
+applyMcpEnv(ws);
 // MCP: connect configured servers (taicho.yaml `mcp.servers` ∪ the /mcp-added store; yaml wins on
 // name collision). Best-effort — a server that fails is skipped, never blocking the REPL. The
 // manager is mutable so /mcp add/remove/login work at runtime. `mcp.enabled: false` disables it.

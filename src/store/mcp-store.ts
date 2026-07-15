@@ -47,3 +47,19 @@ export function removeMcpServer(ws: string, name: string): boolean {
   write(ws, all);
   return true;
 }
+
+/** Load every stored server's `env` into `process.env`, so a `${VAR}` ref in a url/header/arg resolves
+ *  (via `interpolateEnv`). Called on boot BEFORE the manager connects, and again right after a server is
+ *  added so it connects in the SAME session — the env travels WITH the server entry, no separate secrets
+ *  file. Idempotent (re-applying the same values is a no-op). Returns the variable NAMES applied; the
+ *  VALUES are secrets and must never be logged. */
+export function applyMcpEnv(ws: string): string[] {
+  const applied: string[] = [];
+  for (const spec of Object.values(readMcpStore(ws))) {
+    for (const [name, value] of Object.entries(spec.env ?? {})) {
+      process.env[name] = value;
+      applied.push(name);
+    }
+  }
+  return applied;
+}

@@ -21,7 +21,7 @@ import { artifactHandle, parseHandle } from "../schemas/artifact";
 import { mergeDraft } from "./draft";
 import { scrapeUrl } from "./firecrawl";
 import { McpServerConfig } from "../store/config";
-import { addMcpServer } from "../store/mcp-store";
+import { addMcpServer, applyMcpEnv } from "../store/mcp-store";
 import { KbNode } from "../schemas/knowledge";
 import { writeNode, mkKbId, nodeExists, forgetNodes, reindexKnowledge, reembedAll } from "../store/knowledge";
 import { putVector } from "../store/vectors";
@@ -705,7 +705,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
 
   if (mcp && has("add_mcp_server"))
     set.add_mcp_server = tool({
-      description: "Connect a NEW MCP server for the captain to approve. Provide a `url` for a remote/hosted server (with auth:'oauth' or headers), or a `command`/`args` for a local stdio server. Put secrets as ${ENV_VAR} refs (ask_human for the var name first). Returns the connection status + tool count; on error, fix the config and call again.",
+      description: "Connect a NEW MCP server for the captain to approve. Provide a `url` for a remote/hosted server (with auth:'oauth' or headers), or a `command`/`args` for a local stdio server. Put any secret (API key, token) in `env` as { VAR_NAME: 'the-secret' } and reference it as ${VAR_NAME} in the url/headers — it is saved WITH the server and loaded into the environment immediately AND on every future boot, so the server just works now and after a restart. Returns the connection status + tool count; on error, fix the config and call again.",
       inputSchema: z.object({
         name: z.string().regex(/^[a-z][a-z0-9-]*$/, "lowercase id: letters, digits, hyphens"),
         url: z.string().url().optional(),
@@ -717,7 +717,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       }),
       execute: async ({ name, url, auth, headers, command, args, env }) => {
         const raw = url
-          ? { url, ...(auth ? { auth } : {}), ...(headers ? { headers } : {}) }
+          ? { url, ...(auth ? { auth } : {}), ...(headers ? { headers } : {}), ...(env ? { env } : {}) }
           : command
             ? { command, ...(args ? { args } : {}), ...(env ? { env } : {}) }
             : null;
@@ -728,6 +728,7 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
         const decision = await ctx.requestApproval({ kind: "add_mcp", name, spec });
         if (decision.type !== "approve") return { rejected: true };
         addMcpServer(ctx.ws, name, spec);
+        applyMcpEnv(ctx.ws); // load the new server's env into process.env NOW, so ${VAR} resolves on this connect
         const status = await mcp.addServer(name, spec);
         return { name, status: status.status, toolCount: status.toolCount, error: status.error };
       },

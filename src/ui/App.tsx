@@ -43,6 +43,7 @@ import type { Telemetry } from "../core/otel";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
 import { renderMarkdown } from "./markdown";
+import { lineGroup, marginTopFor, classifySystemLine, userBarLines } from "./transcript-style";
 import { splitCompletedBlocks } from "./markdown-stream";
 import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
@@ -104,7 +105,11 @@ function proposalView(req: Exclude<ApprovalRequest, { kind: "ask_human" }>): { t
     ] };
   if (req.kind === "add_mcp") {
     const transport = isStdioServer(req.spec) ? `${req.spec.command} ${(req.spec.args ?? []).join(" ")}`.trim() : req.spec.url;
-    const env = isStdioServer(req.spec) ? Object.keys(req.spec.env ?? {}).join(", ") : (req.spec.auth ?? Object.keys(req.spec.headers ?? {}).join(", "));
+    // Show only the NAMES of env vars / headers (never their secret values). For http, include auth + header
+    // names + the env-var names that will be written to process.env.
+    const env = isStdioServer(req.spec)
+      ? Object.keys(req.spec.env ?? {}).join(", ")
+      : [...(req.spec.auth ? [req.spec.auth] : []), ...Object.keys(req.spec.headers ?? {}), ...Object.keys(req.spec.env ?? {})].join(", ");
     return { title: "Add MCP server — approve?", fields: [
       { label: "name", value: req.name }, { label: "transport", value: transport }, { label: "env", value: env || "—" },
     ] };
@@ -1128,26 +1133,46 @@ export function App(props: {
     <Box flexDirection="column">
       <Text color="cyan">{BANNER}</Text>
       {lines.map((l, i) => {
+        // Readability tiers (see transcript-style.ts): a blank line opens each block; the user's turn is
+        // an inverse pill anchor, an agent reply a bold speaker, and operation breadcrumbs a dim rail.
+        const prev = lines[i - 1];
+        const mt = marginTopFor(prev, l);
         if (l.rendered) {
-          // Streaming commits each completed markdown block as its own rendered line. Show the dim
-          // `from` label only once per reply — i.e. when the previous line isn't a rendered agent
-          // line from the same speaker — and add vertical spacing between consecutive same-agent
-          // blocks so they read as one reply instead of a repeated-label wall of text.
-          const prev = lines[i - 1];
-          const sameAgent = !!prev && prev.rendered === true && prev.kind === "agent" && prev.from === l.from;
+          // An agent reply. Streaming commits each completed markdown block as its own rendered line, so
+          // one reply is several same-speaker lines: show the bold speaker only once (on the boundary),
+          // then the markdown body. Same-speaker continuations keep paragraph spacing, drop the label.
+          const newBlock = !prev || lineGroup(prev) !== lineGroup(l);
           return (
-            <Box key={i} flexDirection="column" marginTop={sameAgent ? 1 : 0}>
-              {!sameAgent && l.from && <Text dimColor>{l.from}</Text>}
+            <Box key={i} flexDirection="column" marginTop={mt}>
+              {newBlock && l.from && <Text color="cyan" bold>{"● " + l.from}</Text>}
               {renderMarkdown(l.text, mdWidth).split("\n").map((ln, j) => (
                 <Text key={j}>{ln}</Text>
               ))}
             </Box>
           );
         }
+        if (l.kind === "user") {
+          // The turn anchor: a FULL-WIDTH inverse bar (true black-on-white, adapts to the terminal
+          // theme) spanning the whole row edge-to-edge, wrapped to the terminal width. Scanning up, each
+          // bar marks where a turn begins — so a turn visibly ends at the next bar.
+          const bar = userBarLines(l.text, termSize.columns);
+          return (
+            <Box key={i} flexDirection="column" marginTop={mt}>
+              {bar.map((bl, j) => (
+                <Text key={j} inverse bold>{bl}</Text>
+              ))}
+            </Box>
+          );
+        }
+        // A system line: an operation breadcrumb (│ rail + category colour) or a plain notice.
+        const s = classifySystemLine(l.text);
         return (
-          <Text key={i} color={l.kind === "user" ? "white" : l.kind === "system" ? "gray" : "green"}>
-            {l.kind === "user" ? "> " : l.from ? `${l.from}: ` : ""}{l.text}
-          </Text>
+          <Box key={i} marginTop={mt}>
+            <Text>
+              {s.isOp && <Text color="gray" dimColor>{"│ "}</Text>}
+              <Text color={s.color} dimColor={s.dim}>{s.text}</Text>
+            </Text>
+          </Box>
         );
       })}
       {pending && (() => {

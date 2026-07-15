@@ -466,10 +466,10 @@ test("subscription path streams the reply live: deltas assemble into the rendere
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "go", ENTER);
   await waitFor(lastFrame, "streamed reply");           // assembled from the streamed deltas, then rendered
-  // Rendered as a markdown block under a one-line dim `root` label — NOT the old raw inline
+  // Rendered as a markdown block under a one-line bold `● root` speaker label — NOT the old raw inline
   // "root: …" tail, which no longer exists (the in-progress tail is never shown raw).
   expect(lastFrame()).not.toContain("root: streamed reply");
-  expect((lastFrame()!.match(/^root$/gm) ?? []).length).toBe(1);
+  expect((lastFrame()!.match(/^● root$/gm) ?? []).length).toBe(1);
   // Poll for the completed trace rather than assuming completion the instant the text appears.
   const start = Date.now();
   let done = listTraces(ws, "root").filter((t) => t.outcome === "completed");
@@ -506,8 +506,8 @@ test("streaming renders completed markdown blocks incrementally and never shows 
   // The agent label is shown once per reply, not once per block. A plain substring count of "root"
   // is NOT robust here: the empty-squad startup banner ("...root is ready)...") also contains "root",
   // so a bare /root/g count is 2 even after the fix. Match the label as its OWN terminal-row line
-  // instead (the dim `from` label renders alone on its line; no other line is ever exactly "root").
-  expect((lastFrame()!.match(/^root$/gm) ?? []).length).toBe(1);
+  // instead (the `● from` speaker label renders alone on its line; no other line is ever "● root").
+  expect((lastFrame()!.match(/^● root$/gm) ?? []).length).toBe(1);
 });
 
 test("no credentials: a chat message is refused without burning tokens", async () => {
