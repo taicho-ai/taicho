@@ -128,6 +128,52 @@ test("a delegated child run nests under its parent — one trace across the dele
   await telemetry.shutdown();
 });
 
+test("cost integrity: gen_ai.usage rides ONLY the real `chat` call spans — never run/delegation/tool CONTAINERS", async () => {
+  // Regression guard for the LangSmith double-count bug. A gen_ai-convention backend prices ANY span
+  // carrying gen_ai.usage.* as a model call. If a run/turn/delegation/tool CONTAINER also carries it, the
+  // same tokens get priced on the container AND the real per-iteration `chat` spans nested inside it —
+  // inflating reported cost 2x at the trace root, up to 6x once delegation roll-ups stack. So gen_ai.usage
+  // must live ONLY on the leaf `chat` spans; run totals live under taicho.* (which the backend ignores).
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "helper", role: "helps", identity: "You help." }, "root");
+  const { spans, telemetry } = testTelemetry();
+
+  const rootModel = new MockLanguageModelV3({
+    doGenerate: mockValues(call("delegate_task", { to: "helper", goal: "do the thing" }), text("done")) as any,
+  });
+  const helperModel = new MockLanguageModelV3({ doGenerate: mockValues(text("helper done")) as any });
+  const deps = makeDeps({
+    ws, db, model: rootModel, telemetry,
+    resolveModel: (id) => ({ model: id === "helper" ? helperModel : rootModel, modelId: "mock-model" }),
+  });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "go" }], triggeredBy: "user" });
+  expect(res.trace.outcome).toBe("completed");
+
+  const finished = spans.getFinishedSpans();
+  const chats = finished.filter((s) => s.name.startsWith("chat "));         // the real inference calls
+  const containers = finished.filter((s) => !s.name.startsWith("chat "));   // runs, delegated child, tool, checker
+  expect(chats.length).toBeGreaterThan(0);
+  expect(containers.length).toBeGreaterThan(0);
+
+  // Every real call span carries gen_ai usage — this is what a backend SHOULD price, exactly once.
+  for (const s of chats) {
+    expect(s.attributes["gen_ai.usage.input_tokens"]).toBeDefined();
+    expect(s.attributes["gen_ai.usage.output_tokens"]).toBeDefined();
+  }
+  // NO container span may carry gen_ai.usage.* — that was the bug (root · user turn, helper · delegated,
+  // delegate_task · …). If this ever fails, LangSmith cost is double-counting again.
+  for (const s of containers) {
+    expect(s.attributes["gen_ai.usage.input_tokens"]).toBeUndefined();
+    expect(s.attributes["gen_ai.usage.output_tokens"]).toBeUndefined();
+  }
+  // The per-run token split is preserved — just moved to taicho.* so it's queryable without being priced.
+  const runSpan = finished.find((s) => s.name === "root · user turn")!;
+  expect(runSpan.attributes["taicho.tokens.input"]).toBeGreaterThan(0);
+  expect(runSpan.attributes["taicho.tokens.output"]).toBeGreaterThan(0);
+  await telemetry.shutdown();
+});
+
 test("content capture is OPT-OUT: an explicit 0/false/no/off strips prompts from the spans", async () => {
   const { ws, db } = await boot();
   await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");

@@ -844,8 +844,14 @@ export async function executeRun(
   // failed verification more than once this week" — the question a terminal waterfall could never answer.
   finishRunSpan(outcome, {
     "taicho.tokens": result.tokens,
-    "gen_ai.usage.input_tokens": result.inputTokens,
-    "gen_ai.usage.output_tokens": result.outputTokens,
+    // The run's token TOTALS live under taicho.* — NOT gen_ai.usage.* — on purpose. A run/turn/delegation
+    // span is a CONTAINER, not an inference call; a gen_ai-convention backend (LangSmith) prices ANY span
+    // carrying gen_ai.usage.* as a model call, so stamping the aggregate here double-counted every token on
+    // top of the real per-iteration `chat` spans (which correctly carry gen_ai.usage in loop.ts) — inflating
+    // reported cost 2x at the trace root and up to 6x once delegation roll-ups stack. The backend rolls up
+    // the child call spans for the true per-run cost; we keep the split here only for our OWN queries.
+    "taicho.tokens.input": result.inputTokens,
+    "taicho.tokens.output": result.outputTokens,
     "taicho.context.tokens": result.contextTokens,
     ...(subscription ? {} : { "taicho.cost.usd": result.costUsd }),
     ...(planAtEnd
