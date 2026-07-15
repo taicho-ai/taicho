@@ -64,6 +64,17 @@ const SCOPES: { key: BrowserScope; label: string }[] = [
 const READER_LINES = 40;
 const SHELF_LIST_LINES = 10;
 
+/** The reader's markdown body as display lines. Renders the WHOLE document once — markdown is a
+ *  multi-line grammar, so tables (header + `---|---` + rows), fenced code, lists and blockquotes only
+ *  survive when marked sees them intact; rendering line-by-line handed it isolated fragments and broke
+ *  every one of them. Split the ANSI-rendered result into lines for the scroll window. Both the scroll
+ *  clamp (key handler) and the render read from HERE, so their line counts can't drift. `renderMarkdown`
+ *  is memoised, so the repeated call per keypress is a cache hit. */
+export function readerBodyLines(ws: string, handle: string, width: number): string[] {
+  const body = readArtifactBody(ws, handle)?.toString("utf8") ?? "";
+  return renderMarkdown(body, width).split("\n");
+}
+
 /** The `f` chip row: each field cycles a small closed value set with ↑↓. producer/type values are
  *  derived from the artifacts IN SCOPE (plus "any"), so the chips never offer a dead value. */
 const FILTER_FIELDS = ["producer", "type", "feedback", "verdict", "since"] as const;
@@ -176,7 +187,7 @@ export function ArtifactBrowser(props: {
       if (key.downArrow) {
         // clamp HERE, not just at render — a render-only clamp accumulates invisible scroll debt
         // that ↑ must repay one press at a time (the old viewer clamped in the handler too).
-        const max = current ? Math.max(0, (readArtifactBody(ws, artifactHandle(current))?.toString("utf8") ?? "").split("\n").length - READER_LINES) : 0;
+        const max = current ? Math.max(0, readerBodyLines(ws, artifactHandle(current), props.width - 4).length - READER_LINES) : 0;
         onChange((prev) => ({ ...prev, scroll: Math.min(max, prev.scroll + 1) }));
         return;
       }
@@ -303,8 +314,7 @@ export function ArtifactBrowser(props: {
   // ── READER (full-screen) ──────────────────────────────────────────────────────────────────────
   if (st.reading && current) {
     const handle = artifactHandle(current);
-    const body = readArtifactBody(ws, handle)?.toString("utf8") ?? "";
-    const bodyLines = body.split("\n");
+    const bodyLines = readerBodyLines(ws, handle, props.width - 4);
     const visible = Math.min(READER_LINES, bodyLines.length);
     const maxScroll = Math.max(0, bodyLines.length - visible);
     const scroll = Math.min(st.scroll, maxScroll);
@@ -330,7 +340,7 @@ export function ArtifactBrowser(props: {
         <Text color="cyan" bold>{handle} · {current.producer} · {ageLabel(current.created)} ago · {readerIdx + 1}/{arts.length} · {current.runId}</Text>
         <Text> </Text>
         {bodyLines.slice(scroll, scroll + visible).map((line, i) => (
-          <Text key={i}>{renderMarkdown(line, props.width - 4)}</Text>
+          <Text key={i}>{line || " "}</Text>
         ))}
         {maxScroll > 0 && <Text dimColor>  ↑↓ scroll · {bodyLines.length - visible - scroll} more lines</Text>}
         {open.length > 0 && <Text> </Text>}

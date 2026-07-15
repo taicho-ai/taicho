@@ -150,6 +150,25 @@ test("boot renders the ANSI-shadow figlet banner", async () => {
   expect(lastFrame()).toContain("█"); // the block-glyph banner appears at the top on launch
 });
 
+test("boot hydration: a resumed session renders its prior conversation from rootThread", async () => {
+  const { props } = await setup({ model: mockModel("hi") });
+  const rootThread = [
+    { role: "user", content: "earlier question about the launch" },
+    { role: "assistant", content: "earlier answer with the plan" },
+  ] as const;
+  const { lastFrame } = render(<App {...props} rootThread={[...rootThread]} />);
+  // The prior turns are on screen immediately — not just in the model's memory.
+  await waitFor(lastFrame, "resumed conversation");
+  expect(lastFrame()).toContain("earlier question about the launch"); // the user turn
+  expect(lastFrame()).toContain("earlier answer with the plan");       // root's reply
+});
+
+test("boot hydration: a fresh conversation (empty rootThread) shows no resumed history", async () => {
+  const { props } = await setup({ model: mockModel("hi") });
+  const { lastFrame } = render(<App {...props} rootThread={[]} />);
+  expect(lastFrame()).not.toContain("resumed conversation");
+});
+
 test("/help lists the command grammar", async () => {
   const { props } = await setup();
   const { stdin, lastFrame } = render(<App {...props} />);

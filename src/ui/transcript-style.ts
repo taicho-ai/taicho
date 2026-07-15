@@ -1,7 +1,7 @@
 /** Scrollback readability (transcript hierarchy). Pure helpers that decide how a `Line` is spaced and
  *  coloured so the REPL reads as distinct turns instead of a low-contrast wall. Three tiers:
  *
- *    content   the user's turn (an inverse ` you ` pill) and agent replies (a bold speaker) — bright.
+ *    content   the user's turn (a full-width inverse ` you ` bar) and agent replies (a bold speaker).
  *    activity  operation breadcrumbs (tool calls, delegations) — a dim `│` rail; routine ops recede.
  *    problems  warnings / refusals / failures — coloured and NEVER dim, so they can't hide in the noise.
  *
@@ -24,6 +24,23 @@ export function marginTopFor(prev: Line | undefined, l: Line): 0 | 1 {
   if (!prev) return 0;
   if (lineGroup(prev) !== lineGroup(l)) return 1; // block boundary
   return l.kind === "agent" ? 1 : 0; // same-reply paragraph spacing; op streams stay tight
+}
+
+export interface SpacedLine {
+  line: Line;
+  marginTop: 0 | 1;
+  /** True when this line opens a new block — used to show a speaker label once per agent reply. */
+  newBlock: boolean;
+}
+
+/** Precompute each line's spacing + block-boundary flag from its predecessor, so a write-once renderer
+ *  (Ink `<Static>`, whose callback sees one item at a time with no neighbours) needs no lookup. Prior
+ *  lines are frozen, so appending a line never changes an earlier line's result — safe for the log. */
+export function annotateSpacing(lines: Line[]): SpacedLine[] {
+  return lines.map((line, i) => {
+    const prev = lines[i - 1];
+    return { line, marginTop: marginTopFor(prev, line), newBlock: !prev || lineGroup(prev) !== lineGroup(line) };
+  });
 }
 
 export interface SystemLineStyle {

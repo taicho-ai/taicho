@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from "react";
-import { Box, Text, useInput, useApp, useStdout, type Key } from "ink";
+import { useState, useRef, useEffect, useMemo } from "react";
+import { Box, Text, Static, useInput, useApp, useStdout, type Key } from "ink";
 import { Spinner } from "@inkjs/ui";
 import { ChatInput } from "./ChatInput";
 import { pushHistory, loadHistory, appendHistory } from "./input-history";
@@ -43,7 +43,8 @@ import type { Telemetry } from "../core/otel";
 import { formatAuthStatus, noCredentialLines, authExpiredMessage } from "../core/auth/status";
 import { runSlash as runSlashPure, type Line, type SlashCommand, suggestCommands, cycleIndex } from "./slash";
 import { renderMarkdown } from "./markdown";
-import { lineGroup, marginTopFor, classifySystemLine, userBarLines } from "./transcript-style";
+import { classifySystemLine, userBarLines, annotateSpacing, type SpacedLine } from "./transcript-style";
+import { threadToLines } from "./transcript-hydrate";
 import { splitCompletedBlocks } from "./markdown-stream";
 import { draftPolicy, persistApprovedPolicy } from "../coaching/teach";
 import { mergeDraft } from "../core/draft";
@@ -96,6 +97,49 @@ function RunStatus({ activity }: { activity: string }) {
     </Box>
   );
 }
+
+/** One committed scrollback line. Rendered inside <Static> (write-once → the terminal's own scrollback),
+ *  so it takes its spacing precomputed (annotateSpacing) instead of peeking at a neighbour. Three shapes
+ *  match transcript-style.ts's tiers: a full-width user bar, an agent reply (bold speaker + markdown), or
+ *  a system op/notice (dim │ rail for ops). */
+function TranscriptRow({ item, mdWidth, termCols }: { item: SpacedLine; mdWidth: number; termCols: number }) {
+  const { line: l, marginTop: mt, newBlock } = item;
+  if (l.rendered) {
+    // An agent reply: the bold cyan speaker once per reply (on the block boundary), then the markdown.
+    return (
+      <Box flexDirection="column" marginTop={mt}>
+        {newBlock && l.from && <Text color="cyan" bold>{"● " + l.from}</Text>}
+        {renderMarkdown(l.text, mdWidth).split("\n").map((ln, j) => (
+          <Text key={j}>{ln}</Text>
+        ))}
+      </Box>
+    );
+  }
+  if (l.kind === "user") {
+    // The turn anchor: a full-width inverse bar spanning the row edge-to-edge, wrapped to the width.
+    const bar = userBarLines(l.text, termCols);
+    return (
+      <Box flexDirection="column" marginTop={mt}>
+        {bar.map((bl, j) => (
+          <Text key={j} inverse bold>{bl}</Text>
+        ))}
+      </Box>
+    );
+  }
+  // A system line: an operation breadcrumb (│ rail + category colour) or a plain notice.
+  const s = classifySystemLine(l.text);
+  return (
+    <Box marginTop={mt}>
+      <Text>
+        {s.isOp && <Text color="gray" dimColor>{"│ "}</Text>}
+        <Text color={s.color} dimColor={s.dim}>{s.text}</Text>
+      </Text>
+    </Box>
+  );
+}
+
+/** A Static item: the one-time banner, or a committed transcript line. */
+type StaticRow = { kind: "banner" } | { kind: "line"; sp: SpacedLine };
 
 /** Title + fields for the non-question approval cards. */
 function proposalView(req: Exclude<ApprovalRequest, { kind: "ask_human" }>): { title: string; fields: CardField[] } {
@@ -186,7 +230,9 @@ export function App(props: {
     return id ? foldPlan(props.ws, id) : null;
   });
   const [planPanelOn, setPlanPanelOn] = useState<boolean>(() => getPlanPanel(props.ws));
-  const [lines, setLines] = useState<Line[]>(() => initialLines(props));
+  // Seed the visible scrollback from the SAME replay thread the model gets (props.rootThread), so a
+  // resumed session opens on its history instead of a blank screen. What you see == what root remembers.
+  const [lines, setLines] = useState<Line[]>(() => [...initialLines(props), ...threadToLines(props.rootThread ?? [])]);
   // Plan 24: the message editor is now a CONTROLLED <ChatInput> — `input` is the single source of truth,
   // so a programmatic set (clear-on-submit, seed "/cmd " on accept) is just `setInput`, and the draft
   // survives the browser dock's unmount without the old remount hack (bumped key + seed).
@@ -1129,52 +1175,27 @@ export function App(props: {
   // Plan 10: which live surfaces render for the current mode + terminal size (bar-only when small).
   const layout = resolveLayout(viewMode, termSize.columns, termSize.rows);
 
+  const spacedLines = useMemo(() => annotateSpacing(lines), [lines]);
+  // Static items: the banner + every committed line. Written ONCE to native scrollback and never
+  // repainted — so history can't flicker or snap the viewport, and scroll-up sticks. Requires items to
+  // be append-only + immutable, which `say()` already guarantees (it only ever pushes a Line).
+  const staticItems = useMemo<StaticRow[]>(
+    () => [{ kind: "banner" }, ...spacedLines.map((sp) => ({ kind: "line" as const, sp }))],
+    [spacedLines],
+  );
+
   return (
-    <Box flexDirection="column">
-      <Text color="cyan">{BANNER}</Text>
-      {lines.map((l, i) => {
-        // Readability tiers (see transcript-style.ts): a blank line opens each block; the user's turn is
-        // an inverse pill anchor, an agent reply a bold speaker, and operation breadcrumbs a dim rail.
-        const prev = lines[i - 1];
-        const mt = marginTopFor(prev, l);
-        if (l.rendered) {
-          // An agent reply. Streaming commits each completed markdown block as its own rendered line, so
-          // one reply is several same-speaker lines: show the bold speaker only once (on the boundary),
-          // then the markdown body. Same-speaker continuations keep paragraph spacing, drop the label.
-          const newBlock = !prev || lineGroup(prev) !== lineGroup(l);
-          return (
-            <Box key={i} flexDirection="column" marginTop={mt}>
-              {newBlock && l.from && <Text color="cyan" bold>{"● " + l.from}</Text>}
-              {renderMarkdown(l.text, mdWidth).split("\n").map((ln, j) => (
-                <Text key={j}>{ln}</Text>
-              ))}
-            </Box>
-          );
+    <>
+      <Static items={staticItems}>
+        {(item, index) =>
+          item.kind === "banner"
+            ? <Text key={index} color="cyan">{BANNER}</Text>
+            : <TranscriptRow key={index} item={item.sp} mdWidth={mdWidth} termCols={termSize.columns} />
         }
-        if (l.kind === "user") {
-          // The turn anchor: a FULL-WIDTH inverse bar (true black-on-white, adapts to the terminal
-          // theme) spanning the whole row edge-to-edge, wrapped to the terminal width. Scanning up, each
-          // bar marks where a turn begins — so a turn visibly ends at the next bar.
-          const bar = userBarLines(l.text, termSize.columns);
-          return (
-            <Box key={i} flexDirection="column" marginTop={mt}>
-              {bar.map((bl, j) => (
-                <Text key={j} inverse bold>{bl}</Text>
-              ))}
-            </Box>
-          );
-        }
-        // A system line: an operation breadcrumb (│ rail + category colour) or a plain notice.
-        const s = classifySystemLine(l.text);
-        return (
-          <Box key={i} marginTop={mt}>
-            <Text>
-              {s.isOp && <Text color="gray" dimColor>{"│ "}</Text>}
-              <Text color={s.color} dimColor={s.dim}>{s.text}</Text>
-            </Text>
-          </Box>
-        );
-      })}
+      </Static>
+      {/* The LIVE region — transient surfaces that repaint. Everything permanent is in <Static> above,
+          so a keystroke or streamed block repaints only this small tail, never the whole history. */}
+      <Box flexDirection="column">
       {pending && (() => {
         // key = the head request's stable id: a fresh card (with its own reset useState) mounts per
         // request, but the visible head never remounts just because another request queued behind it.
@@ -1301,7 +1322,8 @@ export function App(props: {
           )}
         </>
       )}
-    </Box>
+      </Box>
+    </>
   );
 }
 
