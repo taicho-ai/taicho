@@ -1,8 +1,9 @@
 /** Durable conversation evidence lives separately from prompt context.
  *  ledger.jsonl is append-only audit history; context.json says which turns are safe to replay. */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { paths } from "./files";
+import { clearThread } from "./thread";
 
 export type LedgerStatus = "submitted" | "completed" | "failed" | "blocked" | "interrupted";
 
@@ -85,4 +86,22 @@ export function recordContextDecision(
   if (decision.include) ctx.includedTurns.push(entry);
   else ctx.excludedTurns.push(entry);
   writeFileSync(contextFile(ws, agent), JSON.stringify(ctx, null, 2));
+}
+
+/** Durably reset an agent's conversation (a user-invoked `/clear`). The append-only ledger + context are
+ *  TRUTH, so they are ARCHIVED — moved to conversations/.archive/<agent>-<ts>/ — never deleted. The
+ *  derived replay cache (agents/<id>/thread.jsonl) is wiped too. A subsequent turn recreates a fresh
+ *  ledger and a subsequent boot loads an empty thread, so the old conversation never rehydrates. Returns
+ *  the archive path (or null if there was nothing to archive). */
+export function clearConversation(ws: string, agent: string, now: number = Date.now()): string | null {
+  const dir = paths.conversationDir(ws, agent);
+  let archived: string | null = null;
+  if (existsSync(dir)) {
+    const archiveRoot = join(ws, "conversations", ".archive");
+    mkdirSync(archiveRoot, { recursive: true });
+    archived = join(archiveRoot, `${agent}-${now}`);
+    renameSync(dir, archived);
+  }
+  clearThread(ws, agent); // the derived replay cache lives under agents/<id>/, outside the conversation dir
+  return archived;
 }

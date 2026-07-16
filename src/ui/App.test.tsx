@@ -21,8 +21,8 @@ import { listTraces, writeTrace } from "../store/trace";
 import { RunTrace } from "../schemas/trace";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
-import { loadContext, loadLedger } from "../store/conversation";
-import { loadThread } from "../store/thread";
+import { loadContext, loadLedger, appendLedgerTurn } from "../store/conversation";
+import { loadThread, writeThread } from "../store/thread";
 import { readTaskState, taskIdForRun, listTaskIndex } from "../store/task-state";
 import { listSchedules, createSchedule } from "../store/schedules";
 import { readMcpStore } from "../store/mcp-store";
@@ -167,6 +167,65 @@ test("boot hydration: a fresh conversation (empty rootThread) shows no resumed h
   const { props } = await setup({ model: mockModel("hi") });
   const { lastFrame } = render(<App {...props} rootThread={[]} />);
   expect(lastFrame()).not.toContain("resumed conversation");
+});
+
+test("/clear shows the cleared confirmation and durably resets root's conversation", async () => {
+  const { ws, props } = await setup({ model: mockModel("hi") });
+  // Seed a persisted conversation so boot hydrates it (proves /clear actually has something to wipe).
+  appendLedgerTurn(ws, "root", {
+    turnId: "t1", runId: "root/r1", timestamp: "2026-07-15T00:00:00.000Z",
+    agent: "root", role: "user", content: "old secret question", status: "completed",
+  });
+  writeThread(ws, "root", [{ role: "user", content: "old secret question" }, { role: "assistant", content: "old answer" }]);
+
+  const { stdin, lastFrame } = render(<App {...props} rootThread={loadThread(ws, "root")} />);
+  await waitFor(lastFrame, "old secret question"); // hydrated on boot
+  await send(stdin, "/clear", ENTER);
+  await waitFor(lastFrame, "conversation cleared");
+
+  // Durable reset: nothing to rehydrate on the next turn or the next boot.
+  expect(loadLedger(ws, "root")).toEqual([]);
+  expect(loadThread(ws, "root")).toEqual([]);
+});
+
+test("/clear on a fresh conversation still confirms (nothing archived)", async () => {
+  const { props } = await setup({ model: mockModel("hi") });
+  const { stdin, lastFrame } = render(<App {...props} rootThread={[]} />);
+  await send(stdin, "/clear", ENTER);
+  await waitFor(lastFrame, "conversation cleared");
+});
+
+test("typing `exit` closes taicho — runs the graceful shutdown (mcp.closeAll → unmount)", async () => {
+  let closed = false;
+  const mcp = fakeMcp({ closeAll: async () => { closed = true; } });
+  const { props } = await setup({ model: mockModel("hi"), mcp });
+  const { stdin } = render(<App {...props} />);
+  await send(stdin, "exit", ENTER);
+  // The exit command runs quit(): mcp.closeAll() → telemetry.shutdown() → Ink exit(). Poll for closeAll.
+  const start = Date.now();
+  while (!closed && Date.now() - start < 3000) await sleep(20);
+  expect(closed).toBe(true);
+});
+
+test("`QUIT` is case-insensitive and also closes taicho", async () => {
+  let closed = false;
+  const mcp = fakeMcp({ closeAll: async () => { closed = true; } });
+  const { props } = await setup({ model: mockModel("hi"), mcp });
+  const { stdin } = render(<App {...props} />);
+  await send(stdin, "QUIT", ENTER);
+  const start = Date.now();
+  while (!closed && Date.now() - start < 3000) await sleep(20);
+  expect(closed).toBe(true);
+});
+
+test("a message that merely CONTAINS 'exit' is not a quit — it goes to the model", async () => {
+  let closed = false;
+  const mcp = fakeMcp({ closeAll: async () => { closed = true; } });
+  const { props } = await setup({ model: mockModel("here is the reply"), mcp });
+  const { stdin, lastFrame } = render(<App {...props} rootThread={[]} />);
+  await send(stdin, "exit the loop in this function", ENTER);
+  await waitFor(lastFrame, "here is the reply"); // the model answered → still running
+  expect(closed).toBe(false);                    // never triggered the shutdown
 });
 
 test("/help lists the command grammar", async () => {

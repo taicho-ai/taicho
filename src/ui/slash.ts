@@ -28,6 +28,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "kb", summary: "manage the knowledgebase", usage: "sync | list [filter] | forget <filter> | reindex" },
   { name: "skills", summary: "manage agent skills", usage: "list | show <id|name> | remove <id> | reindex" },
   { name: "artifacts", summary: "browse the squad's artifacts — runs also end here", usage: "" },
+  { name: "clear", summary: "clear the conversation — wipe the screen and forget history" },
   { name: "status", summary: "show the auth source" },
   { name: "login", summary: "sign in with a ChatGPT subscription", usage: "openai" },
   { name: "logout", summary: "sign out", usage: "openai" },

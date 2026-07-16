@@ -26,6 +26,7 @@ import { PlanPanel } from "./PlanPanel";
 import type { PlanState } from "../schemas/plan";
 import { currentPlanId, foldPlan, settlePlanItemForTask } from "../store/plans";
 import { listTraces, readTrace } from "../store/trace";
+import { clearConversation } from "../store/conversation";
 import { listPolicies, deletePolicy, approvePolicy } from "../store/policy";
 import { updateTaskFromTrace, createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, readTaskState, mkTaskId, TERMINAL_TASK_STATUS } from "../store/task-state";
 import { TaskScheduler } from "../core/tasks";
@@ -233,6 +234,10 @@ export function App(props: {
   // Seed the visible scrollback from the SAME replay thread the model gets (props.rootThread), so a
   // resumed session opens on its history instead of a blank screen. What you see == what root remembers.
   const [lines, setLines] = useState<Line[]>(() => [...initialLines(props), ...threadToLines(props.rootThread ?? [])]);
+  // Bumped by /clear to remount <Static>: a committed line lives in native scrollback and can't be
+  // un-written, so /clear wipes the terminal AND resets Static's render counter (fresh key) so it
+  // re-emits the post-clear items from the top instead of thinking it already drew them.
+  const [clearEpoch, setClearEpoch] = useState(0);
   // Plan 24: the message editor is now a CONTROLLED <ChatInput> — `input` is the single source of truth,
   // so a programmatic set (clear-on-submit, seed "/cmd " on accept) is just `setInput`, and the draft
   // survives the browser dock's unmount without the old remount hack (bumped key + seed).
@@ -416,13 +421,17 @@ export function App(props: {
   // The live suggester: which commands match what's being typed (empty once past the command name).
   const sugg = suggestCommands(input);
 
+  // Graceful shutdown: close MCP servers + flush telemetry spans, then unmount. Shared by Esc, Ctrl+C
+  // and the typed `exit`/`quit` commands so the teardown can never drift between them.
+  const quit = () => { void (async () => { await props.mcp?.closeAll(); await props.telemetry?.shutdown(); exit(); })(); };
+
   useInput((input, key) => {
     // Ctrl+C quits from ANY surface (card, browser, focus mode, chat). Ink's built-in exitOnCtrlC is
     // disabled at render() because it only matches the legacy \x03 byte — under the kitty keyboard
     // protocol Ctrl+C arrives as \x1b[99;5u, which Ink decodes to `input:'c', key.ctrl:true` (the same
     // shape it gives for legacy \x03), so this ONE check handles both. Mirror the Esc-idle graceful quit.
     if (key.ctrl && input === "c") {
-      void (async () => { await props.mcp?.closeAll(); await props.telemetry?.shutdown(); exit(); })();
+      quit();
       return;
     }
     // While a card is up, this boot-registered useInput is the only listener guaranteed to be wired
@@ -452,7 +461,7 @@ export function App(props: {
       return; // consume other keys while in focus mode
     }
     if (key.shift && key.tab) { setFocusMode(true); return; } // enter focus mode
-    if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else { void (async () => { await props.mcp?.closeAll(); await props.telemetry?.shutdown(); exit(); })(); } return; }
+    if (key.escape) { if (busy) { aborter.current?.abort(); say({ kind: "system", text: "  ⊗ cancelling…" }); } else { quit(); } return; }
     // Plan 24: chat-line editing (typing, motions, word-nav, history) AND the suggester's ↑/↓/Tab now
     // live in <ChatInput>'s own useInput (gated by isActive). This boot listener only owns the surfaces
     // above (cards, browsers, focus, escape/shift-tab).
@@ -816,6 +825,9 @@ export function App(props: {
 
   const submit = async (value: string) => {
     if (!value.trim()) return;
+    // Typing `exit` or `quit` closes taicho — the same graceful shutdown as Esc / Ctrl+C. Checked before
+    // steer/history so it fires even mid-run and never clutters the ↑/↓ recall.
+    if (/^(exit|quit)$/i.test(value.trim())) { setInput(""); quit(); return; }
     // Plan 24: every sent line joins the ↑/↓ history (session + the persisted per-workspace file).
     setHistory((h) => pushHistory(h, value));
     appendHistory(props.ws, value);
@@ -907,6 +919,17 @@ export function App(props: {
       await reindex(props.ws, props.db);
       setRoster(loadIndex(props.db)); // review finding: /teach + approvePolicy read this state, not the DB
       say({ kind: "system", text: "  roster reindexed from agents/*/agent.md" });
+      return;
+    }
+    if (cmd === "clear") {
+      // Clear the conversation: (1) wipe the terminal incl. native scrollback — a <Static> line can't be
+      // un-written; (2) forget the in-memory context; (3) durably reset root's persisted conversation
+      // (ledger archived, replay cache wiped) so it won't rehydrate on the next turn or boot.
+      stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen + scrollback + cursor home
+      thread.current = [];
+      const archived = clearConversation(props.ws, "root");
+      setLines([{ kind: "system", text: `  conversation cleared — fresh start${archived ? " (prior history archived)" : ""}.` }]);
+      setClearEpoch((n) => n + 1); // remount <Static> so it re-emits from the top over the wiped screen
       return;
     }
     // Plan 22: /teams and bare /agents open the Org browser — the dedicated team/agent management mode.
@@ -1186,7 +1209,7 @@ export function App(props: {
 
   return (
     <>
-      <Static items={staticItems}>
+      <Static key={clearEpoch} items={staticItems}>
         {(item, index) =>
           item.kind === "banner"
             ? <Text key={index} color="cyan">{BANNER}</Text>
