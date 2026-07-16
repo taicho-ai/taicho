@@ -287,6 +287,25 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
+  // Plan 25: run a team's STRUCTURED workflow (the engine walks the steps; human gates ask the captain).
+  if (has("run_workflow"))
+    set.run_workflow = tool({
+      description:
+        "Run a team's WORKFLOW — the engine walks its steps in order (research → verify → draft → sign-off → …), stopping at any human gate to ask the captain. Use when the captain asks to run a team's process. The team must have a structured workflow (a `steps:` block in its workflow.md); otherwise this returns a note. Returns the per-step outcome and the handles it produced.",
+      inputSchema: z.object({ team: z.string().describe("the team id whose workflow to run") }),
+      execute: async ({ team }) => {
+        if (!ctx.runWorkflow) return { error: "workflows are not available in this run" };
+        const state = await ctx.runWorkflow(team);
+        if (!state) return { team, ran: false, note: `team "${team}" has no structured workflow — nothing to run` };
+        return {
+          team,
+          ran: true,
+          status: state.status,
+          steps: state.steps.map((s) => ({ id: s.id, status: s.status, produced: s.produced, choice: s.choice })),
+        };
+      },
+    });
+
   // ---- Plan 18: the agent's live plan -------------------------------------------------------------
   // NOT in DEFAULT_WORKER_TOOLS. A plan is not needed to produce an artifact, so it stays an opt-in
   // grant under Plan 08 least privilege. Root holds all three; a worker or team lead asks for them.

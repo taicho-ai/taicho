@@ -8,6 +8,7 @@ import { assemble, type RosterTeam } from "./prompt";
 import { listTeams, loadTeam, membersOf, createTeamWithMembers } from "../store/teams";
 import { loadWorkflow, laneFor, orchestrationSlice } from "../store/workflows";
 import type { TeamDef } from "../schemas/team";
+import type { WorkflowRunState } from "../schemas/workflow";
 import { routeToTeam } from "./team-routing";
 import { writePlan, foldPlan, appendPlanEvent, indexPlan, currentPlanId, renderPlan } from "../store/plans";
 import { planIdForGoal, TERMINAL_ITEM_STATUS, type PlanState, type PlanItemStatus } from "../schemas/plan";
@@ -122,6 +123,10 @@ export interface RunContext {
   createTeam: (proposal: NewTeamProposal) => Promise<TeamDef>;
   canDelegate: (toId: string) => boolean;
   runChild: (brief: { to: string; goal: string; context?: string; criteria?: string; inputArtifacts?: string[]; callId?: string; viaTeam?: string }) => Promise<RunResult>;
+  /** Plan 25: run a team's structured workflow deterministically — the engine walks the steps, stopping at
+   *  any human gate. Null when the team has no `steps:` workflow. Wired to runTeamWorkflow (dynamic import
+   *  to avoid the run.ts ↔ workflow-run.ts cycle). */
+  runWorkflow?: (teamId: string, input?: { artifacts?: { name: string; handle: string }[] }) => Promise<WorkflowRunState | null>;
   findAgents: (query: string, k: number) => AgentHit[];
   agentExists: (id: string) => boolean;
   notes: string[];
@@ -425,6 +430,10 @@ export async function executeRun(
     // file and staffs it. The grant ceiling is enforced in the tool BEFORE the approval card is shown.
     createTeam: (p) => createTeamWithMembers(deps.ws, deps.db, { id: p.id, charter: p.charter, lead: p.lead, tools: { grant: p.grant } }, p.members),
     canDelegate: (toId) => canDelegate(opts.agent, loadIndex(deps.db).find((r) => r.id === toId) ?? { id: toId }),
+    runWorkflow: async (teamId, input) => {
+      const { runTeamWorkflow } = await import("./workflow-run");
+      return runTeamWorkflow(deps, teamId, input);
+    },
     runChild: async ({ to, goal, context, criteria, inputArtifacts, callId, viaTeam }) => {
       const child = await loadAgent(deps.ws, to);
       return executeRun(deps, {

@@ -6,9 +6,10 @@ import { MockLanguageModelV3, mockValues } from "./mock-model";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
-import { seedRoot, reindex, createAgent } from "../store/roster";
-import { makeDeps } from "./run";
+import { seedRoot, reindex, createAgent, loadAgent } from "../store/roster";
+import { makeDeps, executeRun } from "./run";
 import { runTeamWorkflow } from "./workflow-run";
+import { readArtifact } from "../store/artifacts";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>
@@ -69,4 +70,28 @@ test("runTeamWorkflow returns null for a team with no structured workflow", asyn
   const { ws, db } = await boot();
   const deps = makeDeps({ ws, db, model: new MockLanguageModelV3({ doGenerate: (async () => text("x")) as any }) });
   expect(await runTeamWorkflow(deps, "ghost")).toBeNull();
+});
+
+test("root runs a team's workflow through the run_workflow tool, driving it end to end", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "researcher", role: "researches", identity: "You research." }, "root");
+  await createAgent(ws, db, { id: "writer", role: "writes", identity: "You write." }, "root");
+  mkdirSync(paths.teamDir(ws, "news"), { recursive: true });
+  writeFileSync(paths.teamWorkflowFile(ws, "news"), WF);
+  await reindex(ws, db);
+
+  // root calls run_workflow; inside, researcher then writer run; root then replies.
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("run_workflow", { team: "news" }),
+      call("write_artifact", { topicSlug: "sources", markdown: "# s" }), text("done"),
+      call("write_artifact", { topicSlug: "draft", markdown: "# d" }), text("done"),
+      text("ran the news workflow"),
+    ) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+  const root = await loadAgent(ws, "root");
+  const res = await executeRun(deps, { agent: root, messages: [{ role: "user", content: "run the news workflow" }], triggeredBy: "user" });
+  expect(res.text).toBe("ran the news workflow");
+  expect(readArtifact(ws, "draft@v1")).not.toBeNull(); // the workflow really produced the draft
 });
