@@ -22,6 +22,10 @@ export const paths = {
   conversationDir: (ws: string, id: string) => join(ws, "conversations", id),
   taskDir: (ws: string) => join(ws, "tasks"),
   scheduleDir: (ws: string) => join(ws, "schedules"),
+  // Plan 25: a workflow's DEFINITION lives in teams/<team>/workflow.md; per-RUN state is here.
+  workflowsDir: (ws: string) => join(ws, "workflows"),
+  workflowRunsDir: (ws: string, id: string) => join(ws, "workflows", id, "runs"),
+  workflowRunDir: (ws: string, id: string, runId: string) => join(ws, "workflows", id, "runs", runId),
   kbNodeDir: (ws: string) => join(ws, "kb", "nodes"),
   kbNodeFile: (ws: string, id: string) => join(ws, "kb", "nodes", `${id}.md`),
   kbSourceDir: (ws: string) => join(ws, "kb", "sources"),
@@ -40,6 +44,7 @@ export async function ensureWorkspace(ws: string) {
   await mkdir(join(ws, "conversations"), { recursive: true });
   await mkdir(join(ws, "tasks"), { recursive: true });
   await mkdir(join(ws, "schedules"), { recursive: true });
+  await mkdir(join(ws, "workflows"), { recursive: true });
   await mkdir(join(ws, "kb", "nodes"), { recursive: true });
   await mkdir(join(ws, "kb", "sources"), { recursive: true });
   await mkdir(join(ws, "skills"), { recursive: true });
