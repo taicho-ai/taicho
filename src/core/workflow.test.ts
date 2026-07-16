@@ -169,3 +169,55 @@ test("a cancelled human gate (null decision) interrupts the run", async () => {
   expect(state.steps.find((s) => s.id === "signoff")!.status).toBe("interrupted");
   expect(state.status).toBe("interrupted");
 });
+
+// ── Phase 3: branch + parallel ───────────────────────────────────────────────
+const withBranch = parseWorkflowDef({
+  id: "wb", team: "t", version: 1,
+  steps: [
+    { id: "triage", branch: "@classifier", routes: { bug: "fix", question: "answer" } },
+    { id: "fix", run: "@dev", produces: "patch" },
+    { id: "answer", run: "@support", produces: "reply" },
+  ],
+});
+
+test("a branch routes to the step chosen by the classifier; the untaken step is skipped", async () => {
+  const w = mkws();
+  const { calls, runAgent } = recorder();
+  const classify = async () => "question";
+  const state = await executeWorkflow({ ws: w, runAgent, classify }, withBranch);
+  expect(calls.map((c) => c.id)).toEqual(["answer"]);
+  expect(state.steps.find((s) => s.id === "triage")!.choice).toBe("question");
+  expect(state.steps.find((s) => s.id === "fix")!.status).toBe("skipped");
+  expect(state.status).toBe("done");
+});
+
+const withParallel = parseWorkflowDef({
+  id: "wp", team: "t", version: 1,
+  steps: [
+    {
+      id: "fan",
+      branches: [{ id: "a", run: "@a", produces: "ra" }, { id: "b", run: "@b", produces: "rb" }],
+      join: "@merger",
+      produces: "report",
+    },
+    { id: "ship", run: "@shipper", consumes: ["report"], produces: "shipped" },
+  ],
+});
+
+test("a parallel step fans out its branches then joins, threading the report into the next step", async () => {
+  const w = mkws();
+  const { calls, runAgent } = recorder();
+  const state = await executeWorkflow({ ws: w, runAgent }, withParallel);
+  expect(calls.map((c) => c.id).sort()).toEqual(["a", "b", "fan__join", "ship"]);
+  expect(calls.find((c) => c.id === "ship")!.inputs).toEqual(["report@v1"]);
+  expect(state.status).toBe("done");
+  expect(state.steps.find((s) => s.id === "fan")!.status).toBe("done");
+});
+
+test("a parallel step fails the workflow if any branch fails", async () => {
+  const w = mkws();
+  const { runAgent } = recorder({ b: "failed" });
+  const state = await executeWorkflow({ ws: w, runAgent }, withParallel);
+  expect(state.steps.find((s) => s.id === "fan")!.status).toBe("failed");
+  expect(state.status).toBe("failed");
+});

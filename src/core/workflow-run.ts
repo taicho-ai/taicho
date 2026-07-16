@@ -63,6 +63,20 @@ export function wireWorkflowDeps(deps: RunDeps, def: WorkflowDef): Omit<Workflow
       const d = await deps.requestApproval({ kind: "ask_human", question, options: node.choices });
       return d.type === "answered" ? { choice: d.answer } : null;
     },
+
+    classify: async ({ node, target }) => {
+      const labels = Object.keys(node.routes);
+      const agent = await loadAgent(deps.ws, node.branch.replace(/^@/, ""));
+      const body = target ? (readArtifactBody(deps.ws, target)?.toString("utf8") ?? "") : "";
+      const child = await executeRun(deps, {
+        agent,
+        messages: [{ role: "user", content: `Classify the input into exactly one of these labels: ${labels.join(", ")}.\nReply with ONLY the label.\n\n${body}` }],
+        triggeredBy: `workflow:${def.id}:${node.id}`,
+        viaTeam: def.team,
+      });
+      const text = child.text.toLowerCase();
+      return labels.find((l) => text.includes(l.toLowerCase())) ?? labels[0] ?? "";
+    },
   };
 }
 
