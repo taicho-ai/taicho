@@ -14,6 +14,7 @@
  *  ADDS structure at the seats you have actually authored. */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { paths } from "./files";
+import { loadWorkflowDefText, type WorkflowDef } from "../schemas/workflow";
 
 /** The reserved seat name for the lead's orchestration slice. An agent literally named `orchestration`
  *  would collide with it — deliberately reserved, and documented, so the seat is unambiguous. */
@@ -51,6 +52,15 @@ export function loadWorkflow(ws: string, teamId: string): TeamWorkflow | null {
   const file = paths.teamWorkflowFile(ws, teamId);
   if (!existsSync(file)) return null;
   return parseWorkflow(readFileSync(file, "utf8"));
+}
+
+/** Plan 25: the STRUCTURED workflow definition (the `steps:` frontmatter) for a team, or null when the
+ *  team has no workflow.md or the file is a Plan 23 prose-only workflow (no `steps:`). The team id is
+ *  injected from the file location — one source of truth, like membership. */
+export function loadWorkflowDef(ws: string, teamId: string): WorkflowDef | null {
+  const file = paths.teamWorkflowFile(ws, teamId);
+  if (!existsSync(file)) return null;
+  return loadWorkflowDefText(readFileSync(file, "utf8"), teamId);
 }
 
 /** The lane a specific agent plays in this workflow — its own seat section, or undefined if it has none. */
