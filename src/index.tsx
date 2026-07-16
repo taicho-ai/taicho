@@ -25,6 +25,7 @@ import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
 import { reindexTasks, reconcileTasks } from "./store/task-state";
 import { reindexPlans, reconcilePlans } from "./store/plans";
+import { reconcileWorkflowRuns } from "./store/workflow-runs";
 import { createE2eModel } from "./core/e2e-model";
 import { parseCli, runHeadless, runTail, scheduleFireOptions } from "./core/headless";
 import { runScheduleCli } from "./core/schedule-cli";
@@ -94,6 +95,9 @@ const interruptedTasks = reconcileTasks(ws, db);
 // intent, not work in flight.
 reindexPlans(ws, db);
 const interruptedItems = reconcilePlans(ws, db);
+// Plan 25: a workflow step left `running` means the process died mid-step — append `interrupted`, never
+// rewriting the definition, exactly as reconcilePlans does for a plan item.
+const interruptedSteps = reconcileWorkflowRuns(ws);
 // Plan 19: a team whose `lead` is missing, or sits on a DIFFERENT team, would route work out of the
 // team it is supposed to run. Report it — one bad team.md must not block boot, and the fix is an edit.
 const teamProblems = validateTeams(ws, db);
@@ -111,6 +115,8 @@ if (interruptedItems.length)
   notices.push(`plans: ${interruptedItems.length} item(s) interrupted last session (${interruptedItems.slice(0, 3).map((i) => `${i.planId}/${i.item}`).join(", ")}${interruptedItems.length > 3 ? "…" : ""}) — /plan to review`);
 if (interruptedTasks.length)
   notices.push(`tasks: ${interruptedTasks.length} interrupted last session (${interruptedTasks.slice(0, 3).map((t) => t.taskId).join(", ")}${interruptedTasks.length > 3 ? "…" : ""}) — /tasks to review`);
+if (interruptedSteps.length)
+  notices.push(`workflows: ${interruptedSteps.length} step(s) interrupted last session (${interruptedSteps.slice(0, 3).map((s) => `${s.wfId}/${s.step}`).join(", ")}${interruptedSteps.length > 3 ? "…" : ""})`);
 if (backfilledWorkers.length)
   notices.push(`agents: granted the artifact-tool baseline to ${backfilledWorkers.length} worker(s) born toolless (${backfilledWorkers.slice(0, 3).join(", ")}${backfilledWorkers.length > 3 ? "…" : ""})`);
 const startupNotice = notices.length ? notices.join(" · ") : undefined;

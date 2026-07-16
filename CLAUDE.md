@@ -133,6 +133,27 @@ issues tsc won't).
     record the real conversation, and **compaction is orthogonal by construction** — `compactMessages`
     never sees the slot, so no future tuning of `keepHead`/`compactKeepRecent` can eat the plan. The
     system prompt carries only the STATIC `PLAN_OPERATING_NOTE` (stable tier, cacheable).
+  - `workflow.ts` + `workflow-run.ts` — Plan 25 **team workflows**: the deterministic, engine-executed
+    successor to Plan 23's prose `workflow.md`. `workflow.ts` is the PURE driver (`executeWorkflow`), a sixth
+    caller above `executeRun`: it holds the edge state (artifact-name → handle), walks a cursor over the
+    `steps:`, and dispatches per node kind (`agent`/`check`/`human`/`parallel`/`branch`). **The engine owns
+    every step's status** — no node writes its own `done`; the driver writes it from the child's real
+    outcome, the checker verdict, or the human's choice (the checkbox-cannot-lie discipline, made trivial
+    because a workflow step is never model-ticked). State flows step→step by artifact REFERENCE
+    (`produces`→`consumes`). The step-runner/checker/gate are INJECTED so the orchestration is unit-testable
+    without a model; `workflow-run.ts` (`wireWorkflowDeps`/`runTeamWorkflow`) is where they become real —
+    agent→`executeRun`, check→`runChecker`, human→the EXISTING `ask_human` approval (so gates work in the
+    REPL + headless today with no change to the `ApprovalRequest` union). `run.ts` exposes `ctx.runWorkflow`
+    (dynamic import, to break the run.ts↔workflow-run.ts cycle); the `run_workflow` tool (a ROOT grant) lets
+    the captain ask root to run a team's process. The definition is the `steps:` frontmatter of
+    `teams/<id>/workflow.md` (`store/workflows.ts` `loadWorkflowDef`; the frontmatter slot Plan 23 reserved);
+    per-RUN state is `store/workflow-runs.ts` — append-only `workflows/<id>/runs/<runId>/events.jsonl`,
+    current state = `fold(events)`, `reconcileWorkflowRuns` at boot (running→interrupted). `schemas/workflow.ts`
+    is the five-kind node union + YAML-sugar normalizer (rejects a step with more than one kind-key, or none,
+    by id). Optional by construction: no `steps:` → the team runs as before. **Landed: Ph1 (linear) + Ph2
+    (check/human gates) + the run trigger. NOT yet: parallel/branch EXECUTION (the driver throws for those
+    kinds), the `/workflows` UI, the `propose_workflow` authoring card, durable gate suspension for
+    unattended runs.** Design of record: `docs/superpowers/specs/2026-07-16-team-workflows-design.md`.
   - `prompt.ts`, `tools.ts`, `registry.ts` (the ACL grammar: an entry in `canSee`/`canDelegateTo` is
     `"*"`, an exact agent id, or Plan 19's `team:<id>` — additive, since no agent id contains a colon),
     `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
