@@ -221,3 +221,31 @@ test("a parallel step fails the workflow if any branch fails", async () => {
   expect(state.steps.find((s) => s.id === "fan")!.status).toBe("failed");
   expect(state.status).toBe("failed");
 });
+
+const withOver = parseWorkflowDef({
+  id: "wo", team: "t", version: 1,
+  steps: [
+    { id: "gather", run: "@lister", produces: "companies" },
+    { id: "analyze", over: "companies", as: { id: "one", run: "@analyst", produces: "analysis" }, join: "@synth", produces: "report" },
+    { id: "ship", run: "@shipper", consumes: ["report"] },
+  ],
+});
+
+test("a parallel 'over' step maps each item of a list, runs 'as' per item, then joins", async () => {
+  const w = mkws();
+  const { calls, runAgent } = recorder();
+  const listItems = async () => ["Acme", "Globex", "Initech"];
+  const state = await executeWorkflow({ ws: w, runAgent, listItems }, withOver);
+  expect(calls.filter((c) => /^analyze_\d+$/.test(c.id)).length).toBe(3); // one run per item
+  expect(calls.some((c) => c.id === "analyze__join")).toBe(true);
+  expect(calls.some((c) => c.id === "ship")).toBe(true);
+  expect(state.status).toBe("done");
+});
+
+test("a parallel 'over' passes each item into its per-item step brief", async () => {
+  const w = mkws();
+  const { calls, runAgent } = recorder();
+  const listItems = async () => ["Acme"];
+  await executeWorkflow({ ws: w, runAgent, listItems }, withOver);
+  expect(calls.find((c) => c.id === "analyze_0")!.brief).toContain("Acme");
+});

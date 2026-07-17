@@ -77,6 +77,17 @@ export function wireWorkflowDeps(deps: RunDeps, def: WorkflowDef): Omit<Workflow
       const text = child.text.toLowerCase();
       return labels.find((l) => text.includes(l.toLowerCase())) ?? labels[0] ?? "";
     },
+
+    listItems: async (handle) => {
+      const body = readArtifactBody(deps.ws, handle);
+      if (!body) return [];
+      const text = body.toString("utf8");
+      try {
+        const parsed = JSON.parse(text); // a JSON array is the tidy case
+        if (Array.isArray(parsed)) return parsed.map((x) => (typeof x === "string" ? x : JSON.stringify(x)));
+      } catch { /* not JSON — fall through to line-splitting */ }
+      return text.split("\n").map((l) => l.trim()).filter(Boolean); // else one item per non-empty line
+    },
   };
 }
 

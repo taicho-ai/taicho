@@ -40,6 +40,8 @@ export interface WorkflowExecDeps {
   requestGate?: (a: { node: HumanNode; packet: ReviewPacket; runId: string }) => Promise<GateDecision | null>;
   /** Classify the input into one of a branch's route labels. Required if the def has a branch. */
   classify?: (a: { node: BranchNode; target?: string }) => Promise<string>;
+  /** Read a list artifact into its items — required for a `parallel over:` (map) step. */
+  listItems?: (handle: string) => Promise<string[]>;
   signal?: AbortSignal;
 }
 
@@ -148,21 +150,45 @@ export async function executeWorkflow(
     }
 
     if (node.kind === "parallel") {
-      if (node.over) throw new Error(`workflow "${def.id}": parallel 'over' (map) is not yet supported (step "${node.id}")`);
-      const branches = node.branches ?? [];
-      const results = await Promise.all(branches.map((b) =>
-        deps.runAgent({ step: b, brief: composeBrief(def, b), inputs: inputsFor(b.consumes), runId, triggeredBy: `workflow:${def.id}:${node.id}:${b.id}` })));
-      branches.forEach((b, i) => { const r = results[i]; if (b.produces && r?.produced) { edge.set(b.produces, r.produced); lastProduced = r.produced; } });
+      // Build the fan-out: explicit `branches`, OR `over` a list artifact mapped through the `as` step.
+      let fan: { step: AgentStepInput; brief: string; inputs: string[]; tag: string }[];
+      if (node.over) {
+        if (!deps.listItems) throw new Error(`workflow "${def.id}": parallel 'over' needs a list reader (step "${node.id}")`);
+        if (!node.as) throw new Error(`workflow "${def.id}": parallel 'over' needs an 'as' step (step "${node.id}")`);
+        const src = edge.get(node.over);
+        const items = src ? await deps.listItems(src) : [];
+        const asStep = node.as;
+        fan = items.map((item, i) => ({
+          step: { ...asStep, id: `${node.id}_${i}` },
+          brief: `${composeBrief(def, asStep)}\n\nITEM ${i + 1}/${items.length}: ${item}`,
+          inputs: inputsFor(asStep.consumes),
+          tag: String(i),
+        }));
+      } else {
+        fan = (node.branches ?? []).map((b) => ({ step: b, brief: composeBrief(def, b), inputs: inputsFor(b.consumes), tag: b.id }));
+      }
+      const results = await Promise.all(fan.map((f) =>
+        deps.runAgent({ step: f.step, brief: f.brief, inputs: f.inputs, runId, triggeredBy: `workflow:${def.id}:${node.id}:${f.tag}` })));
+      const producedHandles: string[] = [];
+      fan.forEach((f, i) => {
+        const r = results[i]!;
+        if (r.produced) {
+          producedHandles.push(r.produced);
+          lastProduced = r.produced;
+          if (!node.over && f.step.produces) edge.set(f.step.produces, r.produced); // named branch outputs
+        }
+      });
       if (results.some((r) => r.outcome !== "completed")) {
-        emit({ step: node.id, status: "failed", runId, note: "a parallel branch failed" });
+        emit({ step: node.id, status: "failed", runId, note: "a parallel run failed" });
         ended = "failed"; cursor = null; continue;
       }
       if (node.join) {
-        const joinStep: AgentNode = {
-          kind: "agent", id: `${node.id}__join`, run: node.join,
-          consumes: branches.map((b) => b.produces).filter(present), produces: node.produces,
-        };
-        const jr = await deps.runAgent({ step: joinStep, brief: composeBrief(def, {}), inputs: inputsFor(joinStep.consumes), runId, triggeredBy: `workflow:${def.id}:${node.id}:join` });
+        // over → the join consumes the per-item handles directly; branches → their named produces.
+        const joinInputs = node.over
+          ? producedHandles
+          : (node.branches ?? []).map((b) => b.produces).filter(present).map((n) => edge.get(n)).filter(present);
+        const joinStep: AgentNode = { kind: "agent", id: `${node.id}__join`, run: node.join, consumes: [], produces: node.produces };
+        const jr = await deps.runAgent({ step: joinStep, brief: composeBrief(def, {}), inputs: joinInputs, runId, triggeredBy: `workflow:${def.id}:${node.id}:join` });
         if (node.produces && jr.produced) { edge.set(node.produces, jr.produced); lastProduced = jr.produced; }
         if (jr.outcome !== "completed") {
           emit({ step: node.id, status: "failed", runId, note: "the parallel join failed" });
