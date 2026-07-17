@@ -171,6 +171,20 @@ function proposalView(req: Exclude<ApprovalRequest, { kind: "ask_human" }>): { t
       { label: "cwd", value: req.cwd ?? "(workspace)" },
       { label: "flagged", value: req.reason ?? "the guard flagged this command" },
     ] };
+  if (req.kind === "propose_workflow") {
+    const summary = req.draft.steps.map((raw) => {
+      const s = raw as Record<string, unknown>;
+      const kind = s.run ? `@${String(s.run).replace(/^@/, "")}`
+        : s.check ? "check" : s.human ? `✋${String(s.human)}` : s.branch ? "branch"
+        : (s.over || s.branches) ? "parallel" : "?";
+      return `${String(s.id ?? "?")}(${kind})`;
+    }).join("  →  ");
+    return { title: `Propose workflow "${req.draft.name}" for ${req.draft.team} — approve?`, fields: [
+      { label: "team", value: req.draft.team },
+      { label: "brief", value: req.draft.brief ?? "(none)" },
+      { label: "steps", value: summary || "(none)" },
+    ] };
+  }
   if (req.kind === "create_team")
     return { title: "New team — approve?", fields: [
       { label: "id", value: req.draft.id },

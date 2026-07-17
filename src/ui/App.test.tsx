@@ -17,6 +17,7 @@ import { App } from "./App";
 import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "../store/roster";
+import { loadWorkflowDef } from "../store/workflows";
 import { listTraces, writeTrace } from "../store/trace";
 import { RunTrace } from "../schemas/trace";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
@@ -506,6 +507,29 @@ test("create_agent end-to-end: agent proposes, the card renders, captain approve
   expect(lastFrame()).toContain("scout");
   await send(stdin, "y");                             // captain approves
   await waitFor(lastFrame, "Created scout");         // approval flowed back; run resumed and replied
+});
+
+test("propose_workflow end-to-end: root proposes a workflow, the card renders, captain approves, the engine writes the file", async () => {
+  const proposeCall = {
+    content: [{ type: "tool-call", toolCallId: "c1", toolName: "propose_workflow", input: JSON.stringify({
+      team: "news", name: "daily-brief",
+      steps: [
+        { id: "research", run: "@researcher", produces: "sources" },
+        { id: "signoff", human: "editor sign-off", choices: ["approve", "revise"] },
+      ],
+    }) }],
+    finishReason: { unified: "tool-calls", raw: "tool_use" }, usage,
+  } as unknown as LanguageModelV3GenerateResult;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = new MockLanguageModelV3({ doGenerate: mockValues(proposeCall, finalText("Proposed the workflow")) as any });
+  const { props } = await setup({ model });
+  const { stdin, lastFrame } = render(<App {...props} />);
+  await send(stdin, "set up a daily brief workflow for news", ENTER);
+  await waitFor(lastFrame, "Propose workflow");        // the approval card rendered
+  expect(lastFrame()).toContain("daily-brief");
+  await send(stdin, "y");                              // captain approves
+  await waitFor(lastFrame, "Proposed the workflow");   // approval flowed back; run resumed
+  expect(loadWorkflowDef(props.ws, "news")).not.toBeNull(); // the engine wrote the workflow file
 });
 
 test("run_command end-to-end: agent runs a command, the guard blocks, the card renders, captain approves", async () => {

@@ -150,10 +150,13 @@ issues tsc won't).
     per-RUN state is `store/workflow-runs.ts` — append-only `workflows/<id>/runs/<runId>/events.jsonl`,
     current state = `fold(events)`, `reconcileWorkflowRuns` at boot (running→interrupted). `schemas/workflow.ts`
     is the five-kind node union + YAML-sugar normalizer (rejects a step with more than one kind-key, or none,
-    by id). Optional by construction: no `steps:` → the team runs as before. **Landed: Ph1 (linear) + Ph2
-    (check/human gates) + the run trigger. NOT yet: parallel/branch EXECUTION (the driver throws for those
-    kinds), the `/workflows` UI, the `propose_workflow` authoring card, durable gate suspension for
-    unattended runs.** Design of record: `docs/superpowers/specs/2026-07-16-team-workflows-design.md`.
+    by id). Optional by construction: no `steps:` → the team runs as before. **Landed: all five node kinds
+    (agent/check/human/parallel/branch) + `run_workflow` (root runs a team's workflow) + `propose_workflow`
+    (root drafts → captain approves via the create_team-style card → `writeWorkflowSteps` writes the
+    frontmatter, PRESERVING the Plan 23 prose lanes; the model never writes canon). NOT yet: the `/workflows`
+    UI (list/graph/live-run/history), durable gate suspension for unattended/scheduled runs, the parallel
+    `over:` map form (rejected with a clear error).** Design of record:
+    `docs/superpowers/specs/2026-07-16-team-workflows-design.md`.
   - `prompt.ts`, `tools.ts`, `registry.ts` (the ACL grammar: an entry in `canSee`/`canDelegateTo` is
     `"*"`, an exact agent id, or Plan 19's `team:<id>` — additive, since no agent id contains a colon),
     `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.

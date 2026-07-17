@@ -13,6 +13,7 @@ import type { McpManager } from "./mcp/manager";
 import type { VerificationVerdict } from "../schemas/trace";
 import { paths } from "../store/files";
 import { loadWorkflow, seatsOf, orchestrationSlice } from "../store/workflows";
+import { parseWorkflowDef } from "../schemas/workflow";
 import { readTaskState } from "../store/task-state";
 import { saveArtifact, readArtifact, readArtifactBody, listArtifacts } from "../store/artifacts";
 import { annotateArtifact, listAnnotations } from "../store/annotations";
@@ -303,6 +304,33 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
           status: state.status,
           steps: state.steps.map((s) => ({ id: s.id, status: s.status, produced: s.produced, choice: s.choice })),
         };
+      },
+    });
+
+  // Plan 25: PROPOSE a structured workflow for a team. The model drafts; the captain approves; the ENGINE
+  // writes the file (the model never writes workflow canon — Plan 23's rule, preserved). Existing prose
+  // lanes are kept. This is the twin of create_team.
+  if (has("propose_workflow"))
+    set.propose_workflow = tool({
+      description:
+        "Propose a structured workflow for a team — the ordered steps its work should follow. The captain APPROVES before it is saved; you never write the file yourself. Each step is exactly ONE kind: an agent step (run: <agent-id>, optional consumes/produces/brief), a check (check: <criteria>, optional on_fail), or a human gate (human: <title>, choices, routes). Existing prose lanes are preserved. Use this when the captain asks how a team should organise, or to set up a repeatable team process.",
+      inputSchema: z.object({
+        team: z.string().describe("the team id this workflow is for"),
+        name: z.string().describe("a short workflow name, e.g. daily-brief"),
+        brief: z.string().optional().describe("a workflow-wide instruction every step sees"),
+        steps: z.array(z.record(z.string(), z.any())).min(1).describe("the ordered steps; each carries exactly one of run/check/human/branch/over"),
+      }),
+      execute: async ({ team, name, brief, steps }) => {
+        try { parseWorkflowDef({ id: name, team, version: 1, brief, steps }); }
+        catch (e) { return { proposed: false, error: `invalid workflow: ${(e as Error).message}` }; }
+        const d = await ctx.requestApproval({ kind: "propose_workflow", draft: { team, name, brief, steps } });
+        if (d.type !== "approve" && d.type !== "edit") return { proposed: false, note: "the captain declined the workflow" };
+        if (!ctx.proposeWorkflow) return { proposed: false, error: "workflow authoring is not available in this run" };
+        const final = d.type === "edit"
+          ? { team: d.draft.team ?? team, name: d.draft.name ?? name, brief: d.draft.brief ?? brief, steps }
+          : { team, name, brief, steps };
+        ctx.proposeWorkflow(final);
+        return { proposed: true, saved: `teams/${final.team}/workflow.md`, steps: steps.length };
       },
     });
 

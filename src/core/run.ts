@@ -6,7 +6,7 @@ import type { AgentDef } from "../schemas/agent";
 import type { RunTrace, VerificationRecord, VerificationVerdict } from "../schemas/trace";
 import { assemble, type RosterTeam } from "./prompt";
 import { listTeams, loadTeam, membersOf, createTeamWithMembers } from "../store/teams";
-import { loadWorkflow, laneFor, orchestrationSlice } from "../store/workflows";
+import { loadWorkflow, laneFor, orchestrationSlice, writeWorkflowSteps } from "../store/workflows";
 import type { TeamDef } from "../schemas/team";
 import type { WorkflowRunState } from "../schemas/workflow";
 import { routeToTeam } from "./team-routing";
@@ -69,6 +69,7 @@ function approvalLabel(req: ApprovalRequest): string {
   switch (req.kind) {
     case "create_agent": return redact(`create_agent ${req.draft.id}`);
     case "create_team": return redact(`create_team ${req.draft.id}`);
+    case "propose_workflow": return redact(`propose_workflow ${req.draft.team}/${req.draft.name}`);
     case "run_command": return redact(`run_command ${req.command}`).slice(0, 60);
     case "add_mcp": return redact(`add_mcp ${req.name}`);
     case "propose_skill": return redact(`propose_skill ${req.draft.name}`);
@@ -81,10 +82,14 @@ function approvalLabel(req: ApprovalRequest): string {
  *  tools every member receives; the tool caps it at what the PROPOSER already holds, so a model can never
  *  escalate itself by inventing a team. `members` are agent ids to staff it with. */
 export interface NewTeamProposal { id: string; charter: string; lead?: string; members: string[]; grant: string[]; }
+/** Plan 25: a workflow root proposes for a team. `steps` are the raw sugar step objects (validated by the
+ *  tool). The engine writes it only after the captain approves — the model never writes workflow canon. */
+export interface WorkflowProposal { team: string; name: string; brief?: string; steps: unknown[]; }
 
 export type ApprovalRequest =
   | { kind: "create_agent"; draft: NewAgentDraft }
   | { kind: "create_team"; draft: NewTeamProposal }
+  | { kind: "propose_workflow"; draft: WorkflowProposal }
   | { kind: "propose_coaching"; draft: ProposalDraft }
   | { kind: "ask_human"; question: string; options: string[] }
   | { kind: "add_mcp"; name: string; spec: McpServerConfig }
@@ -121,6 +126,8 @@ export interface RunContext {
   requestApproval: (req: ApprovalRequest) => Promise<ApprovalDecision>;
   createAgent: (draft: NewAgentDraft) => Promise<AgentDef>;
   createTeam: (proposal: NewTeamProposal) => Promise<TeamDef>;
+  /** Plan 25: write an approved workflow proposal into teams/<team>/workflow.md (engine-only write). */
+  proposeWorkflow?: (p: WorkflowProposal) => void;
   canDelegate: (toId: string) => boolean;
   runChild: (brief: { to: string; goal: string; context?: string; criteria?: string; inputArtifacts?: string[]; callId?: string; viaTeam?: string }) => Promise<RunResult>;
   /** Plan 25: run a team's structured workflow deterministically — the engine walks the steps, stopping at
@@ -429,6 +436,7 @@ export async function executeRun(
     // Plan 22: on-the-fly team creation (root's approval-gated tool). One service call: writes the team
     // file and staffs it. The grant ceiling is enforced in the tool BEFORE the approval card is shown.
     createTeam: (p) => createTeamWithMembers(deps.ws, deps.db, { id: p.id, charter: p.charter, lead: p.lead, tools: { grant: p.grant } }, p.members),
+    proposeWorkflow: (p) => writeWorkflowSteps(deps.ws, p.team, { name: p.name, brief: p.brief, steps: p.steps }),
     canDelegate: (toId) => canDelegate(opts.agent, loadIndex(deps.db).find((r) => r.id === toId) ?? { id: toId }),
     runWorkflow: async (teamId, input) => {
       const { runTeamWorkflow } = await import("./workflow-run");

@@ -13,8 +13,9 @@
  *  identity + charter + task). Assigning someone to a team can therefore never break — a workflow only
  *  ADDS structure at the seats you have actually authored. */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { YAML } from "bun";
 import { paths } from "./files";
-import { loadWorkflowDefText, type WorkflowDef } from "../schemas/workflow";
+import { loadWorkflowDefText, parseWorkflowDef, type WorkflowDef } from "../schemas/workflow";
 
 /** The reserved seat name for the lead's orchestration slice. An agent literally named `orchestration`
  *  would collide with it — deliberately reserved, and documented, so the seat is unambiguous. */
@@ -61,6 +62,36 @@ export function loadWorkflowDef(ws: string, teamId: string): WorkflowDef | null 
   const file = paths.teamWorkflowFile(ws, teamId);
   if (!existsSync(file)) return null;
   return loadWorkflowDefText(readFileSync(file, "utf8"), teamId);
+}
+
+/** Plan 25: write the structured `steps:` frontmatter into a team's workflow.md. The ENGINE calls this
+ *  (via ctx.proposeWorkflow) only after the captain approves a root proposal — the model never writes
+ *  workflow canon directly (Plan 23's rule). Validates first (an invalid workflow is never written), and
+ *  PRESERVES any existing prose lanes (the markdown body below the frontmatter). Version defaults to the
+ *  next number after any existing structured version, or 1. */
+export function writeWorkflowSteps(
+  ws: string,
+  teamId: string,
+  input: { name: string; version?: number; brief?: string; steps: unknown[] },
+): void {
+  const version = input.version ?? ((loadWorkflowDef(ws, teamId)?.version ?? 0) + 1);
+  // Validate BEFORE writing — a bad workflow must never reach canon.
+  parseWorkflowDef({ id: input.name, team: teamId, version, brief: input.brief, steps: input.steps });
+
+  const file = paths.teamWorkflowFile(ws, teamId);
+  let body = "";
+  if (existsSync(file)) {
+    const text = readFileSync(file, "utf8");
+    const m = /^---\n[\s\S]*?\n---\n?([\s\S]*)$/.exec(text);
+    body = (m ? m[1]! : text).trim(); // keep the lanes (body after any frontmatter, or the whole prose file)
+  }
+  const fm: Record<string, unknown> = { workflow: input.name, version };
+  if (input.brief) fm.brief = input.brief;
+  fm.steps = input.steps;
+  const yaml = YAML.stringify(fm, null, 2).trimEnd();
+
+  mkdirSync(paths.teamDir(ws, teamId), { recursive: true });
+  writeFileSync(file, `---\n${yaml}\n---\n${body ? `\n${body}\n` : "\n"}`);
 }
 
 /** The lane a specific agent plays in this workflow — its own seat section, or undefined if it has none. */
