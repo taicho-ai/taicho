@@ -17,7 +17,7 @@ import { App } from "./App";
 import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "../store/roster";
-import { loadWorkflowDef } from "../store/workflows";
+import { loadWorkflowDef, writeWorkflowSteps } from "../store/workflows";
 import { listTraces, writeTrace } from "../store/trace";
 import { RunTrace } from "../schemas/trace";
 import { saveArtifact, listArtifacts, readArtifact } from "../store/artifacts";
@@ -1803,6 +1803,26 @@ test("/teams opens the Org browser; a team written to disk shows in it, with its
   await send(stdin, "/teams", ENTER);
   await waitFor(lastFrame, "news");
   expect(lastFrame()).toContain("lead editor");
+});
+
+test("/workflows opens a read-only browser listing a team's structured workflow; ⏎ opens its steps", async () => {
+  const { props } = await setup();
+  createTeam(props.ws, { id: "news", charter: "the news team" });
+  writeWorkflowSteps(props.ws, "news", {
+    name: "daily-brief",
+    steps: [{ id: "research", run: "@r" }, { id: "signoff", human: "sign-off", choices: ["approve"] }],
+  });
+  const { stdin, lastFrame } = render(<App {...props} />);
+
+  await send(stdin, "/workflows", ENTER);
+  await waitFor(lastFrame, "WORKFLOWS");            // the browser docked
+  expect(lastFrame()).toContain("news");            // the team's row
+  expect(lastFrame()).toContain("2 steps");         // structured summary (2 steps, 1 gate)
+
+  await send(stdin, ENTER);                          // ⏎ drills into the steps view
+  await waitFor(lastFrame, "WORKFLOW · news");
+  await send(stdin, ESC);                            // esc returns to the list
+  await waitFor(lastFrame, "WORKFLOWS");
 });
 
 test("/agents opens the Org browser on the agents scope, listing the squad with their teams", async () => {

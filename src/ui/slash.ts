@@ -16,6 +16,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "help", summary: "list commands" },
   { name: "agents", summary: "list the squad", usage: "[reindex]" },
   { name: "teams", summary: "list teams, their leads, and their members" },
+  { name: "workflows", summary: "browse team workflows and their run state" },
   { name: "costs", summary: "cross-session spend rollup (agent / day / model)", usage: "[agent]" },
   { name: "tasks", summary: "list / cancel background tasks", usage: "[cancel <id>]" },
   { name: "schedules", summary: "scheduled/triggered runs (cron / interval / watch)", usage: "list | add <goal> --every … | remove <id> | run <id>" },

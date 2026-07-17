@@ -12,6 +12,7 @@ import { AgentBlock, useBlockSettle, useBlockTicker, tailLines, type AgentBlockD
 import { OperationView } from "./OperationView";
 import { ArtifactBrowser, initialBrowserUi, type BrowserUiState } from "./ArtifactBrowser";
 import { OrgBrowser, initialOrgUi, type OrgUiState, type OrgActions } from "./OrgBrowser";
+import { WorkflowBrowser, initialWorkflowUi, type WorkflowUiState } from "./WorkflowBrowser";
 import type { OrgScope } from "./org-browser-model";
 import { latestRunFallback } from "./browser-model";
 import { parseInput } from "./input";
@@ -381,6 +382,13 @@ export function App(props: {
   const dockOrg = (scope: OrgScope) => {
     setOrg({ ui: initialOrgUi(scope), bump: 0 });
   };
+  // Plan 25: the /workflows browser — read-only inspection of team workflows + their run state. Same
+  // docking discipline as the Org browser (state here, keys ride workflowsKeyRef, a card suspends it).
+  const [workflows, setWorkflows] = useState<{ ui: WorkflowUiState; bump: number } | null>(null);
+  const workflowsKeyRef = useRef<CardKeyHandler | null>(null);
+  const dockWorkflows = () => {
+    setWorkflows({ ui: initialWorkflowUi(), bump: 0 });
+  };
   // Each mutation runs a service-layer call, refreshes the derived roster (StatusBar/prompt read it), and
   // reports ok/error back to the browser for its transient note line.
   const orgAction = async (fn: () => Promise<unknown>) => {
@@ -458,6 +466,8 @@ export function App(props: {
     if (browser) { browserKeyRef.current?.(input, key); return; }
     // Plan 22: the Org browser is next — same suspension rule as the artifact browser.
     if (org) { orgKeyRef.current?.(input, key); return; }
+    // Plan 25: the workflows browser is next in precedence (a card / artifact browser / org above wins).
+    if (workflows) { workflowsKeyRef.current?.(input, key); return; }
     // Plan 13: focus mode navigation. shift+tab enters, esc leaves, ↑↓ move, ⏎ opens operation view.
     // Plan 20: the ring and the Enter target read the SAME collection — allBlocks is what RENDERS
     // (root excluded, settling-first). The old Enter path indexed [...blockFeed.keys()] (insertion
@@ -949,6 +959,7 @@ export function App(props: {
     // Plan 22: /teams and bare /agents open the Org browser — the dedicated team/agent management mode.
     if (cmd === "teams") { dockOrg("teams"); return; }
     if (cmd === "agents" && !arg.trim()) { dockOrg("agents"); return; }
+    if (cmd === "workflows") { dockWorkflows(); return; }
     if (cmd === "view") {
       const mode = arg.trim().toLowerCase();
       if (!mode) { say({ kind: "system", text: `  live view: ${viewMode} (usage: /view ${VIEW_MODES.join("|")})` }); return; }
@@ -1260,12 +1271,12 @@ export function App(props: {
       })()}
       {/* Plan 10 Phase 4: split panes (one per live agent) sit above the spinner + bar. The mode
           (bar/panes/both) and terminal size decide what shows; too small ⇒ degrade to bar-only. */}
-      {!operationRunId && !browser && !org && layout.showPanes && (
+      {!operationRunId && !browser && !org && !workflows && layout.showPanes && (
         <SquadPanes statuses={squadStatuses} feed={paneFeed} columns={termSize.columns} rows={termSize.rows} />
       )}
       {/* Plan 13 (corrected): consistent agent blocks — the default squad view. Every agent (root and
           sub-agents) is rendered as a single block: header + fixed 2-line body. The block IS the record. */}
-      {!operationRunId && !browser && !org && allBlocks.length > 0 && (() => {
+      {!operationRunId && !browser && !org && !workflows && allBlocks.length > 0 && (() => {
         const blockWidth = Math.min(termSize.columns - 4, 96);
         return (
           <Box flexDirection="column">
@@ -1325,11 +1336,23 @@ export function App(props: {
           actions={orgActions}
         />
       )}
+      {/* Plan 25: the /workflows browser — read-only inspection, suspended by a card / artifact browser / org. */}
+      {!pending && !operationRunId && !browser && !org && workflows && (
+        <WorkflowBrowser
+          ws={props.ws}
+          width={termSize.columns}
+          bump={workflows.bump}
+          st={workflows.ui}
+          onChange={(next) => setWorkflows((w) => (w ? { ...w, ui: typeof next === "function" ? next(w.ui) : next } : w))}
+          keyRef={workflowsKeyRef}
+          onClose={() => { workflowsKeyRef.current = null; setWorkflows(null); }}
+        />
+      )}
       {!pending && busy && <RunStatus activity={activity} />}
       {/* Plan 10: the live status bar, pinned directly above the input (shows during approvals too). */}
-      {planPanelOn && plan && !operationRunId && !browser && !org && <PlanPanel plan={plan} width={termSize.columns} />}
+      {planPanelOn && plan && !operationRunId && !browser && !org && !workflows && <PlanPanel plan={plan} width={termSize.columns} />}
       {layout.showBar && squadStatuses.length > 0 && <StatusBar statuses={squadStatuses} width={termSize.columns} />}
-      {!pending && !operationRunId && !browser && !org && (
+      {!pending && !operationRunId && !browser && !org && !workflows && (
         <>
           <ChatInput
             value={input}
