@@ -8,7 +8,7 @@ import { ensureWorkspace, paths } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, createAgent, loadAgent } from "../store/roster";
 import { makeDeps, executeRun } from "./run";
-import { runTeamWorkflow } from "./workflow-run";
+import { runTeamWorkflow, resumeTeamWorkflow } from "./workflow-run";
 import { readArtifact } from "../store/artifacts";
 import { loadWorkflowDef } from "../store/workflows";
 import type { ApprovalRequest, ApprovalDecision } from "./run";
@@ -118,6 +118,47 @@ test("root proposes a workflow; on the captain's APPROVAL the engine writes it t
   expect(def).not.toBeNull();
   expect(def).toMatchObject({ id: "daily-brief", team: "news" });
   expect(def!.steps.map((s) => s.id)).toEqual(["research", "draft"]);
+});
+
+const GATE_WF = `---
+workflow: brief
+version: 1
+steps:
+  - id: research
+    run: "@researcher"
+    produces: sources
+  - id: signoff
+    human: "editor sign-off"
+    choices: [approve, revise]
+  - id: publish
+    run: "@editor"
+    consumes: [sources]
+    produces: article
+---
+`;
+
+test("an unattended workflow PARKS at a human gate, and resumeTeamWorkflow drives it to completion", async () => {
+  const { ws, db } = await boot();
+  await createAgent(ws, db, { id: "researcher", role: "r", identity: "You research." }, "root");
+  await createAgent(ws, db, { id: "editor", role: "e", identity: "You edit." }, "root");
+  mkdirSync(paths.teamDir(ws, "news"), { recursive: true });
+  writeFileSync(paths.teamWorkflowFile(ws, "news"), GATE_WF);
+  await reindex(ws, db);
+  const model = new MockLanguageModelV3({
+    doGenerate: mockValues(
+      call("write_artifact", { topicSlug: "sources", markdown: "# s" }), text("done"), // researcher (before the gate)
+      call("write_artifact", { topicSlug: "article", markdown: "# a" }), text("done"), // publish (after resume)
+    ) as any,
+  });
+  const deps = makeDeps({ ws, db, model });
+
+  const parked = await runTeamWorkflow(deps, "news", undefined, { unattended: true });
+  expect(parked!.status).toBe("parked");
+  expect(readArtifact(ws, "sources@v1")).not.toBeNull(); // research ran, then it parked at the gate
+
+  const done = await resumeTeamWorkflow(deps, "news", parked!.runId, "approve");
+  expect(done!.status).toBe("done");
+  expect(readArtifact(ws, "article@v1")).not.toBeNull(); // publish ran on resume, using the rebuilt sources handle
 });
 
 test("root proposes a workflow; on a DECLINE nothing is written (the model never writes canon)", async () => {

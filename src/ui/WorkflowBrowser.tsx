@@ -37,6 +37,7 @@ const runGlyph = (status: string): { g: string; color: string } =>
   status === "done" ? { g: "✓", color: "green" }
   : status === "failed" ? { g: "✗", color: "red" }
   : status === "interrupted" ? { g: "?", color: "yellow" }
+  : status === "parked" ? { g: "✋", color: "red" }
   : { g: "◐", color: "yellow" };
 
 /** A compact one-line label for a step in the graph view. */

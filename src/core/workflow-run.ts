@@ -9,7 +9,7 @@
  *  ApprovalRequest union. A rich workflow-gate card is a later (Phase 4) enhancement. */
 import { executeRun, type RunDeps } from "./run";
 import { runChecker } from "./verification";
-import { executeWorkflow, type WorkflowExecDeps, type WorkflowInput } from "./workflow";
+import { executeWorkflow, resumeWorkflow, type WorkflowExecDeps, type WorkflowInput } from "./workflow";
 import { loadWorkflowDef } from "../store/workflows";
 import { loadAgent } from "../store/roster";
 import { readArtifactBody } from "../store/artifacts";
@@ -91,13 +91,29 @@ export function wireWorkflowDeps(deps: RunDeps, def: WorkflowDef): Omit<Workflow
   };
 }
 
-/** Load a team's structured workflow and run it deterministically. Null if the team has no `steps:` workflow. */
+/** Load a team's structured workflow and run it deterministically. Null if the team has no `steps:` workflow.
+ *  `unattended` (a scheduled/headless run) PARKS at a human gate instead of blocking — see resumeTeamWorkflow. */
 export async function runTeamWorkflow(
   deps: RunDeps,
   teamId: string,
   input?: WorkflowInput,
+  opts?: { unattended?: boolean },
 ): Promise<WorkflowRunState | null> {
   const def = loadWorkflowDef(deps.ws, teamId);
   if (!def) return null;
-  return executeWorkflow({ ws: deps.ws, ...wireWorkflowDeps(deps, def) }, def, input);
+  return executeWorkflow({ ws: deps.ws, parkGates: opts?.unattended, ...wireWorkflowDeps(deps, def) }, def, input);
+}
+
+/** Ph6: answer a workflow run that PARKED at a human gate, and drive the rest. Null if the team has no
+ *  structured workflow. Subsequent gates are attended (the wired requestGate) — the captain is here now. */
+export async function resumeTeamWorkflow(
+  deps: RunDeps,
+  teamId: string,
+  runId: string,
+  choice: string,
+  note?: string,
+): Promise<WorkflowRunState | null> {
+  const def = loadWorkflowDef(deps.ws, teamId);
+  if (!def) return null;
+  return resumeWorkflow({ ws: deps.ws, ...wireWorkflowDeps(deps, def) }, def, runId, choice, note);
 }

@@ -150,13 +150,17 @@ issues tsc won't).
     per-RUN state is `store/workflow-runs.ts` — append-only `workflows/<id>/runs/<runId>/events.jsonl`,
     current state = `fold(events)`, `reconcileWorkflowRuns` at boot (running→interrupted). `schemas/workflow.ts`
     is the five-kind node union + YAML-sugar normalizer (rejects a step with more than one kind-key, or none,
-    by id). Optional by construction: no `steps:` → the team runs as before. **Landed: all five node kinds
-    (agent/check/human/parallel/branch) + `run_workflow` (root runs a team's workflow) + `propose_workflow`
-    (root drafts → captain approves via the create_team-style card → `writeWorkflowSteps` writes the
-    frontmatter, PRESERVING the Plan 23 prose lanes; the model never writes canon). NOT yet: the `/workflows`
-    UI (list/graph/live-run/history), durable gate suspension for unattended/scheduled runs, the parallel
-    `over:` map form (rejected with a clear error).** Design of record:
-    `docs/superpowers/specs/2026-07-16-team-workflows-design.md`.
+    by id). Optional by construction: no `steps:` → the team runs as before. **Complete:** all five node kinds
+    (`agent`/`check`/`human`/`parallel`[`branches`|`over`]/`branch`); the `/workflows` browser (`WorkflowBrowser.tsx`
+    + `workflow-browser-model.ts` — list · steps · past runs, docked like the Org browser); the `run_workflow`
+    / `propose_workflow` / `resume_workflow` root tools (`propose_workflow` drafts → captain approves via the
+    create_team-style card → `writeWorkflowSteps` writes the frontmatter PRESERVING the Plan 23 prose lanes;
+    the model never writes canon); and **durable gate suspension** — in `parkGates` mode a human gate persists
+    `parked.json` and stops with status `parked`, `resumeWorkflow` rebuilds the edge state FROM THE EVENTS
+    (`rebuildEdge`) and drives the rest, and a parked run is surfaced by the boot notice (`listParkedGates`) +
+    answered via `resume_workflow`. The one connective follow-on: a SCHEDULE that fires a workflow unattended
+    (a Plan 04 scheduler variant) — the engine + `runTeamWorkflow(…, { unattended: true })` are ready for it.
+    Design of record: `docs/superpowers/specs/2026-07-16-team-workflows-design.md`.
   - `prompt.ts`, `tools.ts`, `registry.ts` (the ACL grammar: an entry in `canSee`/`canDelegateTo` is
     `"*"`, an exact agent id, or Plan 19's `team:<id>` — additive, since no agent id contains a colon),
     `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.

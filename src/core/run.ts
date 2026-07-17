@@ -134,6 +134,8 @@ export interface RunContext {
    *  any human gate. Null when the team has no `steps:` workflow. Wired to runTeamWorkflow (dynamic import
    *  to avoid the run.ts ↔ workflow-run.ts cycle). */
   runWorkflow?: (teamId: string, input?: { artifacts?: { name: string; handle: string }[] }) => Promise<WorkflowRunState | null>;
+  /** Plan 25 Ph6: answer a workflow run parked at a human gate (choice + optional note) and drive the rest. */
+  resumeWorkflow?: (teamId: string, runId: string, choice: string, note?: string) => Promise<WorkflowRunState | null>;
   findAgents: (query: string, k: number) => AgentHit[];
   agentExists: (id: string) => boolean;
   notes: string[];
@@ -441,6 +443,10 @@ export async function executeRun(
     runWorkflow: async (teamId, input) => {
       const { runTeamWorkflow } = await import("./workflow-run");
       return runTeamWorkflow(deps, teamId, input);
+    },
+    resumeWorkflow: async (teamId, runId, choice, note) => {
+      const { resumeTeamWorkflow } = await import("./workflow-run");
+      return resumeTeamWorkflow(deps, teamId, runId, choice, note);
     },
     runChild: async ({ to, goal, context, criteria, inputArtifacts, callId, viaTeam }) => {
       const child = await loadAgent(deps.ws, to);

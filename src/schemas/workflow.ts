@@ -161,7 +161,7 @@ export interface FoldedStep {
   updated?: string;
 }
 
-export type WorkflowRunStatus = "running" | "done" | "failed" | "interrupted";
+export type WorkflowRunStatus = "running" | "done" | "failed" | "interrupted" | "parked";
 
 export interface WorkflowRunState {
   wfId: string;

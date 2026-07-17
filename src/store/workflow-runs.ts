@@ -6,7 +6,7 @@
  *  the Plan 18 plan discipline, minus the model-attempt/`rejected` split — the engine writes every event,
  *  so there is nothing to lie. reconcileWorkflowRuns is the boot half: a step left `running` means the
  *  process died in flight, so append `interrupted` (never rewrite history) and report it. */
-import { mkdirSync, appendFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { paths } from "./files";
 import { log } from "../core/logger";
@@ -74,7 +74,9 @@ function overallStatus(steps: FoldedStep[]): WorkflowRunStatus {
   return "done";
 }
 
-/** Current state = fold(events) over the definition's steps. */
+/** Current state = fold(events) over the definition's steps. A run with a parked human gate reads as
+ *  `parked` (not `running`) so the boot reconcile + the /workflows UI can distinguish "waiting on you"
+ *  from "executing". */
 export function foldWorkflowRun(ws: string, def: WorkflowDef, runId: string): WorkflowRunState {
   const latest = foldEvents(readWorkflowEvents(ws, def.id, runId));
   const steps: FoldedStep[] = def.steps.map((s) => {
@@ -86,7 +88,55 @@ export function foldWorkflowRun(ws: string, def: WorkflowDef, runId: string): Wo
   const done = steps.filter((s) => s.status === "done").length;
   const failed = steps.filter((s) => s.status === "failed" || s.status === "interrupted").length;
   const open = steps.filter((s) => !TERMINAL_STEP_STATUS.has(s.status)).length;
-  return { wfId: def.id, runId, steps, status: overallStatus(steps), counts: { total: steps.length, done, open, failed } };
+  let status = overallStatus(steps);
+  if (status === "running" && readParkedGate(ws, def.id, runId)) status = "parked";
+  return { wfId: def.id, runId, steps, status, counts: { total: steps.length, done, open, failed } };
+}
+
+// ── durable gate suspension (Plan 25 Ph6) ─────────────────────────────────────────────────────────
+// A workflow that reaches a human gate in an UNATTENDED run can't block on an in-memory Promise (the
+// process may exit). Instead it PARKS: this marker persists next to the run's events, the run stops, and
+// resumeWorkflow (core/workflow.ts) rebuilds the edge state from the events and continues once answered.
+
+export interface ParkedGate {
+  step: string;
+  title: string;
+  choices: string[];
+  note?: string;
+  at: string;
+}
+
+const parkedFile = (ws: string, wfId: string, runId: string) => join(paths.workflowRunDir(ws, wfId, runId), "parked.json");
+
+export function parkGate(ws: string, wfId: string, runId: string, gate: Omit<ParkedGate, "at">): ParkedGate {
+  const g: ParkedGate = { ...gate, at: new Date().toISOString() };
+  mkdirSync(paths.workflowRunDir(ws, wfId, runId), { recursive: true });
+  writeFileSync(parkedFile(ws, wfId, runId), JSON.stringify(g, null, 2));
+  return g;
+}
+
+export function readParkedGate(ws: string, wfId: string, runId: string): ParkedGate | null {
+  const f = parkedFile(ws, wfId, runId);
+  if (!existsSync(f)) return null;
+  try { return JSON.parse(readFileSync(f, "utf8")) as ParkedGate; }
+  catch (e) { log.warn(`unparseable parked gate in ${wfId}/${runId}`, e); return null; }
+}
+
+export function clearParkedGate(ws: string, wfId: string, runId: string): void {
+  const f = parkedFile(ws, wfId, runId);
+  if (existsSync(f)) rmSync(f);
+}
+
+/** Every workflow run currently parked at a human gate — for the boot notice + the /workflows UI. */
+export function listParkedGates(ws: string): { wfId: string; runId: string; gate: ParkedGate }[] {
+  const out: { wfId: string; runId: string; gate: ParkedGate }[] = [];
+  for (const wfId of subdirs(paths.workflowsDir(ws))) {
+    for (const runId of listWorkflowRunIds(ws, wfId)) {
+      const gate = readParkedGate(ws, wfId, runId);
+      if (gate) out.push({ wfId, runId, gate });
+    }
+  }
+  return out;
 }
 
 const subdirs = (dir: string): string[] =>

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   appendWorkflowEvent, readWorkflowEvents, foldWorkflowRun,
   reserveWorkflowRun, reconcileWorkflowRuns, listWorkflowRunIds,
+  parkGate, readParkedGate, clearParkedGate, listParkedGates,
 } from "./workflow-runs";
 import { parseWorkflowDef } from "../schemas/workflow";
 
@@ -70,4 +71,32 @@ test("reconcileWorkflowRuns leaves already-terminal steps alone", () => {
   const w = mkws(); const runId = reserveWorkflowRun(w, def.id);
   appendWorkflowEvent(w, def.id, runId, { step: "research", status: "done", runId });
   expect(reconcileWorkflowRuns(w)).toHaveLength(0);
+});
+
+test("parkGate persists a gate; readParkedGate returns it; clearParkedGate removes it", () => {
+  const w = mkws(); const runId = reserveWorkflowRun(w, def.id);
+  parkGate(w, def.id, runId, { step: "signoff", title: "editor sign-off", choices: ["approve", "revise"] });
+  const g = readParkedGate(w, def.id, runId);
+  expect(g).toMatchObject({ step: "signoff", title: "editor sign-off", choices: ["approve", "revise"] });
+  expect(typeof g!.at).toBe("string");
+  clearParkedGate(w, def.id, runId);
+  expect(readParkedGate(w, def.id, runId)).toBeNull();
+});
+
+test("listParkedGates finds every parked run across workflows", () => {
+  const w = mkws();
+  const r1 = reserveWorkflowRun(w, def.id);
+  parkGate(w, def.id, r1, { step: "signoff", title: "sign-off", choices: ["approve"] });
+  const parked = listParkedGates(w);
+  expect(parked).toContainEqual(expect.objectContaining({ wfId: def.id, runId: r1 }));
+});
+
+test("a parked run folds to status 'parked' (until the gate is cleared)", () => {
+  const w = mkws(); const runId = reserveWorkflowRun(w, def.id);
+  appendWorkflowEvent(w, def.id, runId, { step: "research", status: "done", runId });
+  appendWorkflowEvent(w, def.id, runId, { step: "draft", status: "running", runId }); // at the gate/in-flight
+  parkGate(w, def.id, runId, { step: "draft", title: "review", choices: ["approve"] });
+  expect(foldWorkflowRun(w, def, runId).status).toBe("parked");
+  clearParkedGate(w, def.id, runId);
+  expect(foldWorkflowRun(w, def, runId).status).toBe("running"); // no longer parked
 });

@@ -2,8 +2,9 @@ import { test, expect } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeWorkflow, type WorkflowExecDeps } from "./workflow";
+import { executeWorkflow, resumeWorkflow, type WorkflowExecDeps } from "./workflow";
 import { parseWorkflowDef } from "../schemas/workflow";
+import { readParkedGate, foldWorkflowRun } from "../store/workflow-runs";
 
 const mkws = () => mkdtempSync(join(tmpdir(), "taicho-wfx-"));
 
@@ -248,4 +249,39 @@ test("a parallel 'over' passes each item into its per-item step brief", async ()
   const listItems = async () => ["Acme"];
   await executeWorkflow({ ws: w, runAgent, listItems }, withOver);
   expect(calls.find((c) => c.id === "analyze_0")!.brief).toContain("Acme");
+});
+
+// ── Phase 6: durable gate suspension (park + resume) ─────────────────────────
+test("in parkGates mode a workflow PARKS at a human gate instead of blocking, and stops", async () => {
+  const w = mkws();
+  const { calls, runAgent } = recorder();
+  const state = await executeWorkflow({ ws: w, runAgent, parkGates: true }, withGate);
+  expect(calls.map((c) => c.id)).toEqual(["draft"]); // ran up to the gate, then parked
+  expect(state.status).toBe("parked");
+  const parked = readParkedGate(w, "wg", state.runId); // survives on disk (a restart would find it)
+  expect(parked).toMatchObject({ step: "signoff", choices: ["approve", "revise"] });
+});
+
+test("resumeWorkflow rebuilds edge state from events and drives the rest — approve → publish", async () => {
+  const w = mkws();
+  const first = recorder();
+  const parked = await executeWorkflow({ ws: w, runAgent: first.runAgent, parkGates: true }, withGate);
+  expect(parked.status).toBe("parked");
+
+  // a fresh recorder simulates resuming in a NEW process (no in-memory edge state carried over)
+  const second = recorder();
+  const done = await resumeWorkflow({ ws: w, runAgent: second.runAgent }, withGate, parked.runId, "approve");
+  expect(second.calls.map((c) => c.id)).toEqual(["publish"]); // only the post-gate step re-ran
+  expect(done.status).toBe("done");
+  expect(second.calls[0]!.inputs).toEqual(["draft@v1"]); // edge rebuilt from events: publish got the draft handle
+  expect(readParkedGate(w, "wg", parked.runId)).toBeNull(); // the park was cleared
+});
+
+test("resumeWorkflow 'revise' routes back to the earlier step, which re-parks at the gate", async () => {
+  const w = mkws();
+  const parked = await executeWorkflow({ ws: w, runAgent: recorder().runAgent, parkGates: true }, withGate);
+  const second = recorder();
+  const again = await resumeWorkflow({ ws: w, runAgent: second.runAgent, parkGates: true }, withGate, parked.runId, "revise");
+  expect(second.calls.some((c) => c.id === "draft")).toBe(true); // looped back to draft
+  expect(again.status).toBe("parked"); // and re-parked at the gate for another decision
 });

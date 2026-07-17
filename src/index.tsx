@@ -25,7 +25,7 @@ import { seedSkills } from "./store/seed-skills";
 import { reindexSkills } from "./store/skills";
 import { reindexTasks, reconcileTasks } from "./store/task-state";
 import { reindexPlans, reconcilePlans } from "./store/plans";
-import { reconcileWorkflowRuns } from "./store/workflow-runs";
+import { reconcileWorkflowRuns, listParkedGates } from "./store/workflow-runs";
 import { createE2eModel } from "./core/e2e-model";
 import { parseCli, runHeadless, runTail, scheduleFireOptions } from "./core/headless";
 import { runScheduleCli } from "./core/schedule-cli";
@@ -117,6 +117,10 @@ if (interruptedTasks.length)
   notices.push(`tasks: ${interruptedTasks.length} interrupted last session (${interruptedTasks.slice(0, 3).map((t) => t.taskId).join(", ")}${interruptedTasks.length > 3 ? "…" : ""}) — /tasks to review`);
 if (interruptedSteps.length)
   notices.push(`workflows: ${interruptedSteps.length} step(s) interrupted last session (${interruptedSteps.slice(0, 3).map((s) => `${s.wfId}/${s.step}`).join(", ")}${interruptedSteps.length > 3 ? "…" : ""})`);
+// Plan 25 Ph6: a scheduled/unattended workflow may be parked at a human gate, waiting on the captain.
+const parkedGates = listParkedGates(ws);
+if (parkedGates.length)
+  notices.push(`workflows: ${parkedGates.length} run(s) waiting at a human gate (${parkedGates.slice(0, 3).map((p) => `${p.wfId}/${p.gate.step}`).join(", ")}${parkedGates.length > 3 ? "…" : ""}) — ask root to resume`);
 if (backfilledWorkers.length)
   notices.push(`agents: granted the artifact-tool baseline to ${backfilledWorkers.length} worker(s) born toolless (${backfilledWorkers.slice(0, 3).join(", ")}${backfilledWorkers.length > 3 ? "…" : ""})`);
 const startupNotice = notices.length ? notices.join(" · ") : undefined;

@@ -334,6 +334,25 @@ export function toolsForAgent(agent: AgentDef, ctx: RunContext, mcp?: McpManager
       },
     });
 
+  // Plan 25 Ph6: answer a workflow run that PARKED at a human gate (an unattended run waiting on the captain).
+  if (has("resume_workflow"))
+    set.resume_workflow = tool({
+      description:
+        "Answer a workflow run that PARKED at a human gate — a scheduled/unattended run waiting on the captain. Give the team, the parked run id, and the chosen option; the engine drives the workflow on from the gate. Use when the captain tells you how to answer a waiting workflow (see the boot notice or /workflows).",
+      inputSchema: z.object({
+        team: z.string().describe("the team whose workflow parked"),
+        runId: z.string().describe("the parked run id, e.g. wr_brief_1"),
+        choice: z.string().describe("the gate option to take, e.g. approve or revise"),
+        note: z.string().optional().describe("an optional note that rides back into the workflow"),
+      }),
+      execute: async ({ team, runId, choice, note }) => {
+        if (!ctx.resumeWorkflow) return { error: "workflows are not available in this run" };
+        const state = await ctx.resumeWorkflow(team, runId, choice, note);
+        if (!state) return { team, resumed: false, note: `team "${team}" has no structured workflow` };
+        return { team, runId, resumed: true, status: state.status, steps: state.steps.map((s) => ({ id: s.id, status: s.status })) };
+      },
+    });
+
   // ---- Plan 18: the agent's live plan -------------------------------------------------------------
   // NOT in DEFAULT_WORKER_TOOLS. A plan is not needed to produce an artifact, so it stays an opt-in
   // grant under Plan 08 least privilege. Root holds all three; a worker or team lead asks for them.
