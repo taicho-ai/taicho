@@ -3,7 +3,7 @@
  *  Proves the Squad UI split-pane view (Plan 10 Phase 4): during a delegation taicho renders a live
  *  PANE + status-bar segment for EACH live agent at once. The blocker Phase 4 hit was timing — the
  *  `agent-flow` delegation returns sub-second, so a child's pane "flashes faster than a recorded
- *  frame." This scenario uses the SLOW-MODE `squad-panes` e2e model (src/core/e2e-model.ts), which
+ *  frame." This scenario uses the SLOW-MODE `squad-panes` e2e model (packages/framework/src/core/e2e-model.ts), which
  *  holds the child's model call in-flight ~4s. During that window the DELEGATED CHILD renders its
  *  live pane + bar segment: proof-agent is `thinking` (its held model call is running) → the string
  *  "proof-agent thinking" appears ONLY on the live surfaces (bar + panes), never in the scrollback

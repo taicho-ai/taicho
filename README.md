@@ -193,10 +193,28 @@ collectors — plus the content-capture privacy flag — are in **[`docs/observa
 
 Requires [Bun](https://bun.sh).
 
+The repository is a workspace of independently buildable packages:
+
+| Package | Purpose |
+| --- | --- |
+| `@taicho/contracts` | Shared schemas and domain types |
+| `@taicho/telemetry` | Standard OpenTelemetry/OTLP integration |
+| `@taicho/agent` | Reusable single-agent execution kernel |
+| `@taicho/graph` | Deterministic workflow graph and file journal |
+| `@taicho/framework` | Multi-agent runtime, persistence, teams, knowledge, and scheduling |
+| `@taicho/cli` | Taicho process entry point and Ink interface |
+
+Each package has its own manifest, tests, and build. See
+[`docs/architecture/package-split.md`](docs/architecture/package-split.md) for dependency rules and
+the path to separate repositories or future publication.
+
 ```
 bun install
 bun run dev               # REPL with hot reload (restarts on file change)
 bun run start             # REPL, no watch
+bun run check:boundaries  # enforce one-way package dependencies
+bun run build:packages    # independently bundle every package
+bun run test              # full package suite
 bun run build             # compile single binary → dist/taicho
 ```
 

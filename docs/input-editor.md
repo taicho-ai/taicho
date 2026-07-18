@@ -1,6 +1,6 @@
 # The message editor (Plan 24)
 
-The REPL's input is a bordered `ChatInput` (`src/ui/ChatInput.tsx`) over three pure, unit-tested modules —
+The REPL's input is a bordered `ChatInput` (`packages/cli/src/ui/ChatInput.tsx`) over three pure, unit-tested modules —
 `text-buffer.ts` (cursor + word boundaries), `input-history.ts` (↑/↓ nav + per-workspace persistence),
 and `input-keys.ts` (the cross-platform key classifier). It replaced `@inkjs/ui`'s uncontrolled TextInput.
 

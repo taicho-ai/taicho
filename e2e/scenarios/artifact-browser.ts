@@ -5,7 +5,7 @@
  *  full-screen reader with the markdown body, and esc chains reader → shelf → chat. The artifact body
  *  is NOT in root's transcript — the browser is the read surface.
  *
- *  This scenario uses the SLOW-MODE `artifact-viewer` e2e model (src/core/e2e-model.ts), which holds
+ *  This scenario uses the SLOW-MODE `artifact-viewer` e2e model (packages/framework/src/core/e2e-model.ts), which holds
  *  the child's model call in-flight ~4s (the save_artifact tool call). During that window the
  *  completion bar is visible long enough for VHS to freeze-frame it.
  *

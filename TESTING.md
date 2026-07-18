@@ -11,7 +11,7 @@ taicho is tested in **four layers**, fastest/most-isolated first. Most work only
 
 ```bash
 bun test                       # Layer 1 — the whole src suite
-bun test src/ui/App.test.tsx   # a single file
+bun test packages/cli/src/ui/App.test.tsx   # a single file
 bun run typecheck              # bunx tsc --noEmit
 bun run build                  # compile dist/taicho
 bun run test:e2e               # Layer 2 — builds, then runs tui-test
@@ -36,7 +36,7 @@ Tests are colocated `*.test.ts` next to the code. Two flavors:
 
 **The agent loop, with a mocked model** — since Plan 07 the loop unifies on `streamText`, so the AI
 SDK drives EVERY model via `doStream` (a raw `doGenerate`-only `ai/test` mock cannot drive `runLoop`).
-Use the local wrapper `src/core/mock-model.ts`, which auto-derives a streaming `doStream` from a
+Use the local wrapper `packages/framework/src/core/mock-model.ts`, which auto-derives a streaming `doStream` from a
 `doGenerate` script while keeping `.doGenerateCalls` assertions working:
 ```ts
 import { MockLanguageModelV3, mockValues } from "../core/mock-model"; // NOT "ai/test"
@@ -55,7 +55,7 @@ Tests that need chunk-level control (deltas, provider cost metadata, the Codex p
 
 **Scheduled/triggered runs (Plan 04 Phase 6) — INJECT the clock, never the wall.** The `SchedulerRunner` (`core/scheduler.ts`) takes its clock (`now`), its file-stat (`statMtimeMs`), and its fire action as **injected seams**, so tests drive time with explicit values — never `Date.now()`, never a real timer. A test sets `let clock = 0; now: () => clock`, calls `runner.tick()` at chosen clock values, and asserts a schedule fires **at** its due time (not before), doesn't double-fire one window (its `nextDueMs` advances), and never re-fires while its previous run is in flight (hold the fire promise unresolved). Watch triggers inject `statMtimeMs` (fire on an mtime change). Because `fire` is deferred a microtask, drain the loop with `await new Promise(r => setTimeout(r, 0))` before asserting — the same pattern `tasks.test.ts` uses; that `setTimeout(0)` flushes the event loop, it is NOT the scheduler's clock. The end-to-end "unattended → auto-reject" invariant is proven by wiring `fire` to the real `runHeadless({approve:"reject"})` on a model that requests `create_agent` and asserting no agent was created (`core/scheduler.test.ts`). The store (`store/schedules.test.ts`), the shared `parseScheduleCommand` + `runScheduleCli` (`core/schedule-cli.test.ts`), and a Layer-1 `/schedules` round-trip (`App.test.tsx`) cover the rest.
 
-**The real REPL, in-process** — `src/ui/App.test.tsx` renders the actual `<App>` with `ink-testing-library`, a mocked model, and a **fake `McpManager`**, then scripts keystrokes and asserts on rendered frames. This exercises the real `submit → runSlash → executeRun → runLoop` wiring without a terminal or LLM. The `setup()` helper builds a throwaway workspace (`ensureWorkspace`/`seedRoot`/`openDb`/`reindex`) and fake props — dependency injection (`model`, `mcp`, `authSource` are all `<App>` props) is what makes this possible.
+**The real REPL, in-process** — `packages/cli/src/ui/App.test.tsx` renders the actual `<App>` with `ink-testing-library`, a mocked model, and a **fake `McpManager`**, then scripts keystrokes and asserts on rendered frames. This exercises the real `submit → runSlash → executeRun → runLoop` wiring without a terminal or LLM. The `setup()` helper builds a throwaway workspace (`ensureWorkspace`/`seedRoot`/`openDb`/`reindex`) and fake props — dependency injection (`model`, `mcp`, `authSource` are all `<App>` props) is what makes this possible.
 
 ### ⚠️ ink-testing-library gotchas (the non-obvious part)
 
@@ -99,7 +99,7 @@ test("…", async ({ terminal }) => {
 
 ## Layer 3 — real-model verification scripts
 
-When you need to prove the system *actually works* with the live model (delegation, collaboration, memory), write a plain `bun` script that wires the engine exactly like `src/index.tsx` and inspects the resulting **traces**. Pattern:
+When you need to prove the system *actually works* with the live model (delegation, collaboration, memory), write a plain `bun` script that wires the engine exactly like `packages/cli/src/index.tsx` and inspects the resulting **traces**. Pattern:
 
 ```ts
 const authSource = resolveAuth({ config, loadProfile: () => readProfile() });
@@ -130,7 +130,7 @@ text) + file assertions (decide pass/fail). The wrapper (`scripts/e2e-evidence.t
 the binary, records in a **fresh temp workspace** (never the repo root), and writes
 `evidence/<scenario>/manifest.json` — the deliverable. **Video is evidence, not assertion**:
 pass/fail comes only from the workspace-file assertions. Deterministic via
-`TAICHO_E2E_MODEL=<mode>` (`src/core/e2e-model.ts`), same keystone as Layer 2.
+`TAICHO_E2E_MODEL=<mode>` (`packages/framework/src/core/e2e-model.ts`), same keystone as Layer 2.
 
 The **`artifact-handoff`** scenario (Plan 01) proves the hand-off store end-to-end: root creates a
 researcher (A) and a writer (B), A `save_artifact`s a dossier, root delegates it to B **by handle**
@@ -154,7 +154,7 @@ tests, the `/trace` + `/runs` commands, and the `/view waterfall` mode (`/view` 
 `bar|panes|both`). Trace visualization is OpenTelemetry's job — see `docs/observability.md` and
 **Layer 4b** below for how the OTel export is tested (`core/otel.test.ts` for span shape,
 `scripts/otel-verify.ts` for the wire). The one survivor of the retirement is
-`gatherConversationArtifacts`, which moved to `src/core/conversation-artifacts.ts` for the Plan 15
+`gatherConversationArtifacts`, which moved to `packages/framework/src/core/conversation-artifacts.ts` for the Plan 15
 artifact browser.
 
 ## Squad UI: the live status bar + split panes (Plan 10)
@@ -191,7 +191,7 @@ complete summary.
   recorded proof that two agents render **live in split panes + the bar during a delegation**. The
   blocker was timing: the `agent-flow` delegation returns sub-second, so a child's pane "flashes
   faster than a recorded frame." The scenario therefore uses a **slow-mode e2e model**
-  (`src/core/e2e-model.ts` `squad-panes` mode) that **holds the child's model call in-flight ~4s**
+  (`packages/framework/src/core/e2e-model.ts` `squad-panes` mode) that **holds the child's model call in-flight ~4s**
   (fixed delay, overridable via `TAICHO_E2E_SLOW_MS`; well under the 120s transport deadline and the
   reopened chunk-idle timer — see CLAUDE.md's Plan 12 gotcha). The
   hold is in the **model, never the tape** — during the window root is `delegating` (its delegate_task

@@ -9,7 +9,7 @@ Two independent streams:
 1. **Per-run event stream** (`runs/<agent>/<recordId>/…`) — *what an agent did*. Machine-readable,
    append-only, one directory per run. This is the observable surface for evidence + tailing.
 2. **`taicho.log`** — *leveled process diagnostics* (a run failed, a policy file was skipped, a
-   codex 4xx). One file in the workspace root, written by `src/core/logger.ts`. It does **not**
+   codex 4xx). One file in the workspace root, written by `packages/framework/src/core/logger.ts`. It does **not**
    fight the Ink TUI (which corrupts/swallows stray `console.*`), and it **never** contains auth
    material — every line is passed through `redact()` (Bearer tokens + `sk-…` keys + token fields).
 
@@ -78,7 +78,7 @@ Every line shares one envelope (`RunTranscriptEvent`):
 | `verification`   | `run.ts` after a delegation checker | a `VerificationRecord` (§3): `{ criteria, verdict:{pass,reasons}, runId, retried, tokens, costUsd, costNote }` |
 
 `data` is intentionally **payload-agnostic** — treat unknown `kind`s and extra fields as forward-
-compatible. `src/core/events.ts` (`readTranscript`, `formatEvent`) is the reference reader; a
+compatible. `packages/framework/src/core/events.ts` (`readTranscript`, `formatEvent`) is the reference reader; a
 partially-flushed trailing line is skipped rather than fatal.
 
 ### 2c. `child-runs.json`
@@ -92,7 +92,7 @@ partially-flushed trailing line is skipped rather than fatal.
 
 ## 3. `RunTrace` (the run summary JSON)
 
-Authoritative schema: `src/schemas/trace.ts`. Fields:
+Authoritative schema: `packages/contracts/src/trace.ts`. Fields:
 
 ```ts
 {
@@ -159,4 +159,4 @@ taicho tail --follow         # keep printing as new events land (see §1a on flu
 
 `taicho run` exits `0` on a `completed` outcome, non-zero otherwise. Approvals default to
 **auto-reject** (unattended-safe); `--approve auto` approves everything, `--approve prompt` asks on
-stdin. See `src/core/headless.ts`.
+stdin. See `packages/framework/src/core/headless.ts`.

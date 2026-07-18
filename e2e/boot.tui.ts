@@ -1,5 +1,5 @@
 /** Black-box E2E against the REAL compiled binary (dist/taicho), driven in a real xterm pty by
- *  @microsoft/tui-test. Complements the in-process ink-testing-library suite (src/ui/App.test.tsx):
+ *  @microsoft/tui-test. Complements the in-process ink-testing-library suite (packages/cli/src/ui/App.test.tsx):
  *  this proves the actual binary boots, renders under a raw-mode TTY, and responds to keystrokes —
  *  the layer ink-testing-library can't reach. */
 import { test, expect } from "@microsoft/tui-test";

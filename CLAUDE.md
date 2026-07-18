@@ -7,7 +7,8 @@ corrections stick as policy.
 
 ## Commands
 
-Requires [Bun](https://bun.sh). There is no `test` npm script — run `bun test` directly.
+Requires [Bun](https://bun.sh). The workspace test script deliberately scopes discovery to
+`packages/`, so a separately checked-out Git worktree nested under the repository is not run twice.
 
 ```
 bun install
@@ -15,8 +16,8 @@ bun run dev            # Ink REPL with hot reload (TAICHO_DEBUG=1 by default)
 bun run start          # Ink REPL, no watch
 bun run build          # compile single minified binary → dist/taicho
 bun run typecheck      # bunx tsc --noEmit
-bun test               # full suite (bun:test); colocated *.test.ts files
-bun test src/core/loop.test.ts   # a single file
+bun run test           # full package suite (bun:test); colocated *.test.ts files
+bun test packages/agent/src/loop.test.ts   # a single file
 ```
 
 Always run `bun run typecheck` **and** `bun test` before claiming a change is done; for changes
@@ -25,10 +26,24 @@ issues tsc won't).
 
 ## Architecture
 
-- **`src/index.tsx`** — entry. Loads config, opens the SQLite DB, resolves auth, builds the
+This is a six-package workspace. The enforced dependency direction is contracts/telemetry → agent
+and graph → framework → CLI. See `docs/architecture/package-split.md` and run
+`bun run check:boundaries` after changing imports.
+
+- **`packages/contracts/`** — shared runtime schemas and domain types; no I/O or SDK ownership.
+- **`packages/telemetry/`** — standard OpenTelemetry SDK/OTLP setup and GenAI signal helpers. It is
+  replaceable and off by default, but preserves active context across graph and delegated-agent runs.
+- **`packages/agent/`** — one-agent execution kernel: model loop, prompts, compaction, plan slot,
+  request timeout, step events, and the persistence-neutral spend-meter port.
+- **`packages/graph/`** — workflow schema, deterministic executor, and optional filesystem journal.
+- **`packages/framework/`** — multi-agent composition, delegation, storage adapters, teams,
+  knowledge, coaching, providers, MCP, and scheduling.
+- **`packages/cli/`** — process lifecycle and Ink UI; it consumes package APIs and owns shutdown.
+
+- **`packages/cli/src/index.tsx`** — entry. Loads config, opens the SQLite DB, resolves auth, builds the
   model/resolver/pricer (`buildFromAuth`), renders the Ink `App`. Boot failures (e.g. a
   misconfigured provider) print a `taicho: …` line and `process.exit(1)`.
-- **`src/ui/`** — `App.tsx` is the REPL (chat, `@agent` direct messages, `/slash` commands,
+- **`packages/cli/src/ui/`** — `App.tsx` is the REPL (chat, `@agent` direct messages, `/slash` commands,
   Esc-to-cancel/steer, approval cards). `slash.ts`, `input.ts`, `ProposalCard.tsx`. `StatusBar.tsx` +
   `SquadPanes.tsx` (Plan 10) are the **live squad view**: the bar is a one-line summary of every live
   agent; the panes are one-per-agent detail (status line + recent tool lines with `argsPreview`).
@@ -61,7 +76,7 @@ issues tsc won't).
   state survives in App's `browserState`. While docked, panes/blocks/plan panel yield; the status bar
   stays. `gatherConversationArtifacts` in `core/conversation-artifacts.ts` remains the run-scope
   walker (subtree, de-dup latest-per-id, created desc).
-- **`src/core/`** — the engine:
+- **`packages/framework/src/core/`** — multi-agent framework and integration adapters:
   - `loop.ts` — the single metered agent loop. Model proposes, config disposes: budgets/caps and
     cancellation are enforced here; it is the one place spend (tokens + advisory USD) is counted.
   - `run.ts` — orchestrates ONE run: assemble prompt → build tools → `runLoop` → write trace.
@@ -164,7 +179,7 @@ issues tsc won't).
   - `prompt.ts`, `tools.ts`, `registry.ts` (the ACL grammar: an entry in `canSee`/`canDelegateTo` is
     `"*"`, an exact agent id, or Plan 19's `team:<id>` — additive, since no agent id contains a colon),
     `discovery.ts`, `pricing.ts`, `memory.ts`, `draft.ts`.
-- **`src/store/`** — persistence: `config.ts` (provider/model/auth resolution + `taicho.yaml`),
+- **`packages/framework/src/store/`** — persistence: `config.ts` (provider/model/auth resolution + `taicho.yaml`),
   `db.ts` (SQLite), `roster.ts` (agent.md canon + registry index; `createAgent` **baseline-merges**
   `DEFAULT_WORKER_TOOLS` — the artifact grant — under any model-proposed `tools`, so an explicit
   `tools: []` can never again mint a toolless worker (Plan 14); `reconcileWorkerTools` backfills that
@@ -202,8 +217,8 @@ issues tsc won't).
   `annotations.ts` (Plan 01 Ph4 **feedback & revision**: append-only `artifacts/<id>/annotations.jsonl` —
   feedback pinned to a version; an OPEN annotation rides an input artifact into a revision run; a Plan 06
   verification verdict is an annotation like any other).
-- **`src/coaching/`** — corrections → durable, conditional, approval-gated policy notes.
-- **`src/schemas/`** — zod schemas (`agent`, `brief`, `policy`, `trace`, `artifact`, `annotation`,
+- **`packages/framework/src/coaching/`** — corrections → durable, conditional, approval-gated policy notes.
+- **`packages/contracts/src/`** — zod schemas (`agent`, `brief`, `policy`, `trace`, `artifact`, `annotation`,
   `team`). `knowledge.ts`'s `KbScope` PREPROCESSES the legacy `"deck"` value to `"squad"` so a
   pre-Plan-19 `kb/nodes/*.md` still parses; `reconcileKbScope` rewrites those files at boot (files are
   canon), and migration v7 fixes the derived rows.
@@ -215,7 +230,7 @@ issues tsc won't).
 `LiveWaterfall.tsx`, the `/trace` + `/runs` commands, the `/view waterfall` mode) was **retired in
 Plan 17** — it duplicated what OTel + any backend (Jaeger, Grafana Tempo, Honeycomb, LangSmith)
 already do better, and an external backend gives the AGENTS a queryable API to self-diagnose that a
-terminal reader never could. See **OpenTelemetry** below for the export (`src/core/otel.ts`).
+terminal reader never could. See **OpenTelemetry** below for the export (`packages/telemetry/src/otel.ts`).
 
 What REMAINS after the retirement (deliberately kept — NOT tracing UI):
 - **The run-evidence substrate** — `RunTrace` (`store/trace.ts`) and `transcript.jsonl`
@@ -242,7 +257,7 @@ no provider, no network). Since Plan 17 this is the ONLY trace-visualization pat
 waterfall was retired). **User-facing setup + copy-paste backend configs: `docs/observability.md`.**
 Design/rationale: `docs/superpowers/specs/2026-07-09-opentelemetry-design.md`.
 
-- **`src/core/otel.ts`** — `initTelemetry` builds tracer providers +
+- **`packages/telemetry/src/otel.ts`** — `initTelemetry` builds tracer providers +
   `AsyncLocalStorageContextManager` (context propagation across the delegation's await boundaries — Bun
   implements `AsyncLocalStorage`) + a `MeterProvider`, both OTLP. **One tracer provider per agent**
   (`tracerFor(agentId)`, `service.name` = the agent id) so backends group/colour the delegation graph
@@ -383,7 +398,7 @@ resolution).
   is the right default), and `TAICHO_PROVIDER`/`TAICHO_MODEL`/`TAICHO_MODELS_DIR`/`TAICHO_EMBED_MODEL`
   (selectors, not booleans). `mcp.enabled` already defaults on. Apply the rule to any new switch.
 - **Logging (Plan 03):** never `console.error/warn` from engine/store code — a stray write corrupts
-  the Ink TUI. Use the leveled `log` from `src/core/logger.ts`; it writes to `taicho.log` in the
+  the Ink TUI. Use the leveled `log` from `packages/framework/src/core/logger.ts`; it writes to `taicho.log` in the
   workspace and redacts auth material centrally (so no call site can leak a token). Raise to debug
   with `--verbose`/`-v`, `TAICHO_VERBOSE`, `TAICHO_LOG_LEVEL=debug`, or the historical `TAICHO_DEBUG`
   (now a general level, not codex-only). The only intentional `console.error`s left are the boot/auth

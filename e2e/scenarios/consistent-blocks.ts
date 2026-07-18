@@ -5,7 +5,7 @@
  *  the sub-agent's state and a rolling tail of its output. The full reply text does NOT appear in
  *  scrollback — the block is the sub-agent's only on-screen presence.
  *
- *  This scenario uses the SLOW-MODE `consistent-blocks` e2e model (src/core/e2e-model.ts), which
+ *  This scenario uses the SLOW-MODE `consistent-blocks` e2e model (packages/framework/src/core/e2e-model.ts), which
  *  holds the child's model call in-flight ~4s. During that window two agents are live:
  *    - root is `delegating`  (its delegate_task tool is blocked on the child)   → "root delegating"
  *    - proof-agent is `thinking` (its held model call is running)               → "proof-agent thinking"

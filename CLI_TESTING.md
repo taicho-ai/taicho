@@ -71,7 +71,7 @@ build binary → **warm the binary** → **fresh temp workspace** (`mkdtemp` —
 which is the live dev workspace) → run `vhs` with `cwd = workspace` → copy the recorded artifacts
 into `evidence/<scenario>/` → run the scenario's assertions → write `manifest.json` → exit non-zero
 on any failure. Determinism comes from `TAICHO_E2E_MODEL=agent-flow`
-([`src/core/e2e-model.ts`](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/src/core/e2e-model.ts)):
+([`packages/framework/src/core/e2e-model.ts`](/Users/rajeshsharma/Documents/Works/Personal/agents/taicho/packages/framework/src/core/e2e-model.ts)):
 the compiled binary uses a scripted model, so the flow runs with no network, no tokens, repeatable.
 
 **Video is evidence, not assertion.** A video can show a happy path over a silently-wrong
