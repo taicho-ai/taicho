@@ -11,7 +11,7 @@
  *  The routing decision is never silent. `why` is surfaced to the captain as a note breadcrumb and
  *  recorded on the trace, because rankAgents is a keyword match and will sometimes pick badly — a bad
  *  pick you can see is a bug report, a bad pick you can't is a mystery. */
-import type { TeamDef } from "@taicho/contracts/team";
+import type { TeamDef } from "@taicho-ai/contracts/team";
 import { rankAgents } from "./discovery";
 
 export interface RouteCandidate { id: string; role: string }

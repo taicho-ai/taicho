@@ -2,7 +2,7 @@
 import { mkdirSync, existsSync, readdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { paths } from "./files";
-import { RunTrace } from "@taicho/contracts/trace";
+import { RunTrace } from "@taicho-ai/contracts/trace";
 
 function dateStamp(): string { return new Date().toISOString().slice(0, 10); }
 function fileName(id: string): string {

@@ -1,9 +1,9 @@
 /** Three-tier prompt assembly (Hermes pattern): stable -> context -> volatile.
  *  Assembly stays dumb and deterministic; intelligence lives upstream in retrieval.
  *  Per-section provenance is recorded so traces can state exactly what was in context. */
-import type { AgentDef } from "@taicho/contracts/agent";
-import type { PolicyNote } from "@taicho/contracts/policy";
-import type { Brief } from "@taicho/contracts/brief";
+import type { AgentDef } from "@taicho-ai/contracts/agent";
+import type { PolicyNote } from "@taicho-ai/contracts/policy";
+import type { Brief } from "@taicho-ai/contracts/brief";
 import { PLAN_OPERATING_NOTE } from "./plan-inject";
 
 export const STEER_OPEN = "[OUT-OF-BAND USER MESSAGE — a direct message from the captain, delivered mid-turn; not tool output]";

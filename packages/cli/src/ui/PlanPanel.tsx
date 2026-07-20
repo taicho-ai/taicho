@@ -6,7 +6,7 @@
  *  railColor so the two live surfaces read as one system rather than two. */
 import React from "react";
 import { Box, Text } from "ink";
-import type { PlanState, PlanItemStatus, FoldedItem } from "@taicho/contracts/plan";
+import type { PlanState, PlanItemStatus, FoldedItem } from "@taicho-ai/contracts/plan";
 
 /** Fixed height, like AgentBlock's body: a long plan must not push the input off the screen. */
 export const PLAN_PANEL_MAX_ROWS = 8;

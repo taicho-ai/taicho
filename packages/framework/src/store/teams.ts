@@ -12,7 +12,7 @@
 import { YAML } from "bun";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import type { Database } from "bun:sqlite";
-import { TeamDef, DEFAULT_TEAM_ID } from "@taicho/contracts/team";
+import { TeamDef, DEFAULT_TEAM_ID } from "@taicho-ai/contracts/team";
 import { paths } from "./files";
 import { DEFAULT_WORKER_TOOLS, loadAgent, setAgentTeams } from "./roster";
 import { log } from "../core/logger";

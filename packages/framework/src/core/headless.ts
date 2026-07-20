@@ -20,7 +20,7 @@ import { makeDeps, executeRun, type Model, type RunDeps, type ApprovalRequest, t
 import { loadAgent } from "../store/roster";
 import { tailRun } from "./events";
 import { log } from "./logger";
-import type { Schedule } from "@taicho/contracts/schedule";
+import type { Schedule } from "@taicho-ai/contracts/schedule";
 
 export type ApprovalMode = "reject" | "approve" | "prompt";
 

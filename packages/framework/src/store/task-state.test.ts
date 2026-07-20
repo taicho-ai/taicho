@@ -7,7 +7,7 @@ import {
   createBackgroundTask, setTaskFields, cancelTaskState, listTaskIndex, reconcileTasks, reindexTasks, readTaskState,
 } from "./task-state";
 import { openDb } from "./db";
-import { RunTrace } from "@taicho/contracts/trace";
+import { RunTrace } from "@taicho-ai/contracts/trace";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-task-"));
 function boot() {

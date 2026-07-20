@@ -3,7 +3,7 @@
 import { generateText, streamText } from "ai";
 import { ProposalDraft, toPolicy } from "./proposal";
 import { writePolicy } from "../store/policy";
-import type { PolicyNote } from "@taicho/contracts/policy";
+import type { PolicyNote } from "@taicho-ai/contracts/policy";
 import { SQUAD_SCOPE, type SpendLedger } from "../store/spend-ledger";
 
 type Model = Parameters<typeof generateText>[0]["model"];

@@ -3,7 +3,7 @@
 import { YAML } from "bun";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { PolicyNote } from "@taicho/contracts/policy";
+import { PolicyNote } from "@taicho-ai/contracts/policy";
 import { paths } from "./files";
 import { log } from "../core/logger";
 

@@ -2,10 +2,10 @@ import { test, expect } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDb } from "@taicho/framework/store/db";
-import { ensureWorkspace } from "@taicho/framework/store/files";
-import { seedRoot, reindex, createAgent } from "@taicho/framework/store/roster";
-import { createTeam, createTeamWithMembers, seedDefaultTeam } from "@taicho/framework/store/teams";
+import { openDb } from "@taicho-ai/framework/store/db";
+import { ensureWorkspace } from "@taicho-ai/framework/store/files";
+import { seedRoot, reindex, createAgent } from "@taicho-ai/framework/store/roster";
+import { createTeam, createTeamWithMembers, seedDefaultTeam } from "@taicho-ai/framework/store/teams";
 import { teamRows, agentRows, isProtectedAgent, isProtectedTeam, clampSel } from "./org-browser-model";
 
 async function boot() {

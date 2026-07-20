@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from "node:path";
 import type { ModelMessage } from "ai";
 import { paths } from "./files";
-import type { RunTrace } from "@taicho/contracts/trace";
+import type { RunTrace } from "@taicho-ai/contracts/trace";
 
 export interface RunTranscriptEvent {
   ts: string;

@@ -22,8 +22,8 @@ import type { ModelMessage } from "ai";
 import { loadContext, loadLedger } from "../store/conversation";
 import { writeThread } from "../store/thread";
 import { readArtifact } from "../store/artifacts";
-import { artifactHandle } from "@taicho/contracts/artifact";
-import { estimateTokens } from "@taicho/agent";
+import { artifactHandle } from "@taicho-ai/contracts/artifact";
+import { estimateTokens } from "@taicho-ai/agent";
 import { log } from "./logger";
 
 /** How many recent conversation turns (a turn = one user message) replay VERBATIM; older ones fold

@@ -15,8 +15,8 @@ import { useEffect, type ReactNode } from "react";
 import { Box, Text, useApp } from "ink";
 import { editFileInTerminal } from "./editor-handoff";
 import type { CardKeyHandler } from "./ProposalCard";
-import { paths } from "@taicho/framework/store/files";
-import { hasWorkflow, loadWorkflow, orchestrationSlice, laneFor, seatsOf } from "@taicho/framework/store/workflows";
+import { paths } from "@taicho-ai/framework/store/files";
+import { hasWorkflow, loadWorkflow, orchestrationSlice, laneFor, seatsOf } from "@taicho-ai/framework/store/workflows";
 import { teamRows, agentRows, isProtectedAgent, isProtectedTeam, clampSel, type OrgScope } from "./org-browser-model";
 
 type WizardState =

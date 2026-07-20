@@ -3,7 +3,7 @@ import { useRef } from "react";
 import { render } from "ink-testing-library";
 import { useInput } from "ink";
 import { QuestionCard } from "./QuestionCard";
-import type { ApprovalDecision } from "@taicho/framework/core/run";
+import type { ApprovalDecision } from "@taicho-ai/framework/core/run";
 import type { CardKeyHandler } from "./ProposalCard";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

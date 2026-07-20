@@ -1,7 +1,7 @@
 import { useState, type MutableRefObject } from "react";
 import { Box, Text, type Key } from "ink";
 import TextInput from "ink-text-input";
-import type { ApprovalDecision } from "@taicho/framework/core/run";
+import type { ApprovalDecision } from "@taicho-ai/framework/core/run";
 
 /** The one interaction grammar: propose -> approve. Used for agent creation,
  *  coaching notes, exemplar promotion. */

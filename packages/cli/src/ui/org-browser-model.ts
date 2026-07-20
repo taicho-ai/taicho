@@ -2,9 +2,9 @@
  *  needs. No Ink, no state — everything here reads the store (like browser-model.ts) and is unit-testable
  *  with a seeded workspace. OrgBrowser.tsx renders what this returns. */
 import type { Database } from "bun:sqlite";
-import { listTeams, membersOf } from "@taicho/framework/store/teams";
-import { loadIndex } from "@taicho/framework/store/roster";
-import { DEFAULT_TEAM_ID } from "@taicho/contracts/team";
+import { listTeams, membersOf } from "@taicho-ai/framework/store/teams";
+import { loadIndex } from "@taicho-ai/framework/store/roster";
+import { DEFAULT_TEAM_ID } from "@taicho-ai/contracts/team";
 
 export type OrgScope = "teams" | "agents";
 

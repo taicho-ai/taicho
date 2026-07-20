@@ -2,24 +2,24 @@
  *  RunDeps are the seams (model, approval, child-run spawning); makeDeps wires the real ones. */
 import type { Database } from "bun:sqlite";
 import { generateText, type ModelMessage } from "ai";
-import type { AgentDef } from "@taicho/contracts/agent";
-import type { RunTrace, VerificationRecord, VerificationVerdict } from "@taicho/contracts/trace";
-import { assemble, runLoop, compactionThreshold, type RosterTeam, type StepInfo, type StepEvent } from "@taicho/agent";
+import type { AgentDef } from "@taicho-ai/contracts/agent";
+import type { RunTrace, VerificationRecord, VerificationVerdict } from "@taicho-ai/contracts/trace";
+import { assemble, runLoop, compactionThreshold, type RosterTeam, type StepInfo, type StepEvent } from "@taicho-ai/agent";
 import { listTeams, loadTeam, membersOf, createTeamWithMembers } from "../store/teams";
 import { loadWorkflow, laneFor, orchestrationSlice, writeWorkflowSteps } from "../store/workflows";
-import type { TeamDef } from "@taicho/contracts/team";
-import type { WorkflowRunState } from "@taicho/graph";
+import type { TeamDef } from "@taicho-ai/contracts/team";
+import type { WorkflowRunState } from "@taicho-ai/graph";
 import { routeToTeam } from "./team-routing";
 import { writePlan, foldPlan, appendPlanEvent, indexPlan, currentPlanId, renderPlan } from "../store/plans";
-import { planIdForGoal, TERMINAL_ITEM_STATUS, type PlanState, type PlanItemStatus } from "@taicho/contracts/plan";
-import { effectiveTools, mergeTeamPolicies, DEFAULT_TEAM_ID } from "@taicho/contracts/team";
+import { planIdForGoal, TERMINAL_ITEM_STATUS, type PlanState, type PlanItemStatus } from "@taicho-ai/contracts/plan";
+import { effectiveTools, mergeTeamPolicies, DEFAULT_TEAM_ID } from "@taicho-ai/contracts/team";
 import { runChecker } from "./verification";
 import { canDelegate, visibleToRows, acl } from "./registry";
 import { rankAgents, type AgentHit } from "./discovery";
 import { toolsForAgent } from "./tools";
 import { readArtifact } from "../store/artifacts";
 import { listAnnotations } from "../store/annotations";
-import { artifactHandle } from "@taicho/contracts/artifact";
+import { artifactHandle } from "@taicho-ai/contracts/artifact";
 import { searchKnowledge } from "../knowledge/retrieval";
 import { getActiveSkills } from "../store/skills";
 import { rankSkills } from "../skills/retrieval";
@@ -32,13 +32,13 @@ import type { TaichoConfig } from "../store/config";
 import { recentRunsDigest } from "./memory";
 import { recordUserTurn, recordTurnOutcome, recordTurnFailure } from "./turn-audit";
 import { listPolicies } from "../store/policy";
-import type { PolicyNote } from "@taicho/contracts/policy";
+import type { PolicyNote } from "@taicho-ai/contracts/policy";
 import type { McpManager } from "./mcp/manager";
 import type { McpServerConfig } from "../store/config";
 import { scopesFor, type SpendLedger } from "../store/spend-ledger";
 import type { Verdict } from "./command-guard";
 import { log, redact } from "./logger";
-import { trace as otelTrace, context, SpanStatusCode, ioAttrs, type Span, type Telemetry } from "@taicho/telemetry";
+import { trace as otelTrace, context, SpanStatusCode, ioAttrs, type Span, type Telemetry } from "@taicho-ai/telemetry";
 
 export type Model = Parameters<typeof generateText>[0]["model"];
 

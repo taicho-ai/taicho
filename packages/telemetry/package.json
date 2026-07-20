@@ -1,1 +1,36 @@
-{"name":"@taicho/telemetry","version":"0.1.0","private":true,"type":"module","exports":"./src/index.ts","scripts":{"build":"bun build src/index.ts --outdir dist --target bun","test":"bun test src"},"dependencies":{"@opentelemetry/api":"^1.9.1","@opentelemetry/context-async-hooks":"^2.9.0","@opentelemetry/exporter-metrics-otlp-http":"^0.220.0","@opentelemetry/exporter-trace-otlp-http":"^0.220.0","@opentelemetry/resources":"^2.9.0","@opentelemetry/sdk-metrics":"^2.9.0","@opentelemetry/sdk-trace-node":"^2.9.0"}}
+{
+  "name": "@taicho-ai/telemetry",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/context-async-hooks": "^2.9.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.220.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
+    "@opentelemetry/resources": "^2.9.0",
+    "@opentelemetry/sdk-metrics": "^2.9.0",
+    "@opentelemetry/sdk-trace-node": "^2.9.0"
+  },
+  "description": "OpenTelemetry setup and GenAI signal helpers for taicho — standard OTLP export, off by default.",
+  "license": "MIT",
+  "homepage": "https://taicho.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taicho-ai/taicho.git",
+    "directory": "packages/telemetry"
+  },
+  "files": [
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  }
+}

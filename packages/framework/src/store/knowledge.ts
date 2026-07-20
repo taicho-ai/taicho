@@ -5,7 +5,7 @@ import { YAML } from "bun";
 import type { Database } from "bun:sqlite";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { KbNode } from "@taicho/contracts/knowledge";
+import { KbNode } from "@taicho-ai/contracts/knowledge";
 import { paths } from "./files";
 import { putVector } from "./vectors";
 import { log } from "../core/logger";

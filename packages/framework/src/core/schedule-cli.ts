@@ -2,7 +2,7 @@
  *  add/list/remove are pure store ops; `run` fires one schedule ONCE through the injected `fire` seam
  *  (the host wires it to the headless `executeRun` path). The parser is shared with the REPL's
  *  `/schedules` command (see `parseScheduleCommand` in scheduler.ts) so both surfaces agree. */
-import type { Schedule } from "@taicho/contracts/schedule";
+import type { Schedule } from "@taicho-ai/contracts/schedule";
 import { parseScheduleCommand, describeTrigger, formatScheduleLine } from "./scheduler";
 import { createSchedule, listSchedules, removeSchedule, readSchedule } from "../store/schedules";
 

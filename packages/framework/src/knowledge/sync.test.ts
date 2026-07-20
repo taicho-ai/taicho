@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../store/db";
 import { paths } from "../store/files";
-import { KbNode } from "@taicho/contracts/knowledge";
+import { KbNode } from "@taicho-ai/contracts/knowledge";
 import { writeNode, resolveNodeIds } from "../store/knowledge";
 import { upsertSourceHash, hashContent, readTrackedSources } from "../store/sources";
 import { syncKnowledgeSources } from "./sync";

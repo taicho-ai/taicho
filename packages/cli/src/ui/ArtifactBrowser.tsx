@@ -13,9 +13,9 @@
 import { useEffect, useMemo } from "react";
 import { Box, Text, useApp } from "ink";
 import { editFileInTerminal } from "./editor-handoff";
-import { type Artifact, artifactHandle } from "@taicho/contracts/artifact";
-import { readArtifactBody, artifactBodyPath, artifactVersions, readArtifact, type GcReport } from "@taicho/framework/store/artifacts";
-import { listAnnotations, annotateArtifact } from "@taicho/framework/store/annotations";
+import { type Artifact, artifactHandle } from "@taicho-ai/contracts/artifact";
+import { readArtifactBody, artifactBodyPath, artifactVersions, readArtifact, type GcReport } from "@taicho-ai/framework/store/artifacts";
+import { listAnnotations, annotateArtifact } from "@taicho-ai/framework/store/annotations";
 import { renderMarkdown } from "./markdown";
 import type { CardKeyHandler } from "./ProposalCard";
 import { MIN_PANE_COLS, MIN_PANE_ROWS } from "./SquadPanes";

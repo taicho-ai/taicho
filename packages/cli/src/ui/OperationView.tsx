@@ -15,13 +15,13 @@
  *  the keyboard while open via the cardKeyRef pattern (same as TraceInspector). */
 import { useState, useEffect, useRef } from "react";
 import { Box, Text, useInput } from "ink";
-import { readTrace } from "@taicho/framework/store/trace";
-import { readRunTranscript, type RunTranscriptEvent } from "@taicho/framework/store/run-transcript";
-import { readArtifact } from "@taicho/framework/store/artifacts";
-import { artifactHandle } from "@taicho/contracts/artifact";
+import { readTrace } from "@taicho-ai/framework/store/trace";
+import { readRunTranscript, type RunTranscriptEvent } from "@taicho-ai/framework/store/run-transcript";
+import { readArtifact } from "@taicho-ai/framework/store/artifacts";
+import { artifactHandle } from "@taicho-ai/contracts/artifact";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { paths } from "@taicho/framework/store/files";
+import { paths } from "@taicho-ai/framework/store/files";
 import type { CardKeyHandler } from "./ProposalCard";
 
 interface OperationData {

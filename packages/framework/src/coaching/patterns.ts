@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { toPolicy } from "./proposal";
 import { writePolicy } from "../store/policy";
-import type { PolicyNote } from "@taicho/contracts/policy";
+import type { PolicyNote } from "@taicho-ai/contracts/policy";
 
 /** How many delegations of the SAME (agent, criteria) must FAIL before coaching is proposed. The
  *  2nd failure is the first REPEAT — a one-off never proposes. Kept intentionally low + defensible. */

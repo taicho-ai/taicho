@@ -197,12 +197,12 @@ The repository is a workspace of independently buildable packages:
 
 | Package | Purpose |
 | --- | --- |
-| `@taicho/contracts` | Shared schemas and domain types |
-| `@taicho/telemetry` | Standard OpenTelemetry/OTLP integration |
-| `@taicho/agent` | Reusable single-agent execution kernel |
-| `@taicho/graph` | Deterministic workflow graph and file journal |
-| `@taicho/framework` | Multi-agent runtime, persistence, teams, knowledge, and scheduling |
-| `@taicho/cli` | Taicho process entry point and Ink interface |
+| `@taicho-ai/contracts` | Shared schemas and domain types |
+| `@taicho-ai/telemetry` | Standard OpenTelemetry/OTLP integration |
+| `@taicho-ai/agent` | Reusable single-agent execution kernel |
+| `@taicho-ai/graph` | Deterministic workflow graph and file journal |
+| `@taicho-ai/framework` | Multi-agent runtime, persistence, teams, knowledge, and scheduling |
+| `@taicho-ai/cli` | Taicho process entry point and Ink interface |
 
 Each package has its own manifest, tests, and build. See
 [`docs/architecture/package-split.md`](docs/architecture/package-split.md) for dependency rules and

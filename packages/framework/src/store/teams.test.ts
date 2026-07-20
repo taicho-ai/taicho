@@ -5,11 +5,11 @@ import { join } from "node:path";
 import { openDb } from "./db";
 import { paths } from "./files";
 import { createTeam, loadTeam, listTeams, teamExists, membersOf, validateTeams, parseTeam, serializeTeam, assertPolicyRespectsFloor, seedDefaultTeam } from "./teams";
-import { DEFAULT_TEAM_ID } from "@taicho/contracts/team";
+import { DEFAULT_TEAM_ID } from "@taicho-ai/contracts/team";
 import { syncRegistry } from "../core/registry";
 import { DEFAULT_WORKER_TOOLS } from "./roster";
-import { AgentDef } from "@taicho/contracts/agent";
-import { TeamDef, TeamTools, effectiveTools } from "@taicho/contracts/team";
+import { AgentDef } from "@taicho-ai/contracts/agent";
+import { TeamDef, TeamTools, effectiveTools } from "@taicho-ai/contracts/team";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-teams-"));
 const agent = (id: string, team?: string): AgentDef =>

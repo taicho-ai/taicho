@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { statusReducer, statusList, type StatusMap } from "./agent-status";
-import type { StepEvent } from "@taicho/agent";
+import type { StepEvent } from "@taicho-ai/agent";
 
 const ev = (phase: StepEvent["phase"], runId: string, agent: string, extra: Partial<StepEvent> = {}): StepEvent =>
   ({ phase, runId, agent, ...extra });

@@ -9,11 +9,11 @@
  *  ApprovalRequest union. A rich workflow-gate card is a later (Phase 4) enhancement. */
 import { executeRun, type RunDeps } from "./run";
 import { runChecker } from "./verification";
-import { executeWorkflow, resumeWorkflow, type WorkflowExecDeps, type WorkflowInput } from "@taicho/graph";
+import { executeWorkflow, resumeWorkflow, type WorkflowExecDeps, type WorkflowInput } from "@taicho-ai/graph";
 import { loadWorkflowDef } from "../store/workflows";
 import { loadAgent } from "../store/roster";
 import { readArtifactBody } from "../store/artifacts";
-import type { WorkflowDef, WorkflowRunState } from "@taicho/graph";
+import type { WorkflowDef, WorkflowRunState } from "@taicho-ai/graph";
 
 /** Adapt RunDeps → the driver's injected seams for a specific workflow. */
 export function wireWorkflowDeps(deps: RunDeps, def: WorkflowDef): Omit<WorkflowExecDeps, "ws"> {

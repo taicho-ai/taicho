@@ -9,7 +9,7 @@
  *           artifacts/_index.json      — manifest: the latest version of every id (rebuildable) */
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, renameSync } from "node:fs";
 import { join, basename } from "node:path";
-import { Artifact, type ArtifactLocation, parseHandle } from "@taicho/contracts/artifact";
+import { Artifact, type ArtifactLocation, parseHandle } from "@taicho-ai/contracts/artifact";
 import { paths } from "./files";
 
 // underscore prefix ⇒ can never collide with a valid artifact id dir (ids start with [a-z0-9]).

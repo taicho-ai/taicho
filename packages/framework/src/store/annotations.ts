@@ -8,9 +8,9 @@
  *  annotation against it. A verification verdict (Plan 06) is written here like any other annotation. */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Annotation, mkAnnotationId, type AnnotationKind, type AnnotationStatus } from "@taicho/contracts/annotation";
-import type { VerificationVerdict } from "@taicho/contracts/trace";
-import { parseHandle, artifactHandle } from "@taicho/contracts/artifact";
+import { Annotation, mkAnnotationId, type AnnotationKind, type AnnotationStatus } from "@taicho-ai/contracts/annotation";
+import type { VerificationVerdict } from "@taicho-ai/contracts/trace";
+import { parseHandle, artifactHandle } from "@taicho-ai/contracts/artifact";
 import { paths } from "./files";
 import { readArtifact } from "./artifacts";
 

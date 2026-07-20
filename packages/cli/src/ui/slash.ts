@@ -1,11 +1,11 @@
 /** Pure REPL slash-command dispatch. Returns lines to print; no I/O of its own (store fns injected). */
-import type { RegistryRow } from "@taicho/framework/store/roster";
-import type { RunTrace } from "@taicho/contracts/trace";
-import type { PolicyNote } from "@taicho/contracts/policy";
-import { McpServerConfig } from "@taicho/framework/store/config";
-import type { McpServerStatus } from "@taicho/framework/core/mcp/manager";
-import { rollupCosts, formatCostRollup } from "@taicho/framework/core/costs";
-import { DEFAULT_TEAM_ID } from "@taicho/contracts/team";
+import type { RegistryRow } from "@taicho-ai/framework/store/roster";
+import type { RunTrace } from "@taicho-ai/contracts/trace";
+import type { PolicyNote } from "@taicho-ai/contracts/policy";
+import { McpServerConfig } from "@taicho-ai/framework/store/config";
+import type { McpServerStatus } from "@taicho-ai/framework/core/mcp/manager";
+import { rollupCosts, formatCostRollup } from "@taicho-ai/framework/core/costs";
+import { DEFAULT_TEAM_ID } from "@taicho-ai/contracts/team";
 
 export type Line = { kind: "user" | "agent" | "system"; from?: string; text: string; rendered?: boolean };
 

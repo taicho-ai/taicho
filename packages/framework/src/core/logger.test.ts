@@ -131,7 +131,7 @@ test("Plan 17: log lines carry the active OTel trace_id/span_id (execution-log c
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-node");
   const { InMemoryMetricExporter, AggregationTemporality, PeriodicExportingMetricReader } = await import("@opentelemetry/sdk-metrics");
   const { trace, context } = await import("@opentelemetry/api");
-  const { initTelemetry } = await import("@taicho/telemetry");
+  const { initTelemetry } = await import("@taicho-ai/telemetry");
   const telemetry = initTelemetry({
     spanExporter: new InMemorySpanExporter(),
     metricReader: new PeriodicExportingMetricReader({ exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE), exportIntervalMillis: 60_000 }),

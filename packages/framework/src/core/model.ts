@@ -5,7 +5,7 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import type { generateText } from "ai";
 import type { Provider, ResolvedConfig, TaichoConfig } from "../store/config";
 import { log } from "./logger";
-import { withRequestTimeout, DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from "@taicho/agent/request-timeout";
+import { withRequestTimeout, DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from "@taicho-ai/agent/request-timeout";
 
 // Reuse the exact model param type generateText expects (robust across SDK versions).
 export type Model = Parameters<typeof generateText>[0]["model"];

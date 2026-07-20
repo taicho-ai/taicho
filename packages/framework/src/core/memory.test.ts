@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeTrace } from "../store/trace";
 import { recentRunsDigest } from "./memory";
-import { RunTrace } from "@taicho/contracts/trace";
+import { RunTrace } from "@taicho-ai/contracts/trace";
 
 function tr(id: string, task: string, started: string, artifacts: string[] = []): RunTrace {
   return RunTrace.parse({

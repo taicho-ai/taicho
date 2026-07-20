@@ -3,7 +3,7 @@ import { MockLanguageModelV3 } from "ai/test";
 import { tool, simulateReadableStream, type ToolSet } from "ai";
 import { z } from "zod";
 import { runLoop } from "./loop";
-import type { AgentDef } from "@taicho/contracts/agent";
+import type { AgentDef } from "@taicho-ai/contracts/agent";
 import { SQUAD_SCOPE, type SpendLedger, type SpendTotals, type SpendCeilings } from "./spend-meter";
 
 // Plan 07: the loop unifies on streamText, so EVERY model is driven via doStream (not doGenerate).

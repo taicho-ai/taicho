@@ -1,1 +1,40 @@
-{"name":"@taicho/agent","version":"0.1.0","private":true,"type":"module","exports":{".":"./src/index.ts","./request-timeout":"./src/providers/request-timeout.ts"},"scripts":{"build":"bun build src/index.ts --outdir dist --target bun","test":"bun test src"},"dependencies":{"@opentelemetry/api":"^1.9.1","@taicho/contracts":"workspace:*","@taicho/telemetry":"workspace:*","ai":"6.0.199"},"devDependencies":{"@ai-sdk/openai":"3.0.69","zod":"^4.4.3"}}
+{
+  "name": "@taicho-ai/agent",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./request-timeout": "./src/providers/request-timeout.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@taicho-ai/contracts": "workspace:*",
+    "@taicho-ai/telemetry": "workspace:*",
+    "ai": "6.0.199"
+  },
+  "devDependencies": {
+    "@ai-sdk/openai": "3.0.69",
+    "zod": "^4.4.3"
+  },
+  "description": "One-agent execution kernel for taicho: model loop, prompts, compaction, plan slot, step events.",
+  "license": "MIT",
+  "homepage": "https://taicho.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taicho-ai/taicho.git",
+    "directory": "packages/agent"
+  },
+  "files": [
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  }
+}

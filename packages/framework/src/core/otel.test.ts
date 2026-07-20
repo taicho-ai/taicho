@@ -10,7 +10,7 @@ import { ensureWorkspace } from "../store/files";
 import { openDb } from "../store/db";
 import { seedRoot, reindex, loadAgent, createAgent } from "../store/roster";
 import { makeDeps, executeRun } from "./run";
-import { initTelemetry } from "@taicho/telemetry";
+import { initTelemetry } from "@taicho-ai/telemetry";
 
 const usage = { inputTokens: { total: 7 }, outputTokens: { total: 3 } } as const;
 const text = (t: string) =>

@@ -11,8 +11,8 @@
  *  Display-only: the REPL always owns the keyboard (Plan 10 scope). */
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import { Box, Text } from "ink";
-import type { AgentStatus, AgentState } from "@taicho/framework/core/agent-status";
-import type { ViewMode } from "@taicho/framework/store/prefs";
+import type { AgentStatus, AgentState } from "@taicho-ai/framework/core/agent-status";
+import type { ViewMode } from "@taicho-ai/framework/store/prefs";
 
 /** Per-run activity feed the App accumulates from the event stream and hands to the panes: recent
  *  tool lines (each already a redacted `→ tool argsPreview`). The streamed/final REPLY text is NOT

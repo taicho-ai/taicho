@@ -1,1 +1,33 @@
-{"name":"@taicho/contracts","version":"0.1.0","private":true,"type":"module","exports":{".":"./src/index.ts","./*":"./src/*.ts"},"scripts":{"build":"bun build src/index.ts --outdir dist --target bun","test":"bun test src"},"dependencies":{"zod":"^4.4.3"}}
+{
+  "name": "@taicho-ai/contracts",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "description": "Shared runtime schemas and domain types for taicho (agents, briefs, traces, artifacts, teams).",
+  "license": "MIT",
+  "homepage": "https://taicho.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taicho-ai/taicho.git",
+    "directory": "packages/contracts"
+  },
+  "files": [
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  }
+}

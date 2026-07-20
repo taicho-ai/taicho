@@ -3,10 +3,10 @@
  *  not the child grading itself — against the criteria, before the result reaches the parent's
  *  context. The verdict is `{ pass, reasons[] }`. A fail triggers exactly one bounded retry
  *  (orchestrated in tools.ts); a second fail surfaces the result WITH the failed verdict attached. */
-import { runLoop } from "@taicho/agent";
-import type { AgentDef } from "@taicho/contracts/agent";
+import { runLoop } from "@taicho-ai/agent";
+import type { AgentDef } from "@taicho-ai/contracts/agent";
 import type { SpendLedger, SpendScope } from "../store/spend-ledger";
-import { VerificationVerdict } from "@taicho/contracts/trace";
+import { VerificationVerdict } from "@taicho-ai/contracts/trace";
 
 /** The checker uses the SAME model plumbing the loop uses — passed in by run.ts (the delegating
  *  agent's resolved model), so verification is symmetric with the work it checks. */

@@ -1,7 +1,7 @@
 import { useState, type MutableRefObject } from "react";
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
-import type { ApprovalDecision } from "@taicho/framework/core/run";
+import type { ApprovalDecision } from "@taicho-ai/framework/core/run";
 import type { CardKeyHandler } from "./ProposalCard";
 import { cycleIndex } from "./slash";
 

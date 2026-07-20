@@ -1,6 +1,6 @@
 /** Write-time contradiction check: new coaching that conflicts with an existing note
  *  sets `supersedes` — an explicit replacement record, never a silent overwrite. */
-import type { PolicyNote } from "@taicho/contracts/policy";
+import type { PolicyNote } from "@taicho-ai/contracts/policy";
 
 export async function findContradiction(
   draft: { when: string; do: string },

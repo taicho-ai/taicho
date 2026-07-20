@@ -15,7 +15,7 @@ import {
   listTeams, membersOf, teamExists, seedDefaultTeam,
   createTeamWithMembers, deleteTeam, setTeamMembers,
 } from "../store/teams";
-import { DEFAULT_TEAM_ID } from "@taicho/contracts/team";
+import { DEFAULT_TEAM_ID } from "@taicho-ai/contracts/team";
 
 export type TeamCliCommand =
   | { kind: "list" }

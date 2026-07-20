@@ -1,7 +1,7 @@
 /** Every correction forces a proposal — writes are never left to the agent's discretion.
  *  A silently dropped instruction is the worst failure in a managerial trust model. */
 import { z } from "zod";
-import type { PolicyNote } from "@taicho/contracts/policy";
+import type { PolicyNote } from "@taicho-ai/contracts/policy";
 
 export const ProposalDraft = z.object({
   when: z.string().describe("condition under which this instruction applies"),

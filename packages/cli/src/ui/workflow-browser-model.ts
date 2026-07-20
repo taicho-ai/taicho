@@ -1,10 +1,10 @@
 /** Plan 25: the /workflows browser's PURE model — the rows each screen renders, read from the stores.
  *  No Ink here, so it's unit-testable (mirrors org-browser-model.ts). The component renders these. */
-import { listTeams } from "@taicho/framework/store/teams";
-import { DEFAULT_TEAM_ID } from "@taicho/contracts/team";
-import { loadWorkflowDef, loadWorkflow } from "@taicho/framework/store/workflows";
-import { listWorkflowRunIds, foldWorkflowRun } from "@taicho/graph";
-import type { WorkflowDef } from "@taicho/graph";
+import { listTeams } from "@taicho-ai/framework/store/teams";
+import { DEFAULT_TEAM_ID } from "@taicho-ai/contracts/team";
+import { loadWorkflowDef, loadWorkflow } from "@taicho-ai/framework/store/workflows";
+import { listWorkflowRunIds, foldWorkflowRun } from "@taicho-ai/graph";
+import type { WorkflowDef } from "@taicho-ai/graph";
 
 export type WorkflowKind = "structured" | "prose" | "none";
 

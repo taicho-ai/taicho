@@ -2,7 +2,7 @@
  *  (events.ts) into one AgentStatus per ACTIVE run. The StatusBar (and later panes) render from this;
  *  nothing is invented in the UI. Keyed by runId so a delegation cascade shows every live agent at
  *  once (parent `delegating`, child `working`). Elapsed-in-state is `now - since`, computed at render. */
-import type { StepEvent } from "@taicho/agent";
+import type { StepEvent } from "@taicho-ai/agent";
 
 export type AgentState = "idle" | "thinking" | "writing" | "working" | "waiting" | "delegating";
 

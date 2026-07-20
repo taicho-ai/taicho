@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writePolicy, listPolicies, readPolicy, deletePolicy } from "./policy";
-import { PolicyNote } from "@taicho/contracts/policy";
+import { PolicyNote } from "@taicho-ai/contracts/policy";
 
 const note = PolicyNote.parse({
   id: "pol_1", agent: "w", when: "writing a brief", do: "always cite sources",

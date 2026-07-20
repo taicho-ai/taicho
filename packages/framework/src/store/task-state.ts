@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rename
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { paths } from "./files";
-import type { RunTrace, VerificationVerdict } from "@taicho/contracts/trace";
+import type { RunTrace, VerificationVerdict } from "@taicho-ai/contracts/trace";
 
 export type TaskStepStatus = "not_started" | "running" | "completed" | "failed" | "blocked" | "interrupted" | "verified";
 /** Task lifecycle. `queued` (dispatched, awaiting a concurrency slot) and `cancelled` are Plan 04

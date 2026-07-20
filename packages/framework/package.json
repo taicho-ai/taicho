@@ -1,1 +1,49 @@
-{"name":"@taicho/framework","version":"0.1.0","private":true,"type":"module","exports":{".":"./src/index.ts","./*":"./src/*.ts"},"scripts":{"build":"bun build src/index.ts --outdir dist --target bun","test":"bun test src"},"dependencies":{"@ai-sdk/anthropic":"3.0.82","@ai-sdk/openai":"3.0.69","@huggingface/transformers":"^4.2.0","@modelcontextprotocol/sdk":"^1.29.0","@openrouter/ai-sdk-provider":"2.10.0","@opentelemetry/api":"^1.9.1","@taicho/agent":"workspace:*","@taicho/contracts":"workspace:*","@taicho/graph":"workspace:*","@taicho/telemetry":"workspace:*","ai":"6.0.199","zod":"^4.4.3"},"devDependencies":{"@ai-sdk/provider":"3.0.10","@opentelemetry/sdk-metrics":"^2.9.0","@opentelemetry/sdk-trace-node":"^2.9.0"}}
+{
+  "name": "@taicho-ai/framework",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "3.0.82",
+    "@ai-sdk/openai": "3.0.69",
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openrouter/ai-sdk-provider": "2.10.0",
+    "@opentelemetry/api": "^1.9.1",
+    "@taicho-ai/agent": "workspace:*",
+    "@taicho-ai/contracts": "workspace:*",
+    "@taicho-ai/graph": "workspace:*",
+    "@taicho-ai/telemetry": "workspace:*",
+    "ai": "6.0.199",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "3.0.10",
+    "@opentelemetry/sdk-metrics": "^2.9.0",
+    "@opentelemetry/sdk-trace-node": "^2.9.0"
+  },
+  "description": "Multi-agent framework for taicho: delegation, storage, teams, knowledge, coaching, providers, MCP, scheduling.",
+  "license": "MIT",
+  "homepage": "https://taicho.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taicho-ai/taicho.git",
+    "directory": "packages/framework"
+  },
+  "files": [
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  }
+}

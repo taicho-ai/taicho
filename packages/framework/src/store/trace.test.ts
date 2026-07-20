@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nextRunId, reserveRunId, writeTrace, listTraces, readTrace } from "./trace";
 import { ensureWorkspace, paths } from "./files";
-import { RunTrace } from "@taicho/contracts/trace";
+import { RunTrace } from "@taicho-ai/contracts/trace";
 
 function trace(id: string, agent: string): RunTrace {
   return RunTrace.parse({

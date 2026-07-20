@@ -3,7 +3,7 @@
  *  time stashes the current draft so stepping all the way back down restores it (shell-style). Pure +
  *  deterministic. loadHistory/appendHistory persist across sessions in a per-workspace dot-file. */
 import { existsSync, readFileSync, appendFileSync } from "node:fs";
-import { paths } from "@taicho/framework/store/files";
+import { paths } from "@taicho-ai/framework/store/files";
 
 export const HISTORY_CAP = 500;
 

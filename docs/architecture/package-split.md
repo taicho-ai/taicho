@@ -9,12 +9,12 @@ source path.
 
 | Package | Owns | May depend on |
 | --- | --- | --- |
-| `@taicho/contracts` | Stable runtime schemas and shared domain types | `zod` |
-| `@taicho/telemetry` | OpenTelemetry SDK setup, OTLP exporters, GenAI attributes, metrics, context propagation | OpenTelemetry packages only |
-| `@taicho/agent` | One-agent model loop, prompt/compaction, tool execution ports, provider-neutral run API | contracts, telemetry |
-| `@taicho/graph` | Workflow schema and deterministic graph executor; all effects are injected ports | contracts |
-| `@taicho/framework` | Multi-agent composition, delegation, persistence adapters, teams, knowledge, coaching, scheduling, graph-to-agent adapter | contracts, telemetry, agent, graph |
-| `@taicho/cli` | Command parsing, process lifecycle, Ink UI, and wiring of framework adapters | all public packages |
+| `@taicho-ai/contracts` | Stable runtime schemas and shared domain types | `zod` |
+| `@taicho-ai/telemetry` | OpenTelemetry SDK setup, OTLP exporters, GenAI attributes, metrics, context propagation | OpenTelemetry packages only |
+| `@taicho-ai/agent` | One-agent model loop, prompt/compaction, tool execution ports, provider-neutral run API | contracts, telemetry |
+| `@taicho-ai/graph` | Workflow schema and deterministic graph executor; all effects are injected ports | contracts |
+| `@taicho-ai/framework` | Multi-agent composition, delegation, persistence adapters, teams, knowledge, coaching, scheduling, graph-to-agent adapter | contracts, telemetry, agent, graph |
+| `@taicho-ai/cli` | Command parsing, process lifecycle, Ink UI, and wiring of framework adapters | all public packages |
 
 The dependency direction is one way:
 

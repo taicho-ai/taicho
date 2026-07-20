@@ -14,7 +14,7 @@ import {
   parseCronField, parseCron, cronMatches, nextCronAfter,
   SchedulerRunner, parseDuration,
 } from "./scheduler";
-import { Schedule, type Schedule as ScheduleT } from "@taicho/contracts/schedule";
+import { Schedule, type Schedule as ScheduleT } from "@taicho-ai/contracts/schedule";
 
 const usage = { inputTokens: { total: 1 }, outputTokens: { total: 1 } } as const;
 const text = (t: string) =>

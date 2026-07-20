@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { assemble, INLINE_ROSTER_MAX } from "./prompt";
-import type { AgentDef } from "@taicho/contracts/agent";
+import type { AgentDef } from "@taicho-ai/contracts/agent";
 
 const agent: AgentDef = {
   id: "root", role: "orchestrator", identity: "I orchestrate.", tools: ["find_agents"], teams: [],

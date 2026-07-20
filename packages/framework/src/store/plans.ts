@@ -15,7 +15,7 @@
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
-import { Plan, PlanEvent, PlanItem, PlanItemStatus, TERMINAL_ITEM_STATUS, planHandle, parsePlanHandle, type FoldedItem, type PlanState } from "@taicho/contracts/plan";
+import { Plan, PlanEvent, PlanItem, PlanItemStatus, TERMINAL_ITEM_STATUS, planHandle, parsePlanHandle, type FoldedItem, type PlanState } from "@taicho-ai/contracts/plan";
 import { paths } from "./files";
 import { log } from "../core/logger";
 

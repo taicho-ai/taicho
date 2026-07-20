@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { openDb } from "./db";
 import { paths } from "./files";
 import { putVector } from "./vectors";
-import { KbNode } from "@taicho/contracts/knowledge";
+import { KbNode } from "@taicho-ai/contracts/knowledge";
 import { serializeNode, parseNode, writeNode, readNode, nodeExists, neighbors, reindexKnowledge, mkKbId, resolveNodeIds, forgetNodes, reembedAll, listNodeRows, reconcileKbScope } from "./knowledge";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-kb-"));

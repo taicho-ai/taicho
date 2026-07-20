@@ -1,1 +1,31 @@
-{"name":"@taicho/graph","version":"0.1.0","private":true,"type":"module","exports":"./src/index.ts","scripts":{"build":"bun build src/index.ts --outdir dist --target bun","test":"bun test src"},"dependencies":{"@taicho/contracts":"workspace:*","zod":"^4.4.3"}}
+{
+  "name": "@taicho-ai/graph",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@taicho-ai/contracts": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "description": "Deterministic workflow schema and executor for taicho, with an optional filesystem journal.",
+  "license": "MIT",
+  "homepage": "https://taicho.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taicho-ai/taicho.git",
+    "directory": "packages/graph"
+  },
+  "files": [
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "public"
+  }
+}

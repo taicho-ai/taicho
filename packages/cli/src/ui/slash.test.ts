@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { runSlash, COMMANDS, suggestCommands, cycleIndex, parseMcpCommand, formatMcpStatus } from "./slash";
 import { parseKbCommand } from "./slash";
-import type { RunTrace } from "@taicho/contracts/trace";
+import type { RunTrace } from "@taicho-ai/contracts/trace";
 
 const roster = [{ id: "root", role: "orch", is_root: 1 }, { id: "w", role: "writes", is_root: 0 }];
 const trace = (id: string): RunTrace => ({

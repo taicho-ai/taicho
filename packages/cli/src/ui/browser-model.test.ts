@@ -2,12 +2,12 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureWorkspace } from "@taicho/framework/store/files";
-import { saveArtifact, listArtifacts } from "@taicho/framework/store/artifacts";
-import { annotateArtifact } from "@taicho/framework/store/annotations";
-import { writeTrace } from "@taicho/framework/store/trace";
-import { RunTrace } from "@taicho/contracts/trace";
-import { artifactHandle } from "@taicho/contracts/artifact";
+import { ensureWorkspace } from "@taicho-ai/framework/store/files";
+import { saveArtifact, listArtifacts } from "@taicho-ai/framework/store/artifacts";
+import { annotateArtifact } from "@taicho-ai/framework/store/annotations";
+import { writeTrace } from "@taicho-ai/framework/store/trace";
+import { RunTrace } from "@taicho-ai/contracts/trace";
+import { artifactHandle } from "@taicho-ai/contracts/artifact";
 import {
   resolveScope, latestRunFallback, applyFilters, shelfRows, countLine, artifactRows, badgesFor,
 } from "./browser-model";

@@ -1,4 +1,4 @@
-import type { PlanState } from "@taicho/contracts/plan";
+import type { PlanState } from "@taicho-ai/contracts/plan";
 
 /** The typed live event stream shared by Plan 02 (waterfall spans) and Plan 10 (live status).
  *  One instrumentation seam, two consumers: the loop + tool `execute()` wrapper + approval wrapper

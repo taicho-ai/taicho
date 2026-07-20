@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { rollupCosts, formatCostRollup } from "./costs";
-import type { RunTrace } from "@taicho/contracts/trace";
+import type { RunTrace } from "@taicho-ai/contracts/trace";
 
 /** A minimal trace: only the fields the rollup reads matter; the rest are schema-valid filler. */
 function trace(over: Partial<RunTrace>): RunTrace {

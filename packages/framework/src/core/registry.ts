@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
-import { effectiveTeams, type AgentDef } from "@taicho/contracts/agent";
-import { parseTeamAcl } from "@taicho/contracts/team";
+import { effectiveTeams, type AgentDef } from "@taicho-ai/contracts/agent";
+import { parseTeamAcl } from "@taicho-ai/contracts/team";
 
 /** Roster is human-controlled: creation flows through the root agent's proposal card,
  *  never autonomous. Discovery is filtered by the CALLER's visibility ACL.

@@ -1,7 +1,7 @@
 /** Policy recall: embed task context -> vector candidates -> condition filter -> top-k.
  *  Everything retrieved/applied/skipped is recorded in the run trace ledger. */
 import type { Database } from "bun:sqlite";
-import type { PolicyNote } from "@taicho/contracts/policy";
+import type { PolicyNote } from "@taicho-ai/contracts/policy";
 import { topK } from "../store/vectors";
 
 export interface RecallResult { applied: PolicyNote[]; skipped: { id: string; reason: string }[]; retrieved: string[]; }

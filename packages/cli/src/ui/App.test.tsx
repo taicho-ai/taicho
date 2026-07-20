@@ -7,35 +7,35 @@
  *  multi-char chunk as literal input, so "text\r" would NOT submit). Arrow keys are ANSI escapes. */
 import { test, expect } from "bun:test";
 import { render } from "ink-testing-library";
-import { MockLanguageModelV3, mockValues } from "@taicho/framework/core/mock-model"; // Plan 07: auto-streaming mock
+import { MockLanguageModelV3, mockValues } from "@taicho-ai/framework/core/mock-model"; // Plan 07: auto-streaming mock
 import { simulateReadableStream } from "ai";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { App } from "./App";
-import { ensureWorkspace, paths } from "@taicho/framework/store/files";
-import { openDb } from "@taicho/framework/store/db";
-import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "@taicho/framework/store/roster";
-import { loadWorkflowDef, writeWorkflowSteps } from "@taicho/framework/store/workflows";
-import { listTraces, writeTrace } from "@taicho/framework/store/trace";
-import { RunTrace } from "@taicho/contracts/trace";
-import { saveArtifact, listArtifacts, readArtifact } from "@taicho/framework/store/artifacts";
-import { annotateArtifact, listAnnotations } from "@taicho/framework/store/annotations";
-import { loadContext, loadLedger, appendLedgerTurn } from "@taicho/framework/store/conversation";
-import { loadThread, writeThread } from "@taicho/framework/store/thread";
-import { readTaskState, taskIdForRun, listTaskIndex } from "@taicho/framework/store/task-state";
-import { listSchedules, createSchedule } from "@taicho/framework/store/schedules";
-import { readMcpStore } from "@taicho/framework/store/mcp-store";
-import { writeNode, resolveNodeIds } from "@taicho/framework/store/knowledge";
-import { getViewMode } from "@taicho/framework/store/prefs";
-import { createTeam, teamExists, membersOf } from "@taicho/framework/store/teams";
-import { writePlan, reindexPlans, currentPlanId, foldPlan } from "@taicho/framework/store/plans";
-import { readPrefs } from "@taicho/framework/store/prefs";
-import { statusReducer } from "@taicho/framework/core/agent-status";
-import { KbNode } from "@taicho/contracts/knowledge";
-import type { AuthSource } from "@taicho/framework/store/config";
-import type { McpManager, McpServerStatus } from "@taicho/framework/core/mcp/manager";
+import { ensureWorkspace, paths } from "@taicho-ai/framework/store/files";
+import { openDb } from "@taicho-ai/framework/store/db";
+import { seedRoot, reindex, loadIndex, seedLibrarian, createAgent } from "@taicho-ai/framework/store/roster";
+import { loadWorkflowDef, writeWorkflowSteps } from "@taicho-ai/framework/store/workflows";
+import { listTraces, writeTrace } from "@taicho-ai/framework/store/trace";
+import { RunTrace } from "@taicho-ai/contracts/trace";
+import { saveArtifact, listArtifacts, readArtifact } from "@taicho-ai/framework/store/artifacts";
+import { annotateArtifact, listAnnotations } from "@taicho-ai/framework/store/annotations";
+import { loadContext, loadLedger, appendLedgerTurn } from "@taicho-ai/framework/store/conversation";
+import { loadThread, writeThread } from "@taicho-ai/framework/store/thread";
+import { readTaskState, taskIdForRun, listTaskIndex } from "@taicho-ai/framework/store/task-state";
+import { listSchedules, createSchedule } from "@taicho-ai/framework/store/schedules";
+import { readMcpStore } from "@taicho-ai/framework/store/mcp-store";
+import { writeNode, resolveNodeIds } from "@taicho-ai/framework/store/knowledge";
+import { getViewMode } from "@taicho-ai/framework/store/prefs";
+import { createTeam, teamExists, membersOf } from "@taicho-ai/framework/store/teams";
+import { writePlan, reindexPlans, currentPlanId, foldPlan } from "@taicho-ai/framework/store/plans";
+import { readPrefs } from "@taicho-ai/framework/store/prefs";
+import { statusReducer } from "@taicho-ai/framework/core/agent-status";
+import { KbNode } from "@taicho-ai/contracts/knowledge";
+import type { AuthSource } from "@taicho-ai/framework/store/config";
+import type { McpManager, McpServerStatus } from "@taicho-ai/framework/core/mcp/manager";
 
 const ENTER = "\r";
 const DOWN = "[B";
@@ -706,8 +706,8 @@ test("/kb sync drives the librarian to ingest a source doc (mocked model, real w
 
 test("/skills list and /skills show render seeded skills", async () => {
   const { db, props } = await setup();
-  const { writeSkill } = await import("@taicho/framework/store/skills");
-  const { Skill } = await import("@taicho/contracts/skill");
+  const { writeSkill } = await import("@taicho-ai/framework/store/skills");
+  const { Skill } = await import("@taicho-ai/contracts/skill");
   writeSkill(props.ws, db, Skill.parse({ id: "skill_dep", name: "deploy", description: "ship to prod", body: "1. build\n2. ship", created: new Date().toISOString() }));
   const { stdin, lastFrame } = render(<App {...props} />);
   await send(stdin, "/skills list", ENTER);

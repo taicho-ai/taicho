@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { paths } from "./files";
-import { Schedule, type ScheduleSpec } from "@taicho/contracts/schedule";
+import { Schedule, type ScheduleSpec } from "@taicho-ai/contracts/schedule";
 import { validateTrigger } from "../core/scheduler";
 import { log } from "../core/logger";
 

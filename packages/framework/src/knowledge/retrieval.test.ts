@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../store/db";
 import { putVector } from "../store/vectors";
-import { KbNode } from "@taicho/contracts/knowledge";
+import { KbNode } from "@taicho-ai/contracts/knowledge";
 import { writeNode, mkKbId } from "../store/knowledge";
 import { searchKnowledge } from "./retrieval";
 

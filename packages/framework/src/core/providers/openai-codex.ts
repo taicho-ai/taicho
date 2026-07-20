@@ -6,7 +6,7 @@ import type { AuthProfile } from "../auth/profile";
 import { AuthExpiredError } from "../auth/refresh";
 import { OPENAI_CODEX_AUTH, codexHeaders } from "../auth/constants";
 import { log } from "../logger";
-import { withRequestTimeout, DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from "@taicho/agent/request-timeout";
+import { withRequestTimeout, DEFAULT_MODEL_REQUEST_TIMEOUT_MS } from "@taicho-ai/agent/request-timeout";
 
 export function redactAuthHeader(value: string | null): string {
   if (!value) return "";

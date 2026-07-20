@@ -5,7 +5,7 @@ import { YAML } from "bun";
 import type { Database } from "bun:sqlite";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { Skill } from "@taicho/contracts/skill";
+import { Skill } from "@taicho-ai/contracts/skill";
 import { paths } from "./files";
 import { log } from "../core/logger";
 

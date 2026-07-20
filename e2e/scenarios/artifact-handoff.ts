@@ -22,7 +22,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AssertionResult, Scenario } from "./types";
-import { DOSSIER_PAYLOAD } from "@taicho/framework/core/e2e-model";
+import { DOSSIER_PAYLOAD } from "@taicho-ai/framework/core/e2e-model";
 
 const THIRD_PROMPT = "have the researcher produce a dossier and the writer make a brief by reference";
 

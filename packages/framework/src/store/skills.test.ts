@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "./db";
 import { paths } from "./files";
-import { Skill } from "@taicho/contracts/skill";
+import { Skill } from "@taicho-ai/contracts/skill";
 import { serializeSkill, parseSkill, writeSkill, readSkill, listSkills, deleteSkill, reindexSkills, getActiveSkills, mkSkillId } from "./skills";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-skill-"));

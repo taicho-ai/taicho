@@ -9,7 +9,7 @@
  *     re-fires a schedule while its previous run is still in flight (bounds concurrency to 1/schedule).
  *   - `parseScheduleCommand` / `parseDuration` / formatters — the shared `/schedules` + `taicho
  *     schedule` grammar, kept here so both the REPL (slash) and the CLI use one parser. */
-import { Schedule, Trigger, ScheduleApprove, type ScheduleSpec } from "@taicho/contracts/schedule";
+import { Schedule, Trigger, ScheduleApprove, type ScheduleSpec } from "@taicho-ai/contracts/schedule";
 
 // ── cron (5-field, UTC): minute hour day-of-month month day-of-week ────────────────────────────────
 

@@ -10,15 +10,15 @@
  *  A run on a team is metered against BOTH scopes in one transaction: the team's ceiling and the squad's.
  *  A team ceiling can therefore stop a run the squad ceiling would happily have allowed. */
 import type { Database } from "bun:sqlite";
-import { DEFAULT_TEAM_ID } from "@taicho/contracts/team";
+import { DEFAULT_TEAM_ID } from "@taicho-ai/contracts/team";
 import {
   SQUAD_SCOPE, teamScope, hasCeilings,
   type SpendScope, type SpendCeilings, type SpendTotals, type SpendLedger,
-} from "@taicho/agent";
+} from "@taicho-ai/agent";
 export {
   SQUAD_SCOPE, teamScope, hasCeilings, ceilingHit, exhaustionMessage,
   type SpendScope, type SpendCeilings, type SpendTotals, type SpendLedger,
-} from "@taicho/agent";
+} from "@taicho-ai/agent";
 
 /** The scopes a run by an agent on these teams is metered against (Plan 22: an agent may be on several).
  *  Every explicit team the agent belongs to gets its own ceiling, plus the always-present squad. The

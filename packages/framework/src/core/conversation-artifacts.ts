@@ -7,7 +7,7 @@
  *  the artifact BROWSER's data source, not tracing; trace visualization is OpenTelemetry's job now.) */
 import { readTrace } from "../store/trace";
 import { readArtifact } from "../store/artifacts";
-import { artifactHandle, type Artifact } from "@taicho/contracts/artifact";
+import { artifactHandle, type Artifact } from "@taicho-ai/contracts/artifact";
 
 export function gatherConversationArtifacts(ws: string, rootRunId: string): Artifact[] {
   const handles = new Set<string>();

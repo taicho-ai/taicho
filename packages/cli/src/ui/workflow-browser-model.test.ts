@@ -2,10 +2,10 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { paths } from "@taicho/framework/store/files";
-import { writeWorkflowSteps } from "@taicho/framework/store/workflows";
-import { reserveWorkflowRun, appendWorkflowEvent } from "@taicho/graph";
-import { parseWorkflowDef } from "@taicho/graph";
+import { paths } from "@taicho-ai/framework/store/files";
+import { writeWorkflowSteps } from "@taicho-ai/framework/store/workflows";
+import { reserveWorkflowRun, appendWorkflowEvent } from "@taicho-ai/graph";
+import { parseWorkflowDef } from "@taicho-ai/graph";
 import { listWorkflowRows, workflowRunRows } from "./workflow-browser-model";
 
 const mkws = () => mkdtempSync(join(tmpdir(), "taicho-wbm-"));

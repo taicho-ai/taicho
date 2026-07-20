@@ -15,7 +15,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { YAML } from "bun";
 import { paths } from "./files";
-import { loadWorkflowDefText, parseWorkflowDef, type WorkflowDef } from "@taicho/graph";
+import { loadWorkflowDefText, parseWorkflowDef, type WorkflowDef } from "@taicho-ai/graph";
 
 /** The reserved seat name for the lead's orchestration slice. An agent literally named `orchestration`
  *  would collide with it — deliberately reserved, and documented, so the seat is unambiguous. */

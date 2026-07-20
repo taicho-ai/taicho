@@ -11,11 +11,11 @@
  *                      grouped by producing run so the widest scope reads as execution history. */
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { type Artifact, artifactHandle } from "@taicho/contracts/artifact";
-import { listArtifacts } from "@taicho/framework/store/artifacts";
-import { listAnnotations } from "@taicho/framework/store/annotations";
-import { loadLedger } from "@taicho/framework/store/conversation";
-import { gatherConversationArtifacts } from "@taicho/framework/core/conversation-artifacts";
+import { type Artifact, artifactHandle } from "@taicho-ai/contracts/artifact";
+import { listArtifacts } from "@taicho-ai/framework/store/artifacts";
+import { listAnnotations } from "@taicho-ai/framework/store/annotations";
+import { loadLedger } from "@taicho-ai/framework/store/conversation";
+import { gatherConversationArtifacts } from "@taicho-ai/framework/core/conversation-artifacts";
 
 export type BrowserScope = "run" | "conversation" | "all";
 export type BrowserSort = "run" | "time" | "producer";

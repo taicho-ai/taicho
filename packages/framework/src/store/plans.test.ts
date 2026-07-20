@@ -8,7 +8,7 @@ import {
   writePlan, appendPlanEvent, readPlan, readPlanEvents, foldPlan, latestVersion,
   reconcilePlans, reindexPlans, listPlanRows, currentPlanId, findPlanItemByBoundRun, renderPlan,
 } from "./plans";
-import { planIdForGoal, parsePlanHandle, planHandle } from "@taicho/contracts/plan";
+import { planIdForGoal, parsePlanHandle, planHandle } from "@taicho-ai/contracts/plan";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-plans-"));
 const items = (...t: string[]) => t.map((x, i) => ({ id: `it_${i}`, text: x }));

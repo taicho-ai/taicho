@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { planSummary, visibleItems, PLAN_PANEL_MAX_ROWS } from "./PlanPanel";
-import type { PlanState, FoldedItem, PlanItemStatus } from "@taicho/contracts/plan";
+import type { PlanState, FoldedItem, PlanItemStatus } from "@taicho-ai/contracts/plan";
 
 const item = (id: string, status: PlanItemStatus): FoldedItem => ({ id, text: id, status });
 const state = (items: FoldedItem[]): PlanState => ({

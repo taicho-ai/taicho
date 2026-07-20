@@ -14,7 +14,7 @@
     "dev": "TAICHO_DEBUG=1 bun --watch packages/cli/src/index.tsx",
     "start": "bun packages/cli/src/index.tsx",
     "build": "bun run build:packages && bun scripts/ensure-devtools-stub.ts && bun build --compile --minify packages/cli/src/index.tsx --outfile dist/taicho",
-    "build:packages": "bun run --filter '@taicho/*' build",
+    "build:packages": "bun run --filter '@taicho-ai/*' build",
     "check:boundaries": "bun scripts/check-package-boundaries.ts",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test packages",

@@ -16,7 +16,7 @@
  *  + delta events the bar/panes/live-trace consume; NEVER feeds back into transcript/ledger/replay. */
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import { Box, Text } from "ink";
-import type { AgentStatus, AgentState } from "@taicho/framework/core/agent-status";
+import type { AgentStatus, AgentState } from "@taicho-ai/framework/core/agent-status";
 
 export type BlockVariant = "live" | "done" | "failed";
 

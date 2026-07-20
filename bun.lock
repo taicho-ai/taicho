@@ -37,12 +37,12 @@
       },
     },
     "packages/agent": {
-      "name": "@taicho/agent",
+      "name": "@taicho-ai/agent",
       "version": "0.1.0",
       "dependencies": {
         "@opentelemetry/api": "^1.9.1",
-        "@taicho/contracts": "workspace:*",
-        "@taicho/telemetry": "workspace:*",
+        "@taicho-ai/contracts": "workspace:*",
+        "@taicho-ai/telemetry": "workspace:*",
         "ai": "6.0.199",
       },
       "devDependencies": {
@@ -51,17 +51,17 @@
       },
     },
     "packages/cli": {
-      "name": "@taicho/cli",
+      "name": "@taicho-ai/cli",
       "version": "0.1.0",
       "bin": {
         "taicho": "./src/index.tsx",
       },
       "dependencies": {
         "@inkjs/ui": "^2.0.0",
-        "@taicho/contracts": "workspace:*",
-        "@taicho/framework": "workspace:*",
-        "@taicho/graph": "workspace:*",
-        "@taicho/telemetry": "workspace:*",
+        "@taicho-ai/contracts": "workspace:*",
+        "@taicho-ai/framework": "workspace:*",
+        "@taicho-ai/graph": "workspace:*",
+        "@taicho-ai/telemetry": "workspace:*",
         "ai": "6.0.199",
         "chalk": "^5.6.2",
         "ink": "^7.1.0",
@@ -76,14 +76,14 @@
       },
     },
     "packages/contracts": {
-      "name": "@taicho/contracts",
+      "name": "@taicho-ai/contracts",
       "version": "0.1.0",
       "dependencies": {
         "zod": "^4.4.3",
       },
     },
     "packages/framework": {
-      "name": "@taicho/framework",
+      "name": "@taicho-ai/framework",
       "version": "0.1.0",
       "dependencies": {
         "@ai-sdk/anthropic": "3.0.82",
@@ -92,10 +92,10 @@
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@openrouter/ai-sdk-provider": "2.10.0",
         "@opentelemetry/api": "^1.9.1",
-        "@taicho/agent": "workspace:*",
-        "@taicho/contracts": "workspace:*",
-        "@taicho/graph": "workspace:*",
-        "@taicho/telemetry": "workspace:*",
+        "@taicho-ai/agent": "workspace:*",
+        "@taicho-ai/contracts": "workspace:*",
+        "@taicho-ai/graph": "workspace:*",
+        "@taicho-ai/telemetry": "workspace:*",
         "ai": "6.0.199",
         "zod": "^4.4.3",
       },
@@ -106,15 +106,15 @@
       },
     },
     "packages/graph": {
-      "name": "@taicho/graph",
+      "name": "@taicho-ai/graph",
       "version": "0.1.0",
       "dependencies": {
-        "@taicho/contracts": "workspace:*",
+        "@taicho-ai/contracts": "workspace:*",
         "zod": "^4.4.3",
       },
     },
     "packages/telemetry": {
-      "name": "@taicho/telemetry",
+      "name": "@taicho-ai/telemetry",
       "version": "0.1.0",
       "dependencies": {
         "@opentelemetry/api": "^1.9.1",
@@ -316,17 +316,17 @@
 
     "@swc/types": ["@swc/types@0.1.27", "", { "dependencies": { "@swc/counter": "^0.1.3" } }, "sha512-K6h3iUlqeM946U4sXFYeahefR1YBbXJvko+hv8WS8/0BNJ4OHiHRywMnQUJCqkR7Y9+hqQ1TvEpiKqUhz7NEFg=="],
 
-    "@taicho/agent": ["@taicho/agent@workspace:packages/agent"],
+    "@taicho-ai/agent": ["@taicho-ai/agent@workspace:packages/agent"],
 
-    "@taicho/cli": ["@taicho/cli@workspace:packages/cli"],
+    "@taicho-ai/cli": ["@taicho-ai/cli@workspace:packages/cli"],
 
-    "@taicho/contracts": ["@taicho/contracts@workspace:packages/contracts"],
+    "@taicho-ai/contracts": ["@taicho-ai/contracts@workspace:packages/contracts"],
 
-    "@taicho/framework": ["@taicho/framework@workspace:packages/framework"],
+    "@taicho-ai/framework": ["@taicho-ai/framework@workspace:packages/framework"],
 
-    "@taicho/graph": ["@taicho/graph@workspace:packages/graph"],
+    "@taicho-ai/graph": ["@taicho-ai/graph@workspace:packages/graph"],
 
-    "@taicho/telemetry": ["@taicho/telemetry@workspace:packages/telemetry"],
+    "@taicho-ai/telemetry": ["@taicho-ai/telemetry@workspace:packages/telemetry"],
 
     "@types/istanbul-lib-coverage": ["@types/istanbul-lib-coverage@2.0.6", "", {}, "sha512-2QF/t/auWm0lsy8XtKVPG19v3sSOQlJe/YHZgfjb/KBBHOGSV+J2q/S671rcq9uTBrLAXmZpqJiaQbMT+zNU1w=="],
 

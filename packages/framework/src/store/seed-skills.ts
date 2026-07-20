@@ -2,7 +2,7 @@
  *  boot (only when skills/ is empty), then indexed by reindexSkills. Fixed ids ⇒ idempotent. */
 import { mkdir, writeFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { Skill } from "@taicho/contracts/skill";
+import { Skill } from "@taicho-ai/contracts/skill";
 import { serializeSkill } from "./skills";
 import { paths } from "./files";
 

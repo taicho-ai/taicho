@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { visibleTo, visibleToRows, canDelegate, acl } from "./registry";
-import type { AgentDef } from "@taicho/contracts/agent";
+import type { AgentDef } from "@taicho-ai/contracts/agent";
 
 const mk = (id: string, over: Partial<AgentDef> = {}): AgentDef => ({
   id, role: `${id} role`, identity: "", tools: [], teams: [], canSee: ["*"], canDelegateTo: ["*"],

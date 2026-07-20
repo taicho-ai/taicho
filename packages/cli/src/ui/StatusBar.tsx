@@ -4,7 +4,7 @@
  *  Renders purely from the AgentStatus model (agent-status.ts) — nothing invented here. */
 import { useState, useEffect } from "react";
 import { Box, Text } from "ink";
-import type { AgentStatus } from "@taicho/framework/core/agent-status";
+import type { AgentStatus } from "@taicho-ai/framework/core/agent-status";
 
 const GLYPH: Record<AgentStatus["state"], string> = {
   idle: "·", thinking: "…", writing: "✎", working: "●", delegating: "⇢", waiting: "✋",

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { writeFile, mkdir } from "node:fs/promises";
 import { serializeAgent, parseAgent, seedRoot, seedLibrarian, LIBRARIAN_ID, LIBRARIAN_TOOLS, reindex, loadIndex, loadAgent, createAgent, updateAgent, setAgentTeams, deleteAgent, reconcileWorkerTools, workerTools, DEFAULT_WORKER_TOOLS, type RegistryRow } from "./roster";
 import { createTeam, membersOf } from "./teams";
-import { AgentDef } from "@taicho/contracts/agent";
+import { AgentDef } from "@taicho-ai/contracts/agent";
 import { openDb } from "./db";
 import { ensureWorkspace, paths } from "./files";
 

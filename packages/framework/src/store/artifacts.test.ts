@@ -7,10 +7,10 @@ import {
   artifactVersions, rebuildArtifactIndex, readManifest, gcArtifacts,
   collectReferencedArtifacts, artifactBodyPath,
 } from "./artifacts";
-import { artifactHandle } from "@taicho/contracts/artifact";
+import { artifactHandle } from "@taicho-ai/contracts/artifact";
 import { annotateArtifact } from "./annotations";
 import { writeTrace, listTraces } from "./trace";
-import type { RunTrace } from "@taicho/contracts/trace";
+import type { RunTrace } from "@taicho-ai/contracts/trace";
 import { paths } from "./files";
 
 const ws = () => mkdtempSync(join(tmpdir(), "taicho-art-"));

@@ -15,7 +15,7 @@
  *     derived boot-replay cache (rolling summary + recent-K tail). Compaction changes what REPLAYS,
  *     never what is RECORDED. */
 import type { Database } from "bun:sqlite";
-import type { RunTrace } from "@taicho/contracts/trace";
+import type { RunTrace } from "@taicho-ai/contracts/trace";
 import { appendLedgerTurn, newTurnId, recordContextDecision } from "../store/conversation";
 import { createTaskState, taskIdForRun, updateTaskFromTrace, setTaskFields } from "../store/task-state";
 import { rebuildReplayCache } from "./conversation-replay";

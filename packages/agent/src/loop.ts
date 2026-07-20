@@ -3,8 +3,8 @@
  *  spend (tokens + advisory USD) and the single place caps + cancellation are enforced. */
 import { generateText, streamText, type ModelMessage, type ToolSet } from "ai";
 import type { Tracer } from "@opentelemetry/api";
-import { trace as otelTrace, context as otelContext, SpanStatusCode, chatMessageAttrs, type Span } from "@taicho/telemetry";
-import type { AgentDef } from "@taicho/contracts/agent";
+import { trace as otelTrace, context as otelContext, SpanStatusCode, chatMessageAttrs, type Span } from "@taicho-ai/telemetry";
+import type { AgentDef } from "@taicho-ai/contracts/agent";
 import type { StepInfo } from "./step-events";
 import { steerMarker } from "./prompt";
 import { ceilingHit, exhaustionMessage, SQUAD_SCOPE, type SpendLedger, type SpendScope } from "./spend-meter";

@@ -9,7 +9,7 @@
  *  SCOPE: /costs covers RUN TRACES — the agent loop and its delegation verifier. The `/teach` coaching
  *  distiller (src/coaching/teach.ts) runs OUTSIDE any run and produces no trace; its spend IS metered
  *  against the squad ceiling (spend-ledger.ts) but is not itemized here (there is no trace to attach it to). */
-import type { RunTrace } from "@taicho/contracts/trace";
+import type { RunTrace } from "@taicho-ai/contracts/trace";
 
 export interface CostGroup {
   key: string;

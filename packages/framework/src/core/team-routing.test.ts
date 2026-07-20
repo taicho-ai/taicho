@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { routeToTeam } from "./team-routing";
-import { TeamDef } from "@taicho/contracts/team";
+import { TeamDef } from "@taicho-ai/contracts/team";
 
 const team = (over: Partial<TeamDef> = {}): TeamDef =>
   TeamDef.parse({ id: "news", charter: "covers breaking stories", created: "2026-07-10T00:00:00.000Z", ...over });

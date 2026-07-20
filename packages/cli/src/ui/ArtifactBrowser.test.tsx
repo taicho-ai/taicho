@@ -2,9 +2,9 @@ import { test, expect } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureWorkspace } from "@taicho/framework/store/files";
-import { saveArtifact } from "@taicho/framework/store/artifacts";
-import { artifactHandle } from "@taicho/contracts/artifact";
+import { ensureWorkspace } from "@taicho-ai/framework/store/files";
+import { saveArtifact } from "@taicho-ai/framework/store/artifacts";
+import { artifactHandle } from "@taicho-ai/contracts/artifact";
 import { readerBodyLines } from "./ArtifactBrowser";
 
 async function ws(): Promise<string> {

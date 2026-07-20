@@ -8,8 +8,8 @@ import { Box, Text } from "ink";
 import { useEffect, type MutableRefObject } from "react";
 import type { CardKeyHandler } from "./ProposalCard";
 import { listWorkflowRows, workflowRunRows, type WorkflowRow } from "./workflow-browser-model";
-import { loadWorkflowDef } from "@taicho/framework/store/workflows";
-import type { WorkflowNode } from "@taicho/graph";
+import { loadWorkflowDef } from "@taicho-ai/framework/store/workflows";
+import type { WorkflowNode } from "@taicho-ai/graph";
 
 export interface WorkflowUiState {
   sel: number; // selected team index in the list
