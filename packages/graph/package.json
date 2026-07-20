@@ -25,7 +25,6 @@
     "!src/**/*.test.tsx"
   ],
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com",
     "access": "public"
   }
 }
