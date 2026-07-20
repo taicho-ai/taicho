@@ -13,6 +13,25 @@ curl -fsSL https://taicho.ai/install.sh | bash
 
 Status: pre-alpha, under active development. Design docs live in `docs/superpowers/specs/`.
 
+## Install from npm
+
+Requires [Bun](https://bun.sh) — the packages ship TypeScript source and the CLI runs on Bun.
+
+```
+bun add -g @taicho-ai/cli     # the `taicho` command
+```
+
+Or use the pieces as libraries:
+
+| Package | What you get |
+|---|---|
+| [`@taicho-ai/cli`](https://www.npmjs.com/package/@taicho-ai/cli) | The `taicho` terminal app (Ink REPL) |
+| [`@taicho-ai/framework`](https://www.npmjs.com/package/@taicho-ai/framework) | Multi-agent composition: delegation, teams, storage, coaching, MCP, scheduling |
+| [`@taicho-ai/agent`](https://www.npmjs.com/package/@taicho-ai/agent) | One-agent execution kernel: model loop, prompts, compaction, step events |
+| [`@taicho-ai/graph`](https://www.npmjs.com/package/@taicho-ai/graph) | Deterministic workflow schema + executor |
+| [`@taicho-ai/contracts`](https://www.npmjs.com/package/@taicho-ai/contracts) | Shared zod schemas and domain types |
+| [`@taicho-ai/telemetry`](https://www.npmjs.com/package/@taicho-ai/telemetry) | OpenTelemetry/OTLP setup + GenAI signal helpers |
+
 ## Five control surfaces
 
 1. **Enter anywhere** — talk to any agent directly (`@researcher ...`)
