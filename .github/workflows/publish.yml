@@ -1,0 +1,70 @@
+# Publish all @taicho-ai/* packages to npm on every push to main.
+#
+# Version scheme: lockstep 0.1.<commit count on main> — deterministic per
+# commit, so a re-run of the same commit is a no-op (the version-exists guard
+# skips it). In-repo package.json versions stay at the 0.1.0 base; the
+# registry's dist-tags carry the real latest.
+#
+# Auth: npm Trusted Publishing (OIDC) — each package on npmjs.com trusts this
+# repo + workflow file. No tokens, no secrets. Requires npm >= 11.5.1.
+name: publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - "scripts/**"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig.json"
+      - ".github/workflows/publish.yml"
+
+permissions:
+  contents: read
+  id-token: write # OIDC for npm trusted publishing
+
+concurrency:
+  group: publish-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # commit-count versioning needs full history
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # npm 11+, required for OIDC publish
+
+      - run: bun install --frozen-lockfile
+      - run: bun run check:boundaries
+      - run: bun run typecheck
+      - run: bun test packages
+      - run: bun run build
+
+      - name: Compute lockstep version
+        id: v
+        run: echo "version=0.1.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp packages
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: bun scripts/set-packages-version.ts "$V"
+
+      - name: Pack and publish
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          if [ "$(npm view "@taicho-ai/contracts@$V" version 2>/dev/null || true)" = "$V" ]; then
+            echo "version $V already on the registry — nothing to do"
+            exit 0
+          fi
+          for p in contracts telemetry graph agent framework cli; do
+            (cd "packages/$p" && bun pm pack)
+            npm publish "packages/$p/taicho-ai-$p-$V.tgz" --access public
+          done
